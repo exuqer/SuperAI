@@ -1,0 +1,20 @@
+import unittest
+
+from semantic_ants.core.normalization import detect_language, text_to_concept_uri, tokenize
+
+
+class NormalizationTest(unittest.TestCase):
+    def test_detect_language(self):
+        self.assertEqual(detect_language("яблоко"), "ru")
+        self.assertEqual(detect_language("apple"), "en")
+
+    def test_tokenize(self):
+        self.assertEqual(tokenize("Яблоко упало!"), ["яблоко", "упало"])
+
+    def test_concept_uri(self):
+        self.assertEqual(text_to_concept_uri("Apple", "en"), "/c/en/apple")
+        self.assertEqual(text_to_concept_uri("Красное яблоко", "ru"), "/c/ru/красное_яблоко")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantic-ants"
+version = "0.1.0"
+description = "Исследовательский прототип графовой языковой модели с муравьиным поиском и базовым обучением"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "SuperAI Research" }]
+dependencies = []
+
+[project.scripts]
+semantic-ants = "semantic_ants.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["semantic_ants*"]

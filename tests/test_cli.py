@@ -1,0 +1,69 @@
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+class CliTest(unittest.TestCase):
+    def test_analyze_json_without_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "semantic_ants",
+                    "--state-dir",
+                    tmp,
+                    "analyze",
+                    "apple",
+                    "--lang",
+                    "en",
+                    "--json",
+                    "--no-cache-refresh",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["tokens"], ["apple"])
+
+    def test_train_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "examples.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "text": "apple",
+                        "lang": "en",
+                        "target_concepts": ["/c/en/apple"],
+                        "positive_edges": [["/c/en/apple", "/c/en/fruit"]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "semantic_ants",
+                    "--state-dir",
+                    tmp,
+                    "train",
+                    str(path),
+                    "--epochs",
+                    "1",
+                    "--no-cache-refresh",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("examples=1", completed.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
