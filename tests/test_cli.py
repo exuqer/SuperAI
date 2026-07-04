@@ -30,6 +30,66 @@ class CliTest(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["tokens"], ["apple"])
 
+    def test_analyze_strength_vector_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "semantic_ants",
+                    "--state-dir",
+                    tmp,
+                    "analyze",
+                    "apple",
+                    "--lang",
+                    "en",
+                    "--strength-vector",
+                    "3",
+                    "--json",
+                    "--no-cache-refresh",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["semantic_vector"]["strength_vector"], [3])
+            self.assertTrue(payload["signal_trace"])
+
+    def test_interpret_vector_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vector.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {"uri": "/m/top/object", "label": "предмет", "layer": 0, "score": 2.0},
+                            {"uri": "/c/ru/яблоко", "label": "яблоко", "layer": 1, "score": 1.0},
+                        ],
+                        "strength_vector": [3],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "semantic_ants",
+                    "--state-dir",
+                    tmp,
+                    "interpret-vector",
+                    str(path),
+                    "--no-cache-refresh",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("предмет", completed.stdout)
+            self.assertIn("яблоко", completed.stdout)
+
     def test_train_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "examples.jsonl"
@@ -101,7 +161,8 @@ class CliTest(unittest.TestCase):
                 text=True,
             )
             self.assertIn("examples=1", completed.stdout)
-            self.assertTrue((Path(tmp) / "models" / "dialogue.pt").exists())
+            checkpoint = json.loads((Path(tmp) / "checkpoints" / "model.json").read_text(encoding="utf-8"))
+            self.assertTrue(checkpoint["accepted_answers"])
 
 
 if __name__ == "__main__":

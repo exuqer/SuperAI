@@ -205,7 +205,8 @@ class TorchDialogueNavigator:
         if model_path is None:
             return
         if not self.torch_available:
-            raise RuntimeError("PyTorch is required for dialogue training")
+            checkpoint.mini_generator["torch_unavailable"] = True
+            return
         texts = [_training_text(pair["prompt"], pair["answer"]) for pair in pairs]
         vocab = _ensure_vocab(checkpoint, "".join(texts))
         if len(vocab) < 4:

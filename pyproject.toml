@@ -11,8 +11,16 @@ requires-python = ">=3.11"
 authors = [{ name = "SuperAI Research" }]
 dependencies = []
 
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.115",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.30",
+]
+
 [project.scripts]
 semantic-ants = "semantic_ants.cli:main"
+semantic-ants-web = "semantic_ants.server.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["semantic_ants*"]

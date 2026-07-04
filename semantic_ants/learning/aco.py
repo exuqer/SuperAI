@@ -24,29 +24,40 @@ class Experience:
     target_concepts: list[str] = field(default_factory=list)
     accepted_answer: str = ""
     rejected_answers: list[str] = field(default_factory=list)
-    positive_edges: list[tuple[str, str, str]] = field(default_factory=list)
+    positive_edges: list[tuple[str, str, str] | dict[str, Any]] = field(default_factory=list)
     negative_concepts: list[str] = field(default_factory=list)
     reward: float | None = None
     lang: str = "auto"
+    strength_vector: tuple[int, ...] = ()
+    layer_targets: dict[str, list[str]] = field(default_factory=dict)
+    concept_labels: dict[str, str] = field(default_factory=dict)
     modality: str = "text"
     history: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Experience":
-        stimulus = str(data.get("stimulus") or data.get("text") or "")
+        stimulus = str(data.get("stimulus") or data.get("text") or data.get("question") or "")
         if not stimulus:
-            raise ValueError("Experience требует stimulus или text")
+            raise ValueError("Experience требует stimulus, text или question")
         reward = data.get("reward")
         return cls(
             stimulus=stimulus,
             target_concepts=[str(value) for value in data.get("target_concepts", [])],
-            accepted_answer=str(data.get("accepted_answer") or data.get("target_response") or ""),
+            accepted_answer=str(
+                data.get("accepted_answer")
+                or data.get("expected_answer")
+                or data.get("target_response")
+                or ""
+            ),
             rejected_answers=[str(value) for value in data.get("rejected_answers", [])],
-            positive_edges=[_parse_edge(value) for value in data.get("positive_edges", [])],
+            positive_edges=_parse_positive_edges(data.get("positive_edges")),
             negative_concepts=[str(value) for value in data.get("negative_concepts", [])],
             reward=float(reward) if reward is not None else None,
             lang=str(data.get("lang", "auto")),
+            strength_vector=_parse_strength_vector(data.get("strength_vector")),
+            layer_targets=_parse_layer_targets(data.get("layer_targets")),
+            concept_labels=_parse_concept_labels(data.get("concept_labels")),
             modality=str(data.get("modality", "text")),
             history=[dict(value) for value in data.get("history", []) if isinstance(value, dict)],
             metadata=dict(data.get("metadata", {})),
@@ -58,14 +69,24 @@ class Experience:
             "target_concepts": self.target_concepts,
             "accepted_answer": self.accepted_answer,
             "rejected_answers": self.rejected_answers,
-            "positive_edges": [list(edge) for edge in self.positive_edges],
+            "positive_edges": [dict(edge) if isinstance(edge, dict) else list(edge) for edge in self.positive_edges],
             "negative_concepts": self.negative_concepts,
             "reward": self.reward,
             "lang": self.lang,
+            "strength_vector": list(self.strength_vector),
+            "layer_targets": self.layer_targets,
+            "concept_labels": self.concept_labels,
             "modality": self.modality,
             "history": self.history,
             "metadata": self.metadata,
         }
+
+    @property
+    def learning_targets(self) -> list[str]:
+        values = list(self.target_concepts)
+        for concepts in self.layer_targets.values():
+            values.extend(concepts)
+        return list(dict.fromkeys(values))
 
 
 @dataclass(frozen=True)
@@ -189,7 +210,8 @@ class Judge:
         return self.rank(Experience(stimulus=stimulus), thought, candidates)
 
     def evaluate(self, experience: Experience, thought: SemanticThought, answer: str) -> RewardSignal:
-        semantic_score = self._semantic_score(experience.target_concepts, thought.active_concepts, thought.confidence)
+        target_concepts = experience.learning_targets
+        semantic_score = self._semantic_score(target_concepts, thought.active_concepts, thought.confidence)
         answer_score = self._answer_score(experience, answer)
         contradiction_penalty = self._logic_penalty(experience, thought, answer)
         human_score = float(experience.reward or 0.0)
@@ -200,7 +222,7 @@ class Judge:
             human_score=round(human_score, 4),
             details={
                 "answer": answer,
-                "target_concepts": experience.target_concepts,
+                "target_concepts": target_concepts,
                 "active_concepts": thought.active_concepts,
             },
         )
@@ -227,7 +249,7 @@ class Judge:
         if not accepted_terms:
             return 0.3
         lexical = len(accepted_terms & answer_terms) / len(accepted_terms)
-        concept_labels = [_label_from_uri(value) for value in experience.target_concepts]
+        concept_labels = [_label_from_uri(value) for value in experience.learning_targets]
         label_hits = sum(1 for label in concept_labels if label and label.lower() in answer.lower())
         concept_score = label_hits / max(len(concept_labels), 1)
         return min(1.0, lexical * 0.7 + concept_score * 0.3)
@@ -343,6 +365,7 @@ class ACOTrainer:
             persist_result=False,
             mode="graph",
             generate_response=False,
+            strength_vector=experience.strength_vector or None,
         )
         thought = SemanticThought.from_result(result)
         semantic_prompt = self.speech.build_prompt(
@@ -368,6 +391,7 @@ class ACOTrainer:
         positive = signal.total >= 0.5 or bool(experience.accepted_answer or experience.positive_edges)
         negative = signal.total < 0.2 or bool(experience.rejected_answers or experience.negative_concepts)
         if positive:
+            self._remember_labels(experience)
             self._reinforce(
                 experience,
                 thought,
@@ -392,6 +416,10 @@ class ACOTrainer:
         if report:
             report.experiences += 1
         return signal
+
+    def _remember_labels(self, experience: Experience) -> None:
+        for concept, label in experience.concept_labels.items():
+            self.engine.checkpoint.remember_concept_label(concept, label)
 
     def dream(self, steps: int = 100) -> dict[str, Any]:
         checkpoint: Checkpoint = self.engine.checkpoint
@@ -491,7 +519,8 @@ class ACOTrainer:
         defer_speech: bool = False,
     ) -> None:
         checkpoint: Checkpoint = self.engine.checkpoint
-        target = set(experience.target_concepts)
+        learning_targets = experience.learning_targets
+        target = set(learning_targets)
         selected_routes = [route for route in routes if target & set(route.concepts)] if target else []
         if not selected_routes:
             selected_routes = routes[:3]
@@ -504,9 +533,49 @@ class ACOTrainer:
                 checkpoint.reinforce_edge(step.start, step.relation, step.end, amount=step_amount)
                 if report:
                     report.reinforced_edges += 1
-        for concept in [*experience.target_concepts, *thought.active_concepts]:
+        for concept in [*learning_targets, *thought.active_concepts]:
             checkpoint.reinforce_concept(concept, amount=amount)
-        for start, relation, end in experience.positive_edges:
+        for edge_value in experience.positive_edges:
+            if isinstance(edge_value, dict):
+                edge_start = str(edge_value["start"])
+                edge_relation = str(edge_value.get("relation", "LearnedRelatedTo"))
+                edge_end = str(edge_value["end"])
+                edge_weight = max(float(edge_value.get("weight", 1.0)), amount)
+                edge_layer = int(edge_value.get("layer", 1))
+                edge_distance = float(edge_value.get("distance", 1.0))
+                edge_type = str(edge_value.get("edge_type", "semantic"))
+                raw_metadata = edge_value.get("metadata", {})
+                edge_metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else dict(raw_metadata or {})
+                checkpoint.add_custom_edge(
+                    edge_start,
+                    edge_end,
+                    relation=edge_relation,
+                    weight=edge_weight,
+                    layer=edge_layer,
+                    distance=edge_distance,
+                    edge_type=edge_type,
+                    metadata=edge_metadata,
+                )
+                if checkpoint.add_learned_bridge(
+                    edge_start,
+                    edge_relation,
+                    edge_end,
+                    weight=edge_weight,
+                    confirmed=True,
+                    metadata={
+                        **edge_metadata,
+                        "layer": edge_layer,
+                        "distance": edge_distance,
+                        "edge_type": edge_type,
+                    },
+                ):
+                    if report:
+                        report.learned_bridges += 1
+                checkpoint.reinforce_edge(edge_start, edge_relation, edge_end, amount=edge_weight + 0.3)
+                if report:
+                    report.reinforced_edges += 1
+                continue
+            start, relation, end = edge_value
             checkpoint.add_custom_edge(start, end, relation=relation, weight=max(1.0, amount))
             if checkpoint.add_learned_bridge(start, relation, end, weight=max(1.0, amount), confirmed=True):
                 if report:
@@ -514,14 +583,36 @@ class ACOTrainer:
             checkpoint.reinforce_edge(start, relation, end, amount=amount + 0.3)
             if report:
                 report.reinforced_edges += 1
-        if not experience.positive_edges and len(experience.target_concepts) >= 2:
-            for left, right in zip(experience.target_concepts, experience.target_concepts[1:]):
+        route_starts = list(dict.fromkeys(route.start for route in routes))
+        for layer_key, concepts in experience.layer_targets.items():
+            layer = int(layer_key)
+            relation = "InTopDomain" if layer == 0 else "LayerTarget"
+            edge_type = "domain" if layer == 0 else "semantic"
+            for start in route_starts:
+                for concept in concepts:
+                    if start == concept:
+                        continue
+                    checkpoint.add_custom_edge(
+                        start,
+                        concept,
+                        relation=relation,
+                        weight=max(1.0, amount),
+                        layer=layer,
+                        distance=1.0,
+                        edge_type=edge_type,
+                        metadata={"layer_target": layer_key},
+                    )
+                    checkpoint.reinforce_edge(start, relation, concept, amount=amount + 0.2)
+                    if report:
+                        report.reinforced_edges += 1
+        if not experience.positive_edges and len(learning_targets) >= 2:
+            for left, right in zip(learning_targets, learning_targets[1:]):
                 if checkpoint.add_learned_bridge(left, "LearnedBridge", right, weight=0.4, confirmed=True):
                     if report:
                         report.learned_bridges += 1
         accepted = experience.accepted_answer or answer
         if accepted:
-            concepts = experience.target_concepts or thought.active_concepts
+            concepts = learning_targets or thought.active_concepts
             prompt = semantic_prompt or thought.to_prompt()
             if defer_speech:
                 self._deferred_dialogue_pairs.append(
@@ -566,7 +657,12 @@ class ACOTrainer:
                 checkpoint.penalize_edge(step.start, step.relation, step.end, amount=amount)
                 if report:
                     report.evaporated_edges += 1
+        route_starts = list(dict.fromkeys(route.start for route in routes))
         for concept in experience.negative_concepts:
+            for start in route_starts:
+                checkpoint.penalize_edge(start, "RelatedTo", concept, amount=amount)
+                if report:
+                    report.evaporated_edges += 1
             checkpoint.suppress_concept(concept, amount=0.75)
             if report:
                 report.suppressed_concepts += 1
@@ -605,18 +701,90 @@ class ACOTrainer:
 
 
 def _parse_edge(value: Any) -> tuple[str, str, str]:
-    if isinstance(value, dict):
-        return (
-            str(value["start"]),
-            str(value.get("relation", "LearnedRelatedTo")),
-            str(value["end"]),
-        )
     if isinstance(value, (list, tuple)):
         if len(value) == 2:
             return str(value[0]), "LearnedRelatedTo", str(value[1])
         if len(value) == 3:
             return str(value[0]), str(value[1]), str(value[2])
     raise ValueError(f"Некорректное positive_edges значение: {value!r}")
+
+
+def _parse_positive_edges(value: Any) -> list[tuple[str, str, str] | dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, dict) and {"start", "end"} <= set(value):
+        return [_parse_positive_edge_dict(value)]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"Некорректное positive_edges значение: {value!r}")
+    return [_parse_positive_edge(item) for item in value]
+
+
+def _parse_positive_edge(value: Any) -> tuple[str, str, str] | dict[str, Any]:
+    if isinstance(value, dict):
+        return _parse_positive_edge_dict(value)
+    return _parse_edge(value)
+
+
+def _parse_positive_edge_dict(value: dict[str, Any]) -> dict[str, Any]:
+    if "start" not in value or "end" not in value:
+        raise ValueError(f"Некорректное positive_edges значение: {value!r}")
+    edge: dict[str, Any] = {
+        "start": str(value["start"]),
+        "relation": str(value.get("relation", "LearnedRelatedTo")),
+        "end": str(value["end"]),
+    }
+    if "weight" in value and value["weight"] is not None:
+        edge["weight"] = float(value["weight"])
+    if "layer" in value and value["layer"] is not None:
+        edge["layer"] = int(value["layer"])
+    if "distance" in value and value["distance"] is not None:
+        edge["distance"] = float(value["distance"])
+    if "edge_type" in value and value["edge_type"] is not None:
+        edge["edge_type"] = str(value["edge_type"])
+    metadata = value.get("metadata", {})
+    if metadata is not None:
+        edge["metadata"] = dict(metadata) if isinstance(metadata, dict) else dict(metadata)
+    for key in ("surface_text",):
+        if key in value and value[key] is not None:
+            edge[key] = value[key]
+    return edge
+
+
+def _parse_strength_vector(value: Any) -> tuple[int, ...]:
+    if value is None or value == "":
+        return ()
+    if isinstance(value, int):
+        return (max(value, 0),)
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+        return tuple(max(int(part), 0) for part in parts)
+    if isinstance(value, (list, tuple)):
+        return tuple(max(int(part), 0) for part in value)
+    raise ValueError(f"Некорректный strength_vector: {value!r}")
+
+
+def _parse_layer_targets(value: Any) -> dict[str, list[str]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Некорректный layer_targets: {value!r}")
+    result: dict[str, list[str]] = {}
+    for layer, concepts in value.items():
+        if isinstance(concepts, str):
+            result[str(layer)] = [concepts]
+        elif isinstance(concepts, (list, tuple)):
+            result[str(layer)] = [str(concept) for concept in concepts]
+        else:
+            raise ValueError(f"Некорректные layer_targets[{layer!r}]: {concepts!r}")
+    return result
+
+
+def _parse_concept_labels(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Некорректный concept_labels: {value!r}")
+    return {str(concept): str(label) for concept, label in value.items() if str(label).strip()}
 
 
 def _looks_causal(relation: str) -> bool:

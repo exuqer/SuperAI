@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.semantic_ants/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+web/node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/

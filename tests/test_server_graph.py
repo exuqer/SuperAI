@@ -1,0 +1,64 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from semantic_ants.engine import EngineConfig, SemanticEngine
+from semantic_ants.learning import CheckpointStore, FeedbackTrainer
+from semantic_ants.server.graph import concept_detail, graph_from_checkpoint, graph_snapshot, trace_interpretation
+from tests.fixtures import FakeConceptNetClient
+
+
+class ServerGraphTest(unittest.TestCase):
+    def make_engine(self, tmp: str) -> SemanticEngine:
+        store = CheckpointStore(Path(tmp) / "model.json")
+        return SemanticEngine(
+            config=EngineConfig(state_dir=Path(tmp), allow_network=False, ant_count=4, max_depth=2),
+            client=FakeConceptNetClient(),
+            store=store,
+        )
+
+    def test_analyze_graph_snapshot_marks_signal_edges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            result, graph = engine.analyze_with_graph("apple", lang="en", strength_vector=(3,))
+            snapshot = graph_snapshot(graph, engine.checkpoint, result)
+            self.assertTrue(snapshot["nodes"])
+            self.assertTrue(snapshot["edges"])
+            self.assertTrue(any(edge["signal"]["active"] for edge in snapshot["edges"]))
+            self.assertTrue(any(node["signal"]["active"] for node in snapshot["nodes"]))
+
+    def test_checkpoint_graph_filter_by_layer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            graph = graph_from_checkpoint(engine.checkpoint)
+            snapshot = graph_snapshot(graph, engine.checkpoint, layer=0, limit=50)
+            self.assertTrue(snapshot["edges"])
+            self.assertTrue(all(edge["layer"] == 0 for edge in snapshot["edges"]))
+
+    def test_concept_detail_contains_edges_and_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            detail = concept_detail(engine.checkpoint, "/m/top/object")
+            self.assertEqual(detail["node"]["uri"], "/m/top/object")
+            self.assertTrue(detail["incoming"] or detail["outgoing"])
+
+    def test_trace_interpretation_lists_active_edges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            result = engine.analyze("apple", lang="en", strength_vector=(3,))
+            payload = trace_interpretation(result)
+            self.assertTrue(payload["active_edge_ids"])
+            self.assertTrue(payload["chains"])
+
+    def test_feedback_changes_checkpoint_for_api_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            result = engine.analyze("apple", lang="en")
+            before = dict(engine.checkpoint.suppressed_concepts)
+            feedback = FeedbackTrainer(engine, engine.store).apply(result.result_id, score=1)
+            self.assertGreater(feedback["changed_edges"], 0)
+            self.assertNotEqual(before, engine.checkpoint.suppressed_concepts)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from semantic_ants.learning.checkpoint import Checkpoint
 
-SEED_VERSION = 3
+SEED_VERSION = 4
 
 ALPHABETS = {
     "ru": list("абвгдеёжзийклмнопрстуфхцчшщъыьэюя"),
@@ -176,6 +176,152 @@ ALIASES = {
         "head": "/c/en/head",
         "floor": "/c/en/floor",
     },
+}
+
+TOP_DOMAINS = {
+    "object": {
+        "uri": "/m/top/object",
+        "aliases": {"ru": ["предмет", "вещь", "объект"], "en": ["object", "thing"]},
+        "definition": "область вещей и материальных объектов",
+    },
+    "action": {
+        "uri": "/m/top/action",
+        "aliases": {"ru": ["действие", "событие"], "en": ["action", "event"]},
+        "definition": "область процессов, движений и изменений",
+    },
+    "person": {
+        "uri": "/m/top/person",
+        "aliases": {"ru": ["человек", "персона"], "en": ["person", "human"]},
+        "definition": "область людей, ролей и участников",
+    },
+    "place": {
+        "uri": "/m/top/place",
+        "aliases": {"ru": ["место", "пространство"], "en": ["place", "space"]},
+        "definition": "область мест, направлений и окружения",
+    },
+    "emotion": {
+        "uri": "/m/top/emotion",
+        "aliases": {"ru": ["эмоция", "чувство"], "en": ["emotion", "feeling"]},
+        "definition": "область чувств и эмоциональной окраски",
+    },
+    "language": {
+        "uri": "/m/top/language",
+        "aliases": {"ru": ["язык", "речь"], "en": ["language", "speech"]},
+        "definition": "область слов, фраз и смыслов",
+    },
+    "number": {
+        "uri": "/m/top/number",
+        "aliases": {"ru": ["число", "количество"], "en": ["number", "quantity"]},
+        "definition": "область счета, порядка и количества",
+    },
+    "nature": {
+        "uri": "/m/top/nature",
+        "aliases": {"ru": ["природа", "мир"], "en": ["nature", "world"]},
+        "definition": "область природных явлений и живого мира",
+    },
+    "dialogue": {
+        "uri": "/m/top/dialogue",
+        "aliases": {"ru": ["диалог", "разговор"], "en": ["dialogue", "conversation"]},
+        "definition": "область общения, вопросов и ответов",
+    },
+    "mind": {
+        "uri": "/m/top/mind",
+        "aliases": {"ru": ["мышление", "мысль"], "en": ["mind", "thought"]},
+        "definition": "область обучения, воображения и понимания",
+    },
+    "perception": {
+        "uri": "/m/top/perception",
+        "aliases": {"ru": ["восприятие", "цвет"], "en": ["perception", "color"]},
+        "definition": "область видимых и ощущаемых свойств",
+    },
+    "body": {
+        "uri": "/m/top/body",
+        "aliases": {"ru": ["тело", "часть тела"], "en": ["body"]},
+        "definition": "область тела, питания и физических потребностей",
+    },
+}
+
+CATEGORY_TO_TOP = {
+    "body": "body",
+    "dialogue": "dialogue",
+    "emotion": "emotion",
+    "language": "language",
+    "math": "number",
+    "mind": "mind",
+    "nature": "nature",
+    "object": "object",
+    "perception": "perception",
+    "person": "person",
+    "place": "place",
+}
+
+TOP_BRIDGES = [
+    ("object", "action", 2.6),
+    ("object", "place", 3.0),
+    ("object", "perception", 2.4),
+    ("object", "body", 3.2),
+    ("action", "place", 2.8),
+    ("action", "emotion", 3.8),
+    ("action", "person", 3.0),
+    ("person", "emotion", 2.4),
+    ("person", "dialogue", 2.6),
+    ("person", "mind", 2.8),
+    ("language", "dialogue", 2.2),
+    ("language", "mind", 2.6),
+    ("nature", "place", 3.0),
+    ("nature", "perception", 3.0),
+    ("number", "language", 3.4),
+]
+
+SEED_TOP_MAPPINGS = {
+    "/c/ru/привет": "dialogue",
+    "/c/en/hello": "dialogue",
+    "/c/ru/пока": "dialogue",
+    "/c/en/goodbye": "dialogue",
+    "/c/ru/спасибо": "dialogue",
+    "/c/en/thanks": "dialogue",
+    "/c/ru/кто": "dialogue",
+    "/c/en/who": "dialogue",
+    "/c/ru/уметь": "action",
+    "/c/ru/мочь": "action",
+    "/c/en/can": "action",
+    "/c/ru/алфавит": "language",
+    "/c/ru/буква": "language",
+    "/c/en/alphabet": "language",
+    "/c/en/letter": "language",
+    "/c/ru/слово": "language",
+    "/c/en/word": "language",
+    "/c/ru/смысл": "language",
+    "/c/en/meaning": "language",
+    "/c/ru/яблоко": "object",
+    "/c/en/apple": "object",
+    "/m/object/apple": "object",
+    "/c/ru/падать": "action",
+    "/c/en/fall": "action",
+    "/m/action/fall": "action",
+    "/c/ru/голова": "body",
+    "/c/en/head": "body",
+    "/m/body/head": "body",
+    "/c/ru/пол": "place",
+    "/c/en/floor": "place",
+    "/m/place/floor": "place",
+    "/m/science/newton_story": "mind",
+    "/c/ru/саша": "person",
+    "/m/entity/person": "person",
+    "/c/ru/идти": "action",
+    "/m/action/move": "action",
+    "/c/ru/шоссе": "place",
+    "/m/place/road": "place",
+    "/m/dialogue/greeting": "dialogue",
+    "/m/dialogue/farewell": "dialogue",
+    "/m/dialogue/gratitude": "dialogue",
+    "/m/dialogue/identity_question": "dialogue",
+    "/m/dialogue/capability_question": "dialogue",
+    "/m/dialogue/simple_chat": "dialogue",
+    "/m/language/alphabet": "language",
+    "/m/language/word": "language",
+    "/m/language/meaning": "language",
+    "/m/language/common_words": "language",
 }
 
 BASIC_CONCEPTS = [
@@ -534,6 +680,7 @@ class SeedReport:
     alphabets: int = 0
     common_words: int = 0
     basic_concepts: int = 0
+    top_layer: int = 0
     changed: bool = False
 
     def to_dict(self) -> dict[str, int | bool]:
@@ -544,6 +691,7 @@ class SeedReport:
             "alphabets": self.alphabets,
             "common_words": self.common_words,
             "basic_concepts": self.basic_concepts,
+            "top_layer": self.top_layer,
             "changed": self.changed,
         }
 
@@ -558,6 +706,7 @@ def bootstrap_builtin_knowledge(checkpoint: Checkpoint, force: bool = False) -> 
     alphabets = _load_alphabets(checkpoint)
     common_words = _load_common_words(checkpoint)
     basic_concepts = _load_basic_concepts(checkpoint)
+    top_layer = _load_top_layer(checkpoint)
     checkpoint.metadata["builtin_seed_version"] = SEED_VERSION
     checkpoint.metadata["builtin_seed_loaded"] = True
     return SeedReport(
@@ -567,6 +716,7 @@ def bootstrap_builtin_knowledge(checkpoint: Checkpoint, force: bool = False) -> 
         alphabets=alphabets,
         common_words=common_words,
         basic_concepts=basic_concepts,
+        top_layer=top_layer,
         changed=True,
     )
 
@@ -667,6 +817,103 @@ def _load_basic_concepts(checkpoint: Checkpoint) -> int:
     checkpoint.metadata["basic_concepts"] = basic_concepts
     checkpoint.metadata["concept_definitions"] = definitions
     return total
+
+
+def _load_top_layer(checkpoint: Checkpoint) -> int:
+    total = 0
+    raw_definitions = checkpoint.metadata.get("concept_definitions", {})
+    definitions = dict(raw_definitions) if isinstance(raw_definitions, dict) else {}
+    top_domains: dict[str, dict[str, str]] = {}
+    for key, info in TOP_DOMAINS.items():
+        uri = str(info["uri"])
+        top_info = {
+            "definition": str(info["definition"]),
+            "category": "top",
+            "top_domain": key,
+        }
+        top_domains[key] = {"uri": uri, **top_info}
+        definitions[uri] = top_info
+        checkpoint.add_custom_edge(
+            "/m/top/root",
+            uri,
+            relation="TopDomain",
+            weight=0.2,
+            layer=0,
+            distance=8.0,
+            edge_type="hierarchy",
+            metadata={"top_domain": key},
+        )
+        checkpoint.reinforce_edge("/m/top/root", "TopDomain", uri, amount=0.15)
+        total += 1
+        aliases = info.get("aliases", {})
+        if isinstance(aliases, dict):
+            for lang, words in aliases.items():
+                if not isinstance(words, list):
+                    continue
+                for word in words:
+                    clean = str(word).lower()
+                    checkpoint.aliases[clean] = uri
+                    total += 1
+
+    for left, right, distance in TOP_BRIDGES:
+        left_uri = TOP_DOMAINS[left]["uri"]
+        right_uri = TOP_DOMAINS[right]["uri"]
+        checkpoint.add_custom_edge(
+            left_uri,
+            right_uri,
+            relation="TopBridge",
+            weight=0.55,
+            layer=0,
+            distance=distance,
+            edge_type="bridge",
+            metadata={"top_bridge": True, "domains": [left, right]},
+        )
+        total += 1
+
+    for concept_uri, domain_key in SEED_TOP_MAPPINGS.items():
+        total += _add_top_domain_edge(checkpoint, concept_uri, domain_key)
+
+    for item in BASIC_CONCEPTS:
+        category = str(item["category"])
+        domain_key = CATEGORY_TO_TOP.get(category)
+        if not domain_key:
+            continue
+        uri = str(item["uri"])
+        total += _add_top_domain_edge(checkpoint, uri, domain_key)
+        category_uri = f"/m/basic/category/{category}"
+        total += _add_top_domain_edge(checkpoint, category_uri, domain_key)
+        aliases = item.get("aliases", {})
+        if not isinstance(aliases, dict):
+            continue
+        for lang, words in aliases.items():
+            if not isinstance(words, list) or not words:
+                continue
+            word_uri = f"/c/{lang}/{_uri_word(str(words[0]))}"
+            total += _add_top_domain_edge(checkpoint, word_uri, domain_key)
+
+    checkpoint.metadata["top_domains"] = top_domains
+    checkpoint.metadata["concept_definitions"] = definitions
+    return total
+
+
+def _add_top_domain_edge(checkpoint: Checkpoint, concept_uri: str, domain_key: str) -> int:
+    domain = TOP_DOMAINS.get(domain_key)
+    if not domain:
+        return 0
+    before = len(checkpoint.custom_edges)
+    domain_uri = str(domain["uri"])
+    checkpoint.add_custom_edge(
+        concept_uri,
+        domain_uri,
+        relation="InTopDomain",
+        weight=2.2,
+        layer=0,
+        distance=1.0,
+        edge_type="domain",
+        metadata={"top_domain": domain_key},
+    )
+    checkpoint.reinforce_edge(concept_uri, "InTopDomain", domain_uri, amount=0.2)
+    return 1 if len(checkpoint.custom_edges) != before else 0
 
 
 def _uri_word(value: str) -> str:

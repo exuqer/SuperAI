@@ -15,6 +15,7 @@ class AntConfig:
     max_depth: int = 4
     seed: int = 42
     exploration: float = 0.12
+    strength_vector: tuple[int, ...] = ()
 
 
 class AntColony:
@@ -52,11 +53,18 @@ class AntColony:
         steps: list[AntStep] = []
         visited = {start}
         total_score = 0.0
-        for _ in range(self.config.max_depth):
-            candidates = [edge for edge in graph.neighbors(current) if edge.end not in visited]
+        budgets = list(self.config.strength_vector) if self.config.strength_vector else None
+        max_steps = sum(max(value, 0) for value in budgets) if budgets is not None else self.config.max_depth
+        for _ in range(max_steps):
+            candidates = [
+                edge
+                for edge in graph.neighbors(current)
+                if edge.end not in visited and self._has_strength(edge.layer, budgets)
+            ]
             if not candidates:
                 break
             edge, pheromone, score = self._choose_edge(candidates, checkpoint, rng)
+            remaining_strength = self._consume_strength(edge.layer, budgets)
             steps.append(
                 AntStep(
                     start=edge.start,
@@ -66,6 +74,10 @@ class AntColony:
                     pheromone=pheromone,
                     score=score,
                     source=edge.source,
+                    layer=edge.layer,
+                    distance=edge.distance,
+                    remaining_strength=remaining_strength,
+                    edge_type=edge.edge_type,
                 )
             )
             total_score += score
@@ -84,7 +96,8 @@ class AntColony:
             pheromone = checkpoint.pheromone_for(edge)
             concept_pheromone = checkpoint.concept_pheromone_for(edge.end)
             penalty = checkpoint.penalty_for(edge.end)
-            score = max(edge.weight, 0.01) * pheromone * concept_pheromone * penalty
+            distance = max(float(edge.distance), 0.01)
+            score = max(edge.weight, 0.01) * pheromone * concept_pheromone * penalty / distance
             scored.append((edge, pheromone, max(score, 0.0001)))
         if rng.random() < self.config.exploration:
             edge, pheromone, score = rng.choice(scored)
@@ -101,3 +114,16 @@ class AntColony:
     def _seed_for(self, context_key: str) -> int:
         digest = hashlib.sha256(context_key.encode("utf-8")).hexdigest()
         return self.config.seed + int(digest[:8], 16)
+
+    def _has_strength(self, layer: int, budgets: list[int] | None) -> bool:
+        if budgets is None:
+            return True
+        if layer < 0 or layer >= len(budgets):
+            return False
+        return budgets[layer] > 0
+
+    def _consume_strength(self, layer: int, budgets: list[int] | None) -> int | None:
+        if budgets is None:
+            return None
+        budgets[layer] = max(budgets[layer] - 1, 0)
+        return budgets[layer]

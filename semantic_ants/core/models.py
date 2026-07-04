@@ -12,6 +12,7 @@ class ConceptNode:
     label: str
     language: str
     source: str = "local"
+    layer: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -20,6 +21,7 @@ class ConceptNode:
             "label": self.label,
             "language": self.language,
             "source": self.source,
+            "layer": self.layer,
             "metadata": self.metadata,
         }
 
@@ -34,6 +36,9 @@ class SemanticEdge:
     weight: float = 1.0
     source: str = "local"
     surface_text: str | None = None
+    layer: int = 1
+    distance: float = 1.0
+    edge_type: str = "semantic"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -48,6 +53,9 @@ class SemanticEdge:
             weight=max(self.weight * 0.7, 0.01),
             source=self.source,
             surface_text=self.surface_text,
+            layer=self.layer,
+            distance=self.distance,
+            edge_type=self.edge_type,
             metadata={**self.metadata, "reversed": True},
         )
 
@@ -59,6 +67,9 @@ class SemanticEdge:
             "weight": self.weight,
             "source": self.source,
             "surface_text": self.surface_text,
+            "layer": self.layer,
+            "distance": self.distance,
+            "edge_type": self.edge_type,
             "metadata": self.metadata,
         }
 
@@ -74,6 +85,10 @@ class AntStep:
     pheromone: float
     score: float
     source: str = "local"
+    layer: int = 1
+    distance: float = 1.0
+    remaining_strength: int | None = None
+    edge_type: str = "semantic"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +99,10 @@ class AntStep:
             "pheromone": self.pheromone,
             "score": self.score,
             "source": self.source,
+            "layer": self.layer,
+            "distance": self.distance,
+            "remaining_strength": self.remaining_strength,
+            "edge_type": self.edge_type,
         }
 
 
@@ -127,6 +146,8 @@ class SemanticResult:
     sources: list[str]
     session_id: str | None = None
     context_turns: list[dict[str, Any]] = field(default_factory=list)
+    semantic_vector: dict[str, Any] = field(default_factory=dict)
+    signal_trace: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -141,6 +162,8 @@ class SemanticResult:
             "sources": self.sources,
             "session_id": self.session_id,
             "context_turns": self.context_turns,
+            "semantic_vector": self.semantic_vector,
+            "signal_trace": self.signal_trace,
         }
 
 

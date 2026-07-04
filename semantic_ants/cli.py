@@ -34,6 +34,7 @@ def analyze_command(args: argparse.Namespace) -> int:
         mode=args.mode,
         session_id=getattr(args, "session_id", None),
         reset_session=getattr(args, "reset_session", False),
+        strength_vector=args.strength_vector,
     )
     if args.json:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -180,6 +181,7 @@ def _chat_once(engine: SemanticEngine, text: str, args: argparse.Namespace) -> i
         top_concepts=args.top_concepts,
         mode=args.mode,
         session_id=args.session_id,
+        strength_vector=args.strength_vector,
     )
     if args.json:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -204,7 +206,11 @@ def eval_command(args: argparse.Namespace) -> int:
                 continue
             example = json.loads(stripped)
             total += 1
-            result = engine.analyze(str(example["text"]), lang=str(example.get("lang", "auto")))
+            result = engine.analyze(
+                str(example["text"]),
+                lang=str(example.get("lang", "auto")),
+                strength_vector=args.strength_vector,
+            )
             expected = set(map(str, example.get("target_concepts", [])))
             actual = {item["uri"] for item in result.activated_concepts}
             ok = bool(expected & actual) if expected else True
@@ -236,6 +242,15 @@ def export_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def interpret_vector_command(args: argparse.Namespace) -> int:
+    engine = _engine_from_args(args)
+    raw = sys.stdin.read() if args.path == "-" else Path(args.path).read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    response = engine.interpret_vector(payload)
+    print(json.dumps({"response": response}, ensure_ascii=False, indent=2) if args.json else response)
+    return 0
+
+
 def _engine_from_args(args: argparse.Namespace) -> SemanticEngine:
     config = EngineConfig(
         state_dir=Path(args.state_dir),
@@ -245,6 +260,7 @@ def _engine_from_args(args: argparse.Namespace) -> SemanticEngine:
         top_concepts=getattr(args, "top_concepts", 5),
         allow_network=not getattr(args, "no_cache_refresh", False),
         autoload_builtin=not getattr(args, "no_builtin", False),
+        strength_vector=getattr(args, "strength_vector", ()),
     )
     return SemanticEngine(config=config)
 
@@ -338,6 +354,13 @@ def _parser() -> argparse.ArgumentParser:
     inspect_memory.add_argument("--no-builtin", action="store_true")
     inspect_memory.set_defaults(handler=inspect_memory_command)
 
+    interpret_vector = subparsers.add_parser("interpret-vector")
+    interpret_vector.add_argument("path", nargs="?", default="-")
+    interpret_vector.add_argument("--json", action="store_true")
+    interpret_vector.add_argument("--no-cache-refresh", action="store_true")
+    interpret_vector.add_argument("--no-builtin", action="store_true")
+    interpret_vector.set_defaults(handler=interpret_vector_command)
+
     export = subparsers.add_parser("export")
     export.add_argument("destination")
     export.set_defaults(handler=export_command)
@@ -349,6 +372,7 @@ def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ants", type=int, default=32)
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--top-concepts", type=int, default=5)
+    parser.add_argument("--strength-vector", type=_strength_vector, default=())
     parser.add_argument("--no-cache-refresh", action="store_true")
     parser.add_argument("--no-builtin", action="store_true")
 
@@ -364,6 +388,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "export",
         "feedback",
         "inspect-memory",
+        "interpret-vector",
         "learn",
         "learn-dialogues",
         "train",
@@ -377,3 +402,13 @@ def _split_csv(value: str | None) -> list[str] | None:
     if not value:
         return None
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _strength_vector(value: str) -> tuple[int, ...]:
+    try:
+        parts = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+        if not parts:
+            raise ValueError
+        return tuple(max(int(part), 0) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("ожидается список целых чисел, например 3 или 3,8") from exc

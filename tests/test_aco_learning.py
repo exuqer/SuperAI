@@ -39,6 +39,32 @@ class ACOLearningTest(unittest.TestCase):
             self.assertGreater(engine.checkpoint.pheromone_for(edge), before)
             self.assertTrue(engine.checkpoint.accepted_answers)
 
+    def test_positive_edge_dict_preserves_layer_metadata(self):
+        experience = Experience.from_dict(
+            {
+                "stimulus": "apple",
+                "lang": "en",
+                "positive_edges": [
+                    {
+                        "start": "/c/en/apple",
+                        "relation": "InTopDomain",
+                        "end": "/m/top/object",
+                        "layer": 0,
+                        "distance": 8,
+                        "edge_type": "domain",
+                        "metadata": {"source": "web_training_form"},
+                    }
+                ],
+            }
+        )
+        self.assertIsInstance(experience.positive_edges[0], dict)
+        edge = experience.positive_edges[0]
+        self.assertEqual(edge["layer"], 0)
+        self.assertEqual(edge["distance"], 8.0)
+        self.assertEqual(edge["edge_type"], "domain")
+        self.assertEqual(edge["metadata"]["source"], "web_training_form")
+        self.assertEqual(experience.to_dict()["positive_edges"][0]["metadata"]["source"], "web_training_form")
+
     def test_bad_experience_evaporates_false_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)

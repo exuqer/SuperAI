@@ -15,7 +15,7 @@ from semantic_ants.core.models import SemanticEdge, edge_key
 class Checkpoint:
     """Обучаемый слой поверх внешнего графа знаний."""
 
-    version: int = 2
+    version: int = 3
     pheromones: dict[str, float] = field(default_factory=dict)
     concept_pheromones: dict[str, float] = field(default_factory=dict)
     suppressed_concepts: dict[str, float] = field(default_factory=dict)
@@ -95,6 +95,20 @@ class Checkpoint:
         item = self.response_memory.setdefault(key, {"response": response, "weight": 0.0})
         item["response"] = response
         item["weight"] = float(item.get("weight", 0.0)) + amount
+
+    def remember_concept_label(self, concept_uri: str, label: str) -> None:
+        clean_label = " ".join(label.split())
+        if not concept_uri or not clean_label:
+            return
+        labels = self.metadata.setdefault("concept_labels", {})
+        if isinstance(labels, dict):
+            labels[concept_uri] = clean_label
+        definitions = self.metadata.setdefault("concept_definitions", {})
+        if isinstance(definitions, dict):
+            raw = definitions.get(concept_uri, {})
+            info = dict(raw) if isinstance(raw, dict) else {}
+            info["label"] = clean_label
+            definitions[concept_uri] = info
 
     def remember_accepted_answer(
         self,
@@ -198,6 +212,9 @@ class Checkpoint:
                     weight=float(raw.get("weight", 1.0)),
                     source="learned",
                     surface_text=raw.get("surface_text"),
+                    layer=int(raw.get("layer", 1)),
+                    distance=float(raw.get("distance", 1.0)),
+                    edge_type=str(raw.get("edge_type", "semantic")),
                     metadata=dict(raw.get("metadata", {})),
                 )
                 if edge.key in seen:
@@ -214,15 +231,36 @@ class Checkpoint:
         end: str,
         relation: str = "LearnedRelatedTo",
         weight: float = 1.0,
+        layer: int = 1,
+        distance: float = 1.0,
+        edge_type: str = "semantic",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         candidate = {
             "start": start,
             "end": end,
             "relation": relation,
             "weight": weight,
+            "layer": layer,
+            "distance": distance,
+            "edge_type": edge_type,
         }
-        if candidate not in self.custom_edges:
-            self.custom_edges.append(candidate)
+        if metadata:
+            candidate["metadata"] = dict(metadata)
+        for existing in self.custom_edges:
+            if (
+                existing.get("start") == start
+                and existing.get("end") == end
+                and existing.get("relation") == relation
+            ):
+                existing["weight"] = max(float(existing.get("weight", 1.0)), weight)
+                existing.setdefault("layer", layer)
+                existing.setdefault("distance", distance)
+                existing.setdefault("edge_type", edge_type)
+                if metadata:
+                    existing["metadata"] = {**dict(existing.get("metadata", {})), **dict(metadata)}
+                return
+        self.custom_edges.append(candidate)
 
     def add_learned_bridge(
         self,
@@ -239,6 +277,9 @@ class Checkpoint:
             "end": end,
             "weight": weight,
             "confirmed": confirmed,
+            "layer": int((metadata or {}).get("layer", 1)),
+            "distance": float((metadata or {}).get("distance", 1.0)),
+            "edge_type": str((metadata or {}).get("edge_type", "semantic")),
             "metadata": dict(metadata or {}),
         }
         for existing in self.learned_bridges:
@@ -254,7 +295,16 @@ class Checkpoint:
                 existing["metadata"] = {**dict(existing.get("metadata", {})), **bridge["metadata"]}
                 return False
         self.learned_bridges.append(bridge)
-        self.add_custom_edge(start, end, relation=relation, weight=weight)
+        self.add_custom_edge(
+            start,
+            end,
+            relation=relation,
+            weight=weight,
+            layer=int(bridge.get("layer", 1)),
+            distance=float(bridge.get("distance", 1.0)),
+            edge_type=str(bridge.get("edge_type", "semantic")),
+            metadata=dict(metadata or {}),
+        )
         return True
 
     def to_dict(self) -> dict[str, Any]:
@@ -283,7 +333,7 @@ class Checkpoint:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Checkpoint":
         return cls(
-            version=max(int(data.get("version", 1)), 2),
+            version=max(int(data.get("version", 1)), 3),
             pheromones=dict(data.get("pheromones", {})),
             concept_pheromones=dict(data.get("concept_pheromones", {})),
             suppressed_concepts=dict(data.get("suppressed_concepts", {})),

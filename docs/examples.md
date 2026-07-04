@@ -4,9 +4,10 @@
 
 ```powershell
 python -m semantic_ants analyze "яблоко упало на голову" --trace
+python -m semantic_ants analyze "яблоко упало" --strength-vector 3 --trace --json
 ```
 
-Выводит короткий ответ, смысловое резюме, `result_id` и несколько маршрутов муравьев.
+Выводит короткий ответ, смысловое резюме, `result_id`, `semantic_vector`, `signal_trace` и несколько маршрутов муравьев.
 
 ## Чат
 
@@ -35,9 +36,19 @@ python -m semantic_ants chat --once "кто ты" --no-cache-refresh
 
 ```powershell
 python -m semantic_ants train data/examples.jsonl --epochs 5
+python -m semantic_ants learn data/top_layer_curriculum.jsonl --epochs 5 --strength-vector 3
 ```
 
 После обучения checkpoint усилит связи между яблоком, головой и Ньютоном.
+Второй пример обучает верхний слой абстрактных доменов.
+
+## Интерпретация вектора
+
+```powershell
+python -m semantic_ants interpret-vector vector.json
+```
+
+Команда читает JSON `semantic_vector` и строит понятное предложение. Без обученной Torch-модели используется fallback по главному домену и сильнейшим понятиям.
 
 ## Feedback
 

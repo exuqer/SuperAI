@@ -49,20 +49,36 @@ class Trainer:
         return report
 
     def train_example(self, example: dict[str, Any], report: TrainingReport | None = None) -> None:
-        text_value = example.get("text", example.get("stimulus"))
+        text_value = example.get("text") or example.get("stimulus") or example.get("question")
         if not text_value:
-            raise ValueError("Пример требует text или stimulus")
+            raise ValueError("Пример требует text, stimulus или question")
         text = str(text_value)
         lang = str(example.get("lang", "auto"))
-        result = self.engine.analyze(text, lang=lang, persist_result=False)
+        result = self.engine.analyze(
+            text,
+            lang=lang,
+            persist_result=False,
+            strength_vector=_parse_strength_vector(example.get("strength_vector")) or None,
+        )
         checkpoint = self.engine.checkpoint
         target_concepts = [str(value) for value in example.get("target_concepts", [])]
-        positive_edges = list(example.get("positive_edges", []))
+        for concepts in _parse_layer_targets(example.get("layer_targets")).values():
+            target_concepts.extend(concepts)
+        target_concepts = list(dict.fromkeys(target_concepts))
+        positive_edges = _parse_positive_edges(example.get("positive_edges"))
         negative_concepts = [str(value) for value in example.get("negative_concepts", [])]
         rejected_answers = [str(value) for value in example.get("rejected_answers", [])]
-        target_response = str(example.get("target_response") or example.get("accepted_answer") or "")
+        target_response = str(
+            example.get("target_response")
+            or example.get("accepted_answer")
+            or example.get("expected_answer")
+            or ""
+        )
         reward = float(example.get("reward", 1.0))
         reinforced_any = False
+
+        for concept, label in _parse_concept_labels(example.get("concept_labels")).items():
+            checkpoint.remember_concept_label(concept, label)
 
         for route in result.routes:
             concepts = route.concepts
@@ -85,11 +101,58 @@ class Trainer:
                         report.reinforced_edges += 1
 
         for edge_value in positive_edges:
-            start, relation, end = _parse_positive_edge(edge_value)
+            if isinstance(edge_value, dict):
+                start = str(edge_value["start"])
+                relation = str(edge_value.get("relation", "LearnedRelatedTo"))
+                end = str(edge_value["end"])
+                weight = float(edge_value.get("weight", 1.0))
+                layer = int(edge_value.get("layer", 1))
+                distance = float(edge_value.get("distance", 1.0))
+                edge_type = str(edge_value.get("edge_type", "semantic"))
+                metadata = dict(edge_value.get("metadata", {})) if isinstance(edge_value.get("metadata"), dict) else {}
+                checkpoint.add_custom_edge(
+                    start,
+                    end,
+                    relation=relation,
+                    weight=weight,
+                    layer=layer,
+                    distance=distance,
+                    edge_type=edge_type,
+                    metadata=metadata,
+                )
+                checkpoint.reinforce_edge(start, relation, end, amount=max(weight, 0.5))
+                if report:
+                    report.reinforced_edges += 1
+                continue
+            start, relation, end = edge_value
             checkpoint.add_custom_edge(start, end, relation=relation, weight=1.0)
             checkpoint.reinforce_edge(start, relation, end, amount=0.5)
             if report:
                 report.reinforced_edges += 1
+
+        layer_targets = _parse_layer_targets(example.get("layer_targets"))
+        route_starts = list(dict.fromkeys(route.start for route in result.routes))
+        for layer_key, concepts in layer_targets.items():
+            layer = int(layer_key)
+            relation = "InTopDomain" if layer == 0 else "LayerTarget"
+            edge_type = "domain" if layer == 0 else "semantic"
+            for start in route_starts:
+                for concept in concepts:
+                    if start == concept:
+                        continue
+                    checkpoint.add_custom_edge(
+                        start,
+                        concept,
+                        relation=relation,
+                        weight=1.0,
+                        layer=layer,
+                        distance=1.0,
+                        edge_type=edge_type,
+                        metadata={"layer_target": layer_key},
+                    )
+                    checkpoint.reinforce_edge(start, relation, concept, amount=0.4)
+                    if report:
+                        report.reinforced_edges += 1
 
         for concept in negative_concepts:
             checkpoint.suppress_concept(concept, amount=0.75)
@@ -202,16 +265,83 @@ class FeedbackTrainer:
         }
 
 
-def _parse_positive_edge(value: Any) -> tuple[str, str, str]:
+def _parse_positive_edge(value: Any) -> tuple[str, str, str] | dict[str, Any]:
     if isinstance(value, dict):
-        return (
-            str(value["start"]),
-            str(value.get("relation", "LearnedRelatedTo")),
-            str(value["end"]),
-        )
-    if isinstance(value, list | tuple):
+        return _parse_positive_edge_dict(value)
+    if isinstance(value, (list, tuple)):
         if len(value) == 2:
             return str(value[0]), "LearnedRelatedTo", str(value[1])
         if len(value) == 3:
             return str(value[0]), str(value[1]), str(value[2])
     raise ValueError(f"Некорректное positive_edges значение: {value!r}")
+
+
+def _parse_positive_edges(value: Any) -> list[tuple[str, str, str] | dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, dict) and {"start", "end"} <= set(value):
+        return [_parse_positive_edge_dict(value)]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"Некорректное positive_edges значение: {value!r}")
+    return [_parse_positive_edge(edge) for edge in value]
+
+
+def _parse_positive_edge_dict(value: dict[str, Any]) -> dict[str, Any]:
+    if "start" not in value or "end" not in value:
+        raise ValueError(f"Некорректное positive_edges значение: {value!r}")
+    edge: dict[str, Any] = {
+        "start": str(value["start"]),
+        "relation": str(value.get("relation", "LearnedRelatedTo")),
+        "end": str(value["end"]),
+    }
+    if "weight" in value and value["weight"] is not None:
+        edge["weight"] = float(value["weight"])
+    if "layer" in value and value["layer"] is not None:
+        edge["layer"] = int(value["layer"])
+    if "distance" in value and value["distance"] is not None:
+        edge["distance"] = float(value["distance"])
+    if "edge_type" in value and value["edge_type"] is not None:
+        edge["edge_type"] = str(value["edge_type"])
+    metadata = value.get("metadata", {})
+    if metadata is not None:
+        edge["metadata"] = dict(metadata) if isinstance(metadata, dict) else dict(metadata)
+    for key in ("surface_text",):
+        if key in value and value[key] is not None:
+            edge[key] = value[key]
+    return edge
+
+
+def _parse_strength_vector(value: Any) -> tuple[int, ...]:
+    if value is None or value == "":
+        return ()
+    if isinstance(value, int):
+        return (max(value, 0),)
+    if isinstance(value, str):
+        return tuple(max(int(part.strip()), 0) for part in value.replace(";", ",").split(",") if part.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(max(int(part), 0) for part in value)
+    raise ValueError(f"Некорректный strength_vector: {value!r}")
+
+
+def _parse_layer_targets(value: Any) -> dict[str, list[str]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Некорректный layer_targets: {value!r}")
+    result: dict[str, list[str]] = {}
+    for layer, concepts in value.items():
+        if isinstance(concepts, str):
+            result[str(layer)] = [concepts]
+        elif isinstance(concepts, (list, tuple)):
+            result[str(layer)] = [str(concept) for concept in concepts]
+        else:
+            raise ValueError(f"Некорректные layer_targets[{layer!r}]: {concepts!r}")
+    return result
+
+
+def _parse_concept_labels(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Некорректный concept_labels: {value!r}")
+    return {str(concept): str(label) for concept, label in value.items() if str(label).strip()}
