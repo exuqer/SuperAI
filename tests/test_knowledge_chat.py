@@ -17,7 +17,34 @@ class KnowledgeChatTest(unittest.TestCase):
             )
             result = engine.analyze("привет", lang="ru")
             self.assertTrue(result.response)
+            self.assertIn(result.response, {"Привет. Я на связи. Чем займемся?", "Привет. Можем поговорить или разобрать задачу."})
             self.assertTrue(any(item["uri"] == "/m/dialogue/greeting" for item in result.activated_concepts))
+
+    def test_builtin_wellbeing_question_uses_dialogue_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(
+                config=EngineConfig(state_dir=Path(tmp), allow_network=False, ant_count=8, max_depth=3)
+            )
+            result = engine.analyze("как дела?", lang="ru")
+            self.assertIn(
+                result.response,
+                {
+                    "Нормально, спасибо. А у тебя?",
+                    "Все в порядке. Готов общаться и помогать. Как ты?",
+                    "Работаю спокойно. Расскажи, как у тебя дела.",
+                },
+            )
+            self.assertNotIn("— это", result.response)
+            self.assertTrue(any(item["uri"] == "/m/dialogue/wellbeing_question" for item in result.activated_concepts))
+
+    def test_unknown_input_does_not_use_dialogue_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(
+                config=EngineConfig(state_dir=Path(tmp), allow_network=False, ant_count=8, max_depth=3)
+            )
+            result = engine.analyze("пвап", lang="ru")
+            self.assertEqual(result.response, "Смысл пока слишком разрежен для уверенного ответа.")
+            self.assertNotIn("Привет", result.response)
 
     def test_builtin_alphabet_routes_without_template_response(self):
         with tempfile.TemporaryDirectory() as tmp:

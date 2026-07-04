@@ -22,8 +22,11 @@ class SemanticVectorInterpreter:
         semantic_vector: dict[str, Any] | list[dict[str, Any]],
         checkpoint: Checkpoint,
         count: int = 1,
+        chat_history: list[dict[str, Any]] | None = None,
     ) -> str:
         normalized = _normalize_vector(semantic_vector)
+        if chat_history:
+            normalized = {**normalized, "chat_history": chat_history[-8:]}
         lang = _vector_lang(normalized)
         fallback_candidates = build_vector_candidates(normalized, checkpoint, count=max(count, 4))
         prompt = self._prompt(normalized)
@@ -31,10 +34,12 @@ class SemanticVectorInterpreter:
             prompt,
             checkpoint,
             model_dir=self.model_dir,
-            fallback=fallback_candidates,
+            fallback="",
             count=max(count, 4),
             lang=lang,
         )
+        if not candidates:
+            candidates = fallback_candidates
         selected = _select_candidate(candidates, normalized, lang)
         if selected:
             return selected
@@ -52,6 +57,7 @@ class SemanticVectorInterpreter:
             [
                 "semantic_vector:",
                 json.dumps(compact, ensure_ascii=False, sort_keys=True),
+                *_history_lines(semantic_vector.get("chat_history", [])),
                 "task: turn the semantic vector into one natural sentence in the same language as the input",
                 "assistant:",
             ]
@@ -88,10 +94,35 @@ def _select_candidate(candidates: list[str], semantic_vector: dict[str, Any], la
                 lang,
                 str(semantic_vector.get("top_domain", {})),
                 ",".join(str(item.get("uri", "")) for item in semantic_vector.get("items", [])[:6] if isinstance(item, dict)),
+                _history_fingerprint(semantic_vector.get("chat_history", [])),
             ]
         ).encode("utf-8")
     ).hexdigest()
     return values[int(seed[:2], 16) % len(values)]
+
+
+def _history_lines(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    lines = ["chat_history:"]
+    for turn in value[-8:]:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role", "user"))
+        text = " ".join(str(turn.get("text", "")).split())
+        if text:
+            lines.append(f"{role}: {text}")
+    return lines if len(lines) > 1 else []
+
+
+def _history_fingerprint(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for turn in value[-4:]:
+        if isinstance(turn, dict):
+            parts.append(f"{turn.get('role', '')}:{turn.get('text', '')}")
+    return "|".join(parts)
 
 
 def _language_matches(text: str, lang: str) -> bool:

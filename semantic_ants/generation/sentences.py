@@ -11,6 +11,8 @@ class SenseSentenceBuilder:
     def build_candidates(self, semantic_vector: dict[str, Any], checkpoint: Checkpoint, count: int = 3) -> list[str]:
         lang = _vector_lang(semantic_vector)
         items = [item for item in semantic_vector.get("items", []) if isinstance(item, dict)]
+        if _is_sparse_unknown_vector(items):
+            return [_fallback(lang)]
         subject = _surface_for_item(_best_item(items, checkpoint, lang), checkpoint, lang)
         items = _ordered_surfaces(items, checkpoint, lang, subject)
         domain = _surface_for_uri(_domain_uri(semantic_vector), checkpoint, lang)
@@ -396,11 +398,28 @@ def _looks_like_content(surface: str, lang: str) -> bool:
     clean = surface.strip().lower()
     if not clean:
         return False
+    if clean in {"unknown context", "unknown_context"}:
+        return False
     if lang == "ru" and clean in {"и", "в", "не", "на", "это", "как", "что", "а", "я"}:
         return False
     if lang == "en" and clean in {"the", "a", "an", "and", "or", "to", "of", "in", "is", "are"}:
         return False
     return True
+
+
+def _is_sparse_unknown_vector(items: list[dict[str, Any]]) -> bool:
+    if not items:
+        return True
+    known_signal = False
+    for item in items:
+        uri = str(item.get("uri", ""))
+        sources = set(map(str, item.get("sources", []))) if isinstance(item.get("sources", []), list) else set()
+        if uri.endswith("/unknown_context"):
+            continue
+        if not sources or sources <= {"input", "fallback"}:
+            continue
+        known_signal = True
+    return not known_signal and any(str(item.get("uri", "")).endswith("/unknown_context") for item in items)
 
 
 def _unique_nonempty(values: list[str]) -> list[str]:

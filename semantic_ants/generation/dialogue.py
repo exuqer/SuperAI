@@ -15,8 +15,17 @@ class DialogueResponder:
         tokens: list[str],
         activated_concepts: list[dict[str, object]],
         checkpoint: Checkpoint,
+        chat_history: list[dict[str, object]] | None = None,
     ) -> str | None:
         lang = detect_language(input_text)
-        prompt = self.navigator.build_prompt(input_text, tokens, activated_concepts, [], checkpoint, lang=lang)
+        prompt = self.navigator.build_prompt(
+            input_text,
+            tokens,
+            activated_concepts,
+            [],
+            checkpoint,
+            chat_history=chat_history,
+            lang=lang,
+        )
         candidates = self.navigator.generate(prompt, checkpoint, count=1, lang=lang)
         return candidates[0] if candidates else None

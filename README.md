@@ -14,6 +14,7 @@ python -m semantic_ants analyze "яблоко упало" --strength-vector 3 --
 python -m semantic_ants chat
 python -m semantic_ants train data/examples.jsonl --epochs 3
 python -m semantic_ants learn data/top_layer_curriculum.jsonl --epochs 5 --strength-vector 3
+python -m semantic_ants learn-dialogues data/basic_dialogues_ru.jsonl --epochs 1
 python -m semantic_ants download-dataset spc --split train --limit 2000 --output data/spc_dialogues.jsonl
 python -m semantic_ants learn-dialogues data/spc_dialogues.jsonl --epochs 1
 python -m semantic_ants interpret-vector vector.json
@@ -47,7 +48,7 @@ python -m semantic_ants chat --once "частые русские слова"
 python -m semantic_ants chat --session-id default --mode hybrid
 ```
 
-При первом запуске движок автоматически загружает встроенную базу: русский и английский алфавиты, частые слова, базовые смыслы и графовые связи. Готовые диалоговые реплики не загружаются как кодовые правила.
+При первом запуске движок автоматически загружает встроенную базу: русский и английский алфавиты, частые слова, базовые смыслы, графовые связи и небольшой seed базовых диалогов. Готовые реплики хранятся в checkpoint как обученная память, а не как ветвления `if/else` в генераторе.
 
 ## Что обучается
 
@@ -61,7 +62,7 @@ ConceptNet и WordNet-derived данные остаются внешним read-
 - история последних результатов для feedback.
 - история чат-сессий;
 - PyTorch-словарь и метаданные диалогового генератора;
-- встроенные seed-данные для алфавитов, частых слов и базовых смыслов.
+- встроенные seed-данные для алфавитов, частых слов, базовых смыслов и стартовых диалогов.
 
 Файл состояния по умолчанию: `.semantic_ants/checkpoints/model.json`.
 Веса диалоговой модели по умолчанию: `.semantic_ants/models/dialogue.pt`.

@@ -92,20 +92,27 @@ class Checkpoint:
     def remember_response(self, concepts: list[str], response: str, amount: float = 1.0) -> None:
         if not concepts or not response:
             return
+        clean_response = " ".join(response.split())
+        if not clean_response:
+            return
         key = concept_set_key(concepts)
-        lang = _detect_lang_from_concepts(concepts) or detect_language(response)
+        lang = _detect_lang_from_concepts(concepts) or detect_language(clean_response)
         item = self.response_memory.setdefault(
             key,
             {
                 "concepts": list(dict.fromkeys(concepts)),
                 "answer_concepts": [],
                 "lang": lang,
+                "answer": "",
+                "response": "",
                 "weight": 0.0,
             },
         )
         item["concepts"] = list(dict.fromkeys(concepts))
-        item["answer_concepts"] = _text_to_concepts(response, lang=lang, checkpoint=self)
+        item["answer_concepts"] = _text_to_concepts(clean_response, lang=lang, checkpoint=self)
         item["lang"] = lang
+        item["answer"] = clean_response
+        item["response"] = clean_response
         item["weight"] = float(item.get("weight", 0.0)) + amount
 
     def remember_concept_label(self, concept_uri: str, label: str) -> None:
@@ -133,17 +140,36 @@ class Checkpoint:
     ) -> dict[str, Any] | None:
         if not answer:
             return None
+        clean_answer = " ".join(answer.split())
+        if not clean_answer:
+            return None
         lang = _detect_lang_from_concepts(concepts) or detect_language(answer)
-        answer_concepts = _text_to_concepts(answer, lang=lang, checkpoint=self)
+        answer_concepts = _text_to_concepts(clean_answer, lang=lang, checkpoint=self)
         item = {
             "stimulus": stimulus,
             "semantic_prompt": semantic_prompt,
             "concepts": list(dict.fromkeys(concepts)),
             "answer_concepts": answer_concepts,
+            "answer": clean_answer,
             "lang": lang,
             "reward": float(reward),
             "created_at": time.time(),
         }
+        for existing in self.accepted_answers:
+            if (
+                str(existing.get("stimulus", "")).strip().lower() == stimulus.strip().lower()
+                and " ".join(str(existing.get("answer", "")).split()) == clean_answer
+            ):
+                existing["semantic_prompt"] = semantic_prompt
+                existing["concepts"] = item["concepts"]
+                existing["answer_concepts"] = answer_concepts
+                existing["answer"] = clean_answer
+                existing["lang"] = lang
+                existing["reward"] = max(float(existing.get("reward", 0.0)), float(reward))
+                existing["created_at"] = time.time()
+                self.accepted_answers.sort(key=lambda value: float(value.get("reward", 0.0)), reverse=True)
+                self.remember_response(item["concepts"], clean_answer, amount=max(float(reward), 0.1))
+                return existing
         self.accepted_answers.append(item)
         self.accepted_answers.sort(key=lambda value: float(value.get("reward", 0.0)), reverse=True)
         del self.accepted_answers[limit:]
@@ -160,11 +186,13 @@ class Checkpoint:
         limit: int = 500,
     ) -> dict[str, Any]:
         lang = _detect_lang_from_concepts(concepts) or detect_language(answer or stimulus or semantic_prompt)
+        clean_answer = " ".join(answer.split())
         item = {
             "stimulus": stimulus,
             "semantic_prompt": semantic_prompt,
             "concepts": list(dict.fromkeys(concepts)),
-            "answer_concepts": _text_to_concepts(answer, lang=lang, checkpoint=self) if answer else [],
+            "answer_concepts": _text_to_concepts(clean_answer, lang=lang, checkpoint=self) if clean_answer else [],
+            "answer": clean_answer,
             "lang": lang,
             "reason": reason,
             "created_at": time.time(),
@@ -471,15 +499,16 @@ def _normalize_patterns(
             continue
         lang = str(item.get("lang") or fallback_lang)
         concepts = [str(value) for value in item.get("concepts", []) if value]
+        raw_answer = _clean_answer(item)
         answer_concepts = item.get("answer_concepts")
         if not isinstance(answer_concepts, list) or not answer_concepts:
-            raw_answer = str(item.get("answer", ""))
             answer_concepts = _text_to_concepts(raw_answer, lang=lang, checkpoint=_checkpoint_from_data(checkpoint_data))
         pattern = {
             "stimulus": str(item.get("stimulus", "")),
             "semantic_prompt": str(item.get("semantic_prompt", "")),
             "concepts": list(dict.fromkeys(concepts)),
             "answer_concepts": [str(value) for value in answer_concepts if value],
+            "answer": raw_answer,
             "lang": lang if lang in {"ru", "en"} else detect_language(" ".join(answer_concepts or concepts)),
             "reward": float(item.get("reward", 0.0)),
             "created_at": float(item.get("created_at", time.time())),
@@ -499,13 +528,15 @@ def _normalize_response_memory(values: Any, checkpoint_data: dict[str, Any]) -> 
             continue
         concepts = [str(value) for value in str(key).split("|") if value]
         lang = str(item.get("lang") or _detect_lang_from_concepts(concepts) or "auto")
+        raw_answer = _clean_answer(item)
         answer_concepts = item.get("answer_concepts")
         if not isinstance(answer_concepts, list) or not answer_concepts:
-            raw_response = str(item.get("response", ""))
-            answer_concepts = _text_to_concepts(raw_response, lang=lang, checkpoint=checkpoint)
+            answer_concepts = _text_to_concepts(raw_answer, lang=lang, checkpoint=checkpoint)
         normalized[str(key)] = {
             "concepts": list(dict.fromkeys(concepts)),
             "answer_concepts": [str(value) for value in answer_concepts if value],
+            "answer": raw_answer,
+            "response": raw_answer,
             "lang": lang if lang in {"ru", "en"} else _detect_lang_from_concepts(concepts) or detect_language(str(key)),
             "weight": float(item.get("weight", 0.0)),
         }
@@ -522,9 +553,9 @@ def _normalize_negative_memory(values: Any, checkpoint_data: dict[str, Any]) -> 
             continue
         concepts = [str(value) for value in item.get("concepts", []) if value]
         lang = str(item.get("lang") or _detect_lang_from_concepts(concepts) or "auto")
+        raw_answer = _clean_answer(item)
         answer_concepts = item.get("answer_concepts")
         if not isinstance(answer_concepts, list):
-            raw_answer = str(item.get("answer", ""))
             answer_concepts = _text_to_concepts(raw_answer, lang=lang, checkpoint=checkpoint)
         normalized.append(
             {
@@ -532,6 +563,7 @@ def _normalize_negative_memory(values: Any, checkpoint_data: dict[str, Any]) -> 
                 "semantic_prompt": str(item.get("semantic_prompt", "")),
                 "concepts": list(dict.fromkeys(concepts)),
                 "answer_concepts": [str(value) for value in answer_concepts if value],
+                "answer": raw_answer,
                 "lang": lang if lang in {"ru", "en"} else _detect_lang_from_concepts(concepts) or detect_language(str(item.get("answer", ""))),
                 "reason": str(item.get("reason", "")),
                 "created_at": float(item.get("created_at", time.time())),
@@ -562,6 +594,15 @@ def _checkpoint_from_data(data: dict[str, Any]) -> Checkpoint:
         examples_seen=int(data.get("examples_seen", 0)),
         seed=int(data.get("seed", 42)),
     )
+
+
+def _clean_answer(item: dict[str, Any]) -> str:
+    for key in ("answer", "response", "accepted_answer", "target_response", "expected_answer"):
+        value = str(item.get(key, ""))
+        clean = " ".join(value.split())
+        if clean:
+            return clean
+    return ""
 
 
 def _replace_with_retry(tmp: Path, target: Path, attempts: int = 20) -> None:

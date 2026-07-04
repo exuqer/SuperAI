@@ -132,7 +132,12 @@ class Interpreter:
         chat_history: list[dict[str, Any]] | None,
         semantic_vector: dict[str, Any],
     ) -> str:
-        response = self.vector_interpreter.interpret(semantic_vector, checkpoint, count=1)
+        response = self.vector_interpreter.interpret(
+            semantic_vector,
+            checkpoint,
+            count=1,
+            chat_history=chat_history,
+        )
         return response or summary
 
 

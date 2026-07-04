@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from semantic_ants.learning.checkpoint import Checkpoint
 
-SEED_VERSION = 6
+SEED_VERSION = 7
 
 ALPHABETS = {
     "ru": list("абвгдеёжзийклмнопрстуфхцчшщъыьэюя"),
@@ -135,6 +135,19 @@ ALIASES = {
         "кто": "/c/ru/кто",
         "что": "/c/ru/что",
         "как": "/c/ru/как",
+        "дела": "/m/dialogue/wellbeing_question",
+        "делишки": "/m/dialogue/wellbeing_question",
+        "настроение": "/m/dialogue/mood_question",
+        "зовут": "/m/dialogue/name_question",
+        "имя": "/m/dialogue/name_question",
+        "помощь": "/m/dialogue/help_request",
+        "помоги": "/m/dialogue/help_request",
+        "помочь": "/m/dialogue/help_request",
+        "грустно": "/m/dialogue/sad_state",
+        "устал": "/m/dialogue/tired_state",
+        "устала": "/m/dialogue/tired_state",
+        "хорошо": "/m/dialogue/good_state",
+        "нормально": "/m/dialogue/good_state",
         "умеешь": "/c/ru/уметь",
         "можешь": "/c/ru/мочь",
         "модель": "/c/ru/модель",
@@ -162,8 +175,15 @@ ALIASES = {
         "hello": "/c/en/hello",
         "hi": "/c/en/hello",
         "bye": "/c/en/goodbye",
+        "goodbye": "/c/en/goodbye",
         "thanks": "/c/en/thanks",
         "thank": "/c/en/thanks",
+        "help": "/m/dialogue/help_request",
+        "name": "/m/dialogue/name_question",
+        "mood": "/m/dialogue/mood_question",
+        "sad": "/m/dialogue/sad_state",
+        "tired": "/m/dialogue/tired_state",
+        "fine": "/m/dialogue/good_state",
         "alphabet": "/c/en/alphabet",
         "letters": "/c/en/letter",
         "letter": "/c/en/letter",
@@ -321,6 +341,13 @@ SEED_TOP_MAPPINGS = {
     "/m/dialogue/identity_question": "dialogue",
     "/m/dialogue/capability_question": "dialogue",
     "/m/dialogue/simple_chat": "dialogue",
+    "/m/dialogue/wellbeing_question": "dialogue",
+    "/m/dialogue/mood_question": "dialogue",
+    "/m/dialogue/name_question": "dialogue",
+    "/m/dialogue/help_request": "dialogue",
+    "/m/dialogue/sad_state": "dialogue",
+    "/m/dialogue/tired_state": "dialogue",
+    "/m/dialogue/good_state": "dialogue",
     "/m/language/alphabet": "language",
     "/m/language/word": "language",
     "/m/language/meaning": "language",
@@ -679,6 +706,13 @@ SEED_EDGES = [
     ("/m/dialogue/gratitude", "/m/dialogue/simple_chat", "PartOf"),
     ("/m/dialogue/identity_question", "/m/dialogue/simple_chat", "PartOf"),
     ("/m/dialogue/capability_question", "/m/dialogue/simple_chat", "PartOf"),
+    ("/m/dialogue/wellbeing_question", "/m/dialogue/simple_chat", "PartOf"),
+    ("/m/dialogue/mood_question", "/m/dialogue/simple_chat", "PartOf"),
+    ("/m/dialogue/name_question", "/m/dialogue/simple_chat", "PartOf"),
+    ("/m/dialogue/help_request", "/m/dialogue/simple_chat", "PartOf"),
+    ("/m/dialogue/sad_state", "/m/dialogue/simple_chat", "PartOf"),
+    ("/m/dialogue/tired_state", "/m/dialogue/simple_chat", "PartOf"),
+    ("/m/dialogue/good_state", "/m/dialogue/simple_chat", "PartOf"),
     ("/c/ru/яблоко", "/m/object/apple", "Means"),
     ("/c/en/apple", "/m/object/apple", "Means"),
     ("/c/ru/падать", "/m/action/fall", "Means"),
@@ -695,6 +729,170 @@ SEED_EDGES = [
     ("/c/ru/саша", "/m/entity/person", "IsA"),
     ("/c/ru/идти", "/m/action/move", "Means"),
     ("/c/ru/шоссе", "/m/place/road", "Means"),
+]
+
+DIALOGUE_CONCEPTS = {
+    "/m/dialogue/greeting": "приветствие",
+    "/m/dialogue/farewell": "прощание",
+    "/m/dialogue/gratitude": "благодарность",
+    "/m/dialogue/identity_question": "вопрос о собеседнике",
+    "/m/dialogue/capability_question": "вопрос о возможностях",
+    "/m/dialogue/simple_chat": "простой диалог",
+    "/m/dialogue/wellbeing_question": "вопрос о делах",
+    "/m/dialogue/mood_question": "вопрос о настроении",
+    "/m/dialogue/name_question": "вопрос об имени",
+    "/m/dialogue/help_request": "просьба о помощи",
+    "/m/dialogue/sad_state": "грустное состояние",
+    "/m/dialogue/tired_state": "усталость",
+    "/m/dialogue/good_state": "хорошее состояние",
+}
+
+BASIC_DIALOGUES = [
+    {
+        "stimulus": "привет",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/greeting", "/m/dialogue/simple_chat"],
+        "answers": [
+            "Привет. Я на связи. Чем займемся?",
+            "Привет. Можем поговорить или разобрать задачу.",
+        ],
+    },
+    {
+        "stimulus": "здравствуй",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/greeting", "/m/dialogue/simple_chat"],
+        "answers": ["Здравствуй. Я слушаю, что у тебя?"],
+    },
+    {
+        "stimulus": "как дела?",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/wellbeing_question", "/m/dialogue/simple_chat"],
+        "answers": [
+            "Нормально, спасибо. А у тебя?",
+            "Все в порядке. Готов общаться и помогать. Как ты?",
+            "Работаю спокойно. Расскажи, как у тебя дела.",
+        ],
+    },
+    {
+        "stimulus": "как ты?",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/wellbeing_question", "/m/dialogue/simple_chat"],
+        "answers": [
+            "Я в порядке и готов помогать. Как ты?",
+            "Нормально. Держу контекст разговора и жду твою мысль.",
+        ],
+    },
+    {
+        "stimulus": "как настроение?",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/mood_question", "/m/dialogue/wellbeing_question"],
+        "answers": [
+            "Спокойное и рабочее. А у тебя какое настроение?",
+            "Ровное. Можем просто поговорить или заняться задачей.",
+        ],
+    },
+    {
+        "stimulus": "что делаешь?",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/wellbeing_question", "/m/dialogue/simple_chat"],
+        "answers": ["Отвечаю тебе и держу контекст нашего разговора."],
+    },
+    {
+        "stimulus": "кто ты?",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/identity_question", "/m/dialogue/simple_chat"],
+        "answers": ["Я semantic_ants: прототип диалоговой модели с памятью и графом понятий."],
+    },
+    {
+        "stimulus": "как тебя зовут?",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/name_question", "/m/dialogue/identity_question"],
+        "answers": ["Меня можно называть semantic_ants."],
+    },
+    {
+        "stimulus": "что ты умеешь?",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/capability_question", "/m/dialogue/simple_chat"],
+        "answers": [
+            "Могу поддержать простой диалог, помнить последние сообщения и объяснять связи между понятиями.",
+            "Умею отвечать по обученной памяти, строить смысловые маршруты и учитывать контекст сессии.",
+        ],
+    },
+    {
+        "stimulus": "помоги",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/help_request", "/m/dialogue/simple_chat"],
+        "answers": ["Конечно. Напиши, что нужно сделать, и я разберу это по шагам."],
+    },
+    {
+        "stimulus": "спасибо",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/gratitude", "/m/dialogue/simple_chat"],
+        "answers": ["Пожалуйста. Обращайся.", "Рад помочь."],
+    },
+    {
+        "stimulus": "пока",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/farewell", "/m/dialogue/simple_chat"],
+        "answers": ["Пока. Буду ждать продолжения.", "До связи."],
+    },
+    {
+        "stimulus": "мне грустно",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/sad_state", "/m/top/emotion"],
+        "answers": ["Жаль, что тебе грустно. Я рядом: можешь рассказать, что случилось?"],
+    },
+    {
+        "stimulus": "я устал",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/tired_state", "/m/top/body"],
+        "answers": ["Понимаю. Можно снизить темп: расскажи, что больше всего вымотало."],
+    },
+    {
+        "stimulus": "у меня все хорошо",
+        "lang": "ru",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/good_state", "/m/top/emotion"],
+        "answers": ["Рад это слышать. Что хорошего произошло?"],
+    },
+    {
+        "stimulus": "hello",
+        "lang": "en",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/greeting", "/m/dialogue/simple_chat"],
+        "answers": ["Hi. I'm here. What shall we work on?"],
+    },
+    {
+        "stimulus": "how are you?",
+        "lang": "en",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/wellbeing_question", "/m/dialogue/simple_chat"],
+        "answers": [
+            "I'm doing fine, thanks. How are you?",
+            "I'm okay and ready to help. How are things with you?",
+        ],
+    },
+    {
+        "stimulus": "who are you?",
+        "lang": "en",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/identity_question", "/m/dialogue/simple_chat"],
+        "answers": ["I'm semantic_ants: a dialogue prototype with concept memory."],
+    },
+    {
+        "stimulus": "what can you do?",
+        "lang": "en",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/capability_question", "/m/dialogue/simple_chat"],
+        "answers": ["I can keep a simple dialogue, remember recent turns, and explain concept links."],
+    },
+    {
+        "stimulus": "thanks",
+        "lang": "en",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/gratitude", "/m/dialogue/simple_chat"],
+        "answers": ["You're welcome."],
+    },
+    {
+        "stimulus": "bye",
+        "lang": "en",
+        "concepts": ["/m/top/dialogue", "/m/dialogue/farewell", "/m/dialogue/simple_chat"],
+        "answers": ["Bye. I'll be here when you continue."],
+    },
 ]
 
 @dataclass(frozen=True)
@@ -727,11 +925,11 @@ def bootstrap_builtin_knowledge(checkpoint: Checkpoint, force: bool = False) -> 
 
     aliases = _load_aliases(checkpoint)
     edges = _load_edges(checkpoint)
-    responses = _load_responses(checkpoint)
     alphabets = _load_alphabets(checkpoint)
     common_words = _load_common_words(checkpoint)
     basic_concepts = _load_basic_concepts(checkpoint)
     top_layer = _load_top_layer(checkpoint)
+    responses = _load_responses(checkpoint)
     checkpoint.metadata["builtin_seed_version"] = SEED_VERSION
     checkpoint.metadata["builtin_seed_loaded"] = True
     return SeedReport(
@@ -768,7 +966,66 @@ def _load_edges(checkpoint: Checkpoint) -> int:
 
 
 def _load_responses(checkpoint: Checkpoint) -> int:
-    return 0
+    total = 0
+    for concept_uri, label in DIALOGUE_CONCEPTS.items():
+        checkpoint.remember_concept_label(concept_uri, label)
+        checkpoint.add_custom_edge(
+            concept_uri,
+            "/m/top/dialogue",
+            relation="InTopDomain",
+            weight=2.2,
+            layer=0,
+            distance=1.0,
+            edge_type="domain",
+            metadata={"top_domain": "dialogue", "builtin_dialogue": True},
+        )
+    for item in BASIC_DIALOGUES:
+        stimulus = str(item["stimulus"])
+        lang = str(item["lang"])
+        concepts = [str(value) for value in item["concepts"]]
+        for answer in item["answers"]:
+            total += _remember_seed_dialogue(
+                checkpoint,
+                stimulus=stimulus,
+                lang=lang,
+                concepts=concepts,
+                answer=str(answer),
+            )
+    checkpoint.metadata["builtin_dialogue_examples"] = len(BASIC_DIALOGUES)
+    return total
+
+
+def _remember_seed_dialogue(
+    checkpoint: Checkpoint,
+    stimulus: str,
+    lang: str,
+    concepts: list[str],
+    answer: str,
+) -> int:
+    clean_answer = " ".join(answer.split())
+    if not stimulus or not clean_answer:
+        return 0
+    for item in checkpoint.accepted_answers:
+        if (
+            str(item.get("stimulus", "")).strip().lower() == stimulus.strip().lower()
+            and " ".join(str(item.get("answer", "")).split()) == clean_answer
+        ):
+            return 0
+    checkpoint.remember_accepted_answer(
+        stimulus=stimulus,
+        semantic_prompt=stimulus,
+        concepts=concepts,
+        answer=clean_answer,
+        reward=1.4,
+        limit=1500,
+    )
+    for concept in concepts:
+        checkpoint.reinforce_concept(concept, amount=0.25)
+    checkpoint.metadata.setdefault("dialogue_seed_languages", {})
+    languages = checkpoint.metadata["dialogue_seed_languages"]
+    if isinstance(languages, dict):
+        languages[lang] = int(languages.get(lang, 0)) + 1
+    return 1
 
 
 def _load_alphabets(checkpoint: Checkpoint) -> int:

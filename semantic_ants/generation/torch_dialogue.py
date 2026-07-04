@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -101,10 +102,10 @@ class TorchDialogueNavigator:
         lang: str | None = None,
     ) -> list[str]:
         candidates: list[str] = []
+        candidates.extend(self._memory_candidates(semantic_prompt, checkpoint, count=count, lang=lang))
         generated = self._generate_with_torch(semantic_prompt, checkpoint, model_dir)
         if generated and self._plausible_answer(generated) and _language_matches(generated, lang):
             candidates.append(generated)
-        candidates.extend(self._memory_candidates(semantic_prompt, checkpoint, count=count, lang=lang))
         if isinstance(fallback, list):
             candidates.extend(fallback)
         elif fallback:
@@ -170,6 +171,7 @@ class TorchDialogueNavigator:
                     {
                         "concepts": list(dict.fromkeys(concepts)),
                         "answer_concepts": list(pattern.get("answer_concepts", [])),
+                        "answer": clipped_answer,
                         "lang": pattern.get("lang", "auto"),
                         "reward": reward,
                         "created_at": time.time(),
@@ -322,8 +324,13 @@ class TorchDialogueNavigator:
         lang: str | None = None,
     ) -> list[str]:
         prompt_concepts = set(URI_RE.findall(semantic_prompt))
-        prompt_terms = _terms(semantic_prompt)
+        input_terms = _input_terms(semantic_prompt)
+        prompt_terms = set(input_terms)
+        rejected = _negative_answers(semantic_prompt, checkpoint)
         scored: list[tuple[float, str]] = []
+        raw_scored: list[tuple[float, str]] = []
+        exact_scored: list[tuple[float, str]] = []
+        exact_raw_scored: list[tuple[float, str]] = []
         memory_items = [
             *checkpoint.accepted_answers,
             *checkpoint.response_memory.values(),
@@ -339,23 +346,42 @@ class TorchDialogueNavigator:
             answer_concept_set = set(answer_concepts)
             overlap = len(prompt_concepts & source_concepts)
             answer_overlap = len(prompt_concepts & answer_concept_set)
-            lexical_terms = _terms(str(item.get("semantic_prompt", ""))) | _terms(str(item.get("stimulus", "")))
-            lexical = len(prompt_terms & lexical_terms) / max(len(lexical_terms), 1)
-            reward = float(item.get("reward", item.get("weight", 0.0)))
-            score = overlap * 2.0 + answer_overlap * 1.5 + lexical + reward
+            lexical_terms = _item_stimulus_terms(item)
+            lexical_overlap = len(prompt_terms & lexical_terms)
+            lexical = lexical_overlap / max(len(lexical_terms), 1)
+            stimulus_clean = _clean_text(str(item.get("stimulus", "")))
+            exact_stimulus = bool(stimulus_clean and _contains_term_sequence(input_terms, stimulus_clean))
+            if not (overlap or answer_overlap or lexical_overlap or exact_stimulus):
+                continue
+            reward = min(float(item.get("reward", item.get("weight", 0.0))), 3.0)
+            score = overlap + answer_overlap * 0.5 + lexical * 2.0 + lexical_overlap * 2.0 + reward
+            if exact_stimulus:
+                score += 20.0
             item_lang = str(item.get("lang") or lang or "auto")
-            rendered = render_concept_pattern(
-                answer_concepts or concepts,
-                checkpoint,
-                lang=item_lang if item_lang in {"ru", "en"} else None,
-                reward=reward,
-                count=max(1, min(count, 3)),
-            )
-            for answer in rendered:
-                if score > 0 and answer:
-                    scored.append((score, answer))
-        scored.sort(key=lambda value: value[0], reverse=True)
-        return _unique_nonempty([answer for _, answer in scored[:count]])
+            answers = _item_answers(item)
+            has_raw_answer = bool(answers)
+            if not has_raw_answer:
+                answers = render_concept_pattern(
+                    answer_concepts or concepts,
+                    checkpoint,
+                    lang=item_lang if item_lang in {"ru", "en"} else None,
+                    reward=reward,
+                    count=max(1, min(count, 3)),
+                )
+            for answer in answers:
+                if score > 0 and answer and _clean_text(answer) not in rejected:
+                    if exact_stimulus and has_raw_answer:
+                        target = exact_raw_scored
+                    elif exact_stimulus:
+                        target = exact_scored
+                    elif has_raw_answer:
+                        target = raw_scored
+                    else:
+                        target = scored
+                    target.append((score, answer))
+        selected = exact_raw_scored or exact_scored or raw_scored or scored
+        selected.sort(key=lambda value: value[0], reverse=True)
+        return _unique_nonempty([answer for _, answer in selected[:count]])
 
     def _plausible_answer(self, value: str) -> bool:
         clean = " ".join(value.split())
@@ -437,6 +463,62 @@ def _decode(ids: list[int], vocab: list[str]) -> str:
 
 def _terms(text: str) -> set[str]:
     return set(TERM_RE.findall(text.lower()))
+
+
+def _clean_text(text: str) -> str:
+    return " ".join(TERM_RE.findall(text.lower()))
+
+
+def _input_terms(text: str) -> list[str]:
+    match = re.search(r'"input_text":\s*"((?:\\.|[^"\\])*)"', text)
+    if match:
+        try:
+            return list(TERM_RE.findall(json.loads(f'"{match.group(1)}"').lower()))
+        except json.JSONDecodeError:
+            return list(TERM_RE.findall(match.group(1).lower()))
+    for line in text.splitlines():
+        if line.startswith("user:"):
+            return list(TERM_RE.findall(line.split(":", 1)[1].lower()))
+    return []
+
+
+def _contains_term_sequence(haystack: list[str], clean_sequence: str) -> bool:
+    needle = clean_sequence.split()
+    if not needle:
+        return False
+    width = len(needle)
+    return any(haystack[index : index + width] == needle for index in range(len(haystack) - width + 1))
+
+
+def _item_answers(item: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("answer", "response"):
+        value = " ".join(str(item.get(key, "")).split())
+        if value:
+            values.append(value)
+    return _unique_nonempty(values)
+
+
+def _item_stimulus_terms(item: dict[str, Any]) -> set[str]:
+    terms = _terms(str(item.get("stimulus", "")))
+    terms.update(_input_terms(str(item.get("semantic_prompt", ""))))
+    return terms
+
+
+def _negative_answers(semantic_prompt: str, checkpoint: Checkpoint) -> set[str]:
+    prompt_concepts = set(URI_RE.findall(semantic_prompt))
+    prompt_terms = set(_input_terms(semantic_prompt))
+    rejected: set[str] = set()
+    for item in checkpoint.negative_memory:
+        if not isinstance(item, dict):
+            continue
+        concepts = {str(value) for value in item.get("concepts", []) if value}
+        lexical_terms = _item_stimulus_terms(item)
+        if not (prompt_concepts & concepts or prompt_terms & lexical_terms):
+            continue
+        for answer in _item_answers(item):
+            rejected.add(_clean_text(answer))
+    return rejected
 
 
 def _unique_nonempty(values: list[str]) -> list[str]:

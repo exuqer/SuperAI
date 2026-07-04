@@ -88,9 +88,13 @@ class EngineTrainingTest(unittest.TestCase):
             )
             report = Trainer(engine, engine.store).train_file(path, epochs=1)
             self.assertEqual(report.errors, [])
-            self.assertEqual(engine.checkpoint.accepted_answers[0]["stimulus"], "как дела?")
-            self.assertEqual(engine.checkpoint.accepted_answers[0]["lang"], "ru")
-            self.assertTrue(engine.checkpoint.accepted_answers[0]["answer_concepts"])
+            learned = [
+                item
+                for item in engine.checkpoint.accepted_answers
+                if item.get("stimulus") == "как дела?" and item.get("answer") == "Нормально, спасибо. А у тебя?"
+            ][0]
+            self.assertEqual(learned["lang"], "ru")
+            self.assertTrue(learned["answer_concepts"])
 
     def test_top_layer_training_reinforces_layer_target(self):
         with tempfile.TemporaryDirectory() as tmp:
