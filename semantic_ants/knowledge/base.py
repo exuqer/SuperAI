@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from semantic_ants.learning.checkpoint import Checkpoint
 
-SEED_VERSION = 2
+SEED_VERSION = 3
 
 ALPHABETS = {
     "ru": list("абвгдеёжзийклмнопрстуфхцчшщъыьэюя"),
@@ -178,6 +178,309 @@ ALIASES = {
     },
 }
 
+BASIC_CONCEPTS = [
+    {
+        "uri": "/m/basic/learning",
+        "category": "mind",
+        "aliases": {"ru": ["учиться", "обучение", "обучи", "учи"], "en": ["learning", "learn", "teach"]},
+        "label": "обучение",
+        "definition": "способ становиться умнее через примеры, ошибки и повторение",
+        "action": "связывает новый пример с уже знакомым смыслом",
+        "image": "новая мысль делает шаг от слова к смыслу",
+    },
+    {
+        "uri": "/m/basic/child",
+        "category": "person",
+        "aliases": {"ru": ["ребенок", "ребёнок", "малыш"], "en": ["child", "kid"]},
+        "label": "ребенок",
+        "definition": "маленький человек, который учится понимать мир через простые примеры",
+        "action": "задает вопросы и запоминает понятные ответы",
+        "image": "ребенок смотрит на мир как на большую книгу с картинками",
+    },
+    {
+        "uri": "/m/basic/word",
+        "category": "language",
+        "aliases": {"ru": ["слово", "слова"], "en": ["word", "words"]},
+        "label": "слово",
+        "definition": "знак речи, который называет предмет, действие или чувство",
+        "action": "помогает дать имени смысл",
+        "image": "слово становится маленькой табличкой для мысли",
+    },
+    {
+        "uri": "/m/basic/sentence",
+        "category": "language",
+        "aliases": {"ru": ["предложение", "предложения", "фраза", "фразу"], "en": ["sentence", "phrase"]},
+        "label": "предложение",
+        "definition": "несколько слов, соединенных в законченную мысль",
+        "action": "соединяет слова так, чтобы появился понятный ответ",
+        "image": "слова выстраиваются в дорожку, по которой идет мысль",
+    },
+    {
+        "uri": "/m/basic/meaning",
+        "category": "language",
+        "aliases": {"ru": ["смысл", "смыслы", "значение"], "en": ["meaning", "meanings"]},
+        "label": "смысл",
+        "definition": "то, что слово или фраза хотят сказать на самом деле",
+        "action": "помогает понять, о чем речь",
+        "image": "смысл зажигает внутри слова маленький свет",
+    },
+    {
+        "uri": "/m/basic/question",
+        "category": "dialogue",
+        "aliases": {"ru": ["вопрос", "почему", "зачем"], "en": ["question", "why"]},
+        "label": "вопрос",
+        "definition": "фраза, которая просит найти недостающий смысл",
+        "action": "ищет ответ среди известных связей",
+        "image": "вопрос открывает дверь к новому знанию",
+    },
+    {
+        "uri": "/m/basic/answer",
+        "category": "dialogue",
+        "aliases": {"ru": ["ответ", "ответь"], "en": ["answer", "reply"]},
+        "label": "ответ",
+        "definition": "фраза, которая закрывает вопрос понятным смыслом",
+        "action": "возвращает найденный смысл человеку",
+        "image": "ответ складывает кусочки мысли в одну картинку",
+    },
+    {
+        "uri": "/m/basic/imagination",
+        "category": "mind",
+        "aliases": {
+            "ru": ["фантазия", "пофантазируй", "придумай", "вообрази", "выдумай"],
+            "en": ["fantasy", "imagination", "imagine", "invent"],
+        },
+        "label": "фантазия",
+        "definition": "умение соединять знакомые смыслы в новый образ",
+        "action": "смешивает реальные знания и воображаемые связи",
+        "image": "фантазия строит мост между тем, что есть, и тем, что можно представить",
+    },
+    {
+        "uri": "/m/basic/story",
+        "category": "language",
+        "aliases": {"ru": ["история", "сказка", "сюжет"], "en": ["story", "tale"]},
+        "label": "история",
+        "definition": "цепочка событий, где есть начало, действие и итог",
+        "action": "превращает отдельные смыслы в маленькое приключение",
+        "image": "история ведет смысл от первого шага к завершению",
+    },
+    {
+        "uri": "/m/basic/thought",
+        "category": "mind",
+        "aliases": {"ru": ["мысль", "думать", "понимать"], "en": ["thought", "think", "understand"]},
+        "label": "мысль",
+        "definition": "внутренний образ, который помогает выбрать ответ",
+        "action": "сравнивает понятия и ищет связь",
+        "image": "мысль похожа на тихую карту внутри головы",
+    },
+    {
+        "uri": "/m/basic/sun",
+        "category": "nature",
+        "aliases": {"ru": ["солнце", "солнышко"], "en": ["sun"]},
+        "label": "солнце",
+        "definition": "звезда, которая дает Земле свет и тепло",
+        "action": "светит и греет",
+        "image": "солнце поднимается и делает день ярким",
+    },
+    {
+        "uri": "/m/basic/light",
+        "category": "nature",
+        "aliases": {"ru": ["свет", "светло"], "en": ["light"]},
+        "label": "свет",
+        "definition": "то, благодаря чему можно видеть предметы",
+        "action": "показывает форму и цвет",
+        "image": "свет открывает предметы для глаз",
+    },
+    {
+        "uri": "/m/basic/sky",
+        "category": "nature",
+        "aliases": {"ru": ["небо"], "en": ["sky"]},
+        "label": "небо",
+        "definition": "пространство над землей, где видны облака, солнце и звезды",
+        "action": "держит над нами большую открытую высоту",
+        "image": "небо становится широкой синей крышей мира",
+    },
+    {
+        "uri": "/m/basic/water",
+        "category": "nature",
+        "aliases": {"ru": ["вода", "воды"], "en": ["water"]},
+        "label": "вода",
+        "definition": "жидкость, нужная живому для жизни",
+        "action": "утоляет жажду и помогает расти",
+        "image": "вода течет и оживляет сухую землю",
+    },
+    {
+        "uri": "/m/basic/fire",
+        "category": "nature",
+        "aliases": {"ru": ["огонь", "пламя"], "en": ["fire", "flame"]},
+        "label": "огонь",
+        "definition": "горячее свечение, которое дает тепло и может обжечь",
+        "action": "греет, светит и требует осторожности",
+        "image": "огонь танцует теплым светом",
+    },
+    {
+        "uri": "/m/basic/earth",
+        "category": "nature",
+        "aliases": {"ru": ["земля", "почва"], "en": ["earth", "soil"]},
+        "label": "земля",
+        "definition": "поверхность под ногами и почва для растений",
+        "action": "держит предметы и дает место для роста",
+        "image": "земля становится прочной основой под шагами",
+    },
+    {
+        "uri": "/m/basic/home",
+        "category": "place",
+        "aliases": {"ru": ["дом", "дома"], "en": ["home", "house"]},
+        "label": "дом",
+        "definition": "место, где человек живет и чувствует безопасность",
+        "action": "защищает и собирает людей вместе",
+        "image": "дом светится окном и зовет вернуться",
+    },
+    {
+        "uri": "/m/basic/tree",
+        "category": "nature",
+        "aliases": {"ru": ["дерево", "деревья"], "en": ["tree", "trees"]},
+        "label": "дерево",
+        "definition": "растение со стволом, ветками и листьями",
+        "action": "растет из земли к свету",
+        "image": "дерево тянет ветки вверх, как зеленую лестницу",
+    },
+    {
+        "uri": "/m/basic/food",
+        "category": "body",
+        "aliases": {"ru": ["еда", "пища"], "en": ["food"]},
+        "label": "еда",
+        "definition": "то, что дает телу силы",
+        "action": "питает и помогает двигаться",
+        "image": "еда превращается в энергию для нового дня",
+    },
+    {
+        "uri": "/m/basic/apple",
+        "category": "object",
+        "aliases": {"ru": ["яблоко", "яблока"], "en": ["apple"]},
+        "label": "яблоко",
+        "definition": "круглый плод, который можно есть",
+        "action": "может быть едой и примером предмета",
+        "image": "яблоко лежит в ладони как маленький круглый плод",
+    },
+    {
+        "uri": "/m/basic/person",
+        "category": "person",
+        "aliases": {"ru": ["человек", "люди"], "en": ["person", "people"]},
+        "label": "человек",
+        "definition": "живое существо, которое думает, чувствует и общается словами",
+        "action": "задает вопросы, учится и выбирает действия",
+        "image": "человек смотрит на мир и ищет смысл",
+    },
+    {
+        "uri": "/m/basic/color",
+        "category": "perception",
+        "aliases": {"ru": ["цвет", "цвета"], "en": ["color", "colour"]},
+        "label": "цвет",
+        "definition": "свойство предмета, которое видно благодаря свету",
+        "action": "помогает отличать предметы друг от друга",
+        "image": "цвет раскрашивает мир в заметные различия",
+    },
+    {
+        "uri": "/m/basic/red",
+        "category": "perception",
+        "aliases": {"ru": ["красный", "красная"], "en": ["red"]},
+        "label": "красный",
+        "definition": "яркий цвет, похожий на спелое яблоко или огонь",
+        "action": "делает предмет заметным",
+        "image": "красный вспыхивает как теплый знак внимания",
+    },
+    {
+        "uri": "/m/basic/blue",
+        "category": "perception",
+        "aliases": {"ru": ["синий", "синяя", "голубой"], "en": ["blue"]},
+        "label": "синий",
+        "definition": "цвет, который часто связывают с небом и водой",
+        "action": "дает ощущение пространства и прохлады",
+        "image": "синий раскрывается как спокойное небо",
+    },
+    {
+        "uri": "/m/basic/green",
+        "category": "perception",
+        "aliases": {"ru": ["зеленый", "зелёный", "зеленая", "зелёная"], "en": ["green"]},
+        "label": "зеленый",
+        "definition": "цвет листьев, травы и роста",
+        "action": "напоминает о жизни и растениях",
+        "image": "зеленый появляется там, где что-то растет",
+    },
+    {
+        "uri": "/m/basic/number",
+        "category": "math",
+        "aliases": {"ru": ["число", "цифра", "счет", "счёт"], "en": ["number", "count"]},
+        "label": "число",
+        "definition": "знак количества или порядка",
+        "action": "помогает считать предметы",
+        "image": "число ставит предметы в понятный порядок",
+    },
+    {
+        "uri": "/m/basic/one",
+        "category": "math",
+        "aliases": {"ru": ["один", "одна", "первый"], "en": ["one", "first"]},
+        "label": "один",
+        "definition": "самое простое количество: один предмет",
+        "action": "начинает счет",
+        "image": "один становится первой точкой счета",
+    },
+    {
+        "uri": "/m/basic/two",
+        "category": "math",
+        "aliases": {"ru": ["два", "две", "второй"], "en": ["two", "second"]},
+        "label": "два",
+        "definition": "количество из двух предметов",
+        "action": "показывает пару",
+        "image": "два ставит рядом две точки",
+    },
+    {
+        "uri": "/m/basic/joy",
+        "category": "emotion",
+        "aliases": {"ru": ["радость", "радостно"], "en": ["joy", "happy"]},
+        "label": "радость",
+        "definition": "приятное чувство, когда что-то хорошо или интересно",
+        "action": "делает ответ теплым и живым",
+        "image": "радость улыбается внутри мысли",
+    },
+    {
+        "uri": "/m/basic/sadness",
+        "category": "emotion",
+        "aliases": {"ru": ["грусть", "грустно", "печаль"], "en": ["sadness", "sad"]},
+        "label": "грусть",
+        "definition": "тихое чувство, когда чего-то не хватает или что-то огорчает",
+        "action": "просит внимания и мягкого ответа",
+        "image": "грусть делает мысль тише",
+    },
+]
+
+BASIC_RELATIONS = [
+    ("/m/basic/word", "Builds", "/m/basic/sentence"),
+    ("/m/basic/sentence", "Carries", "/m/basic/meaning"),
+    ("/m/basic/question", "Seeks", "/m/basic/answer"),
+    ("/m/basic/answer", "Uses", "/m/basic/meaning"),
+    ("/m/basic/learning", "Builds", "/m/basic/meaning"),
+    ("/m/basic/child", "LearnsBy", "/m/basic/question"),
+    ("/m/basic/imagination", "Creates", "/m/basic/story"),
+    ("/m/basic/imagination", "Combines", "/m/basic/meaning"),
+    ("/m/basic/thought", "Searches", "/m/basic/meaning"),
+    ("/m/basic/sun", "Gives", "/m/basic/light"),
+    ("/m/basic/sun", "SeenIn", "/m/basic/sky"),
+    ("/m/basic/light", "Shows", "/m/basic/color"),
+    ("/m/basic/water", "Helps", "/m/basic/tree"),
+    ("/m/basic/earth", "Holds", "/m/basic/tree"),
+    ("/m/basic/fire", "Gives", "/m/basic/light"),
+    ("/m/basic/home", "Protects", "/m/basic/person"),
+    ("/m/basic/apple", "IsA", "/m/basic/food"),
+    ("/m/basic/apple", "HasColorExample", "/m/basic/red"),
+    ("/m/basic/blue", "RelatedTo", "/m/basic/sky"),
+    ("/m/basic/green", "RelatedTo", "/m/basic/tree"),
+    ("/m/basic/number", "StartsWith", "/m/basic/one"),
+    ("/m/basic/one", "NextCanBe", "/m/basic/two"),
+    ("/m/basic/person", "CanFeel", "/m/basic/joy"),
+    ("/m/basic/person", "CanFeel", "/m/basic/sadness"),
+]
+
 SEED_EDGES = [
     ("/c/ru/привет", "/m/dialogue/greeting", "Expresses"),
     ("/c/en/hello", "/m/dialogue/greeting", "Expresses"),
@@ -223,38 +526,6 @@ SEED_EDGES = [
     ("/c/ru/шоссе", "/m/place/road", "Means"),
 ]
 
-SEED_RESPONSES = [
-    (
-        ["/m/dialogue/greeting"],
-        "Привет. Я простой исследовательский чат на смысловом графе. Можешь задать вопрос.",
-    ),
-    (
-        ["/m/dialogue/farewell"],
-        "Пока. Я сохраню обученный слой в checkpoint.",
-    ),
-    (
-        ["/m/dialogue/gratitude"],
-        "Пожалуйста.",
-    ),
-    (
-        ["/m/dialogue/identity_question"],
-        "Я прототип semantic_ants: разбираю слова, ищу смыслы в графе и учусь на feedback.",
-    ),
-    (
-        ["/m/dialogue/capability_question"],
-        "Я могу отвечать на простые вопросы, показывать алфавиты, частые слова, трассировать смыслы и запоминать feedback.",
-    ),
-    (
-        ["/m/object/apple", "/m/action/fall", "/m/body/head"],
-        "Это похоже на сюжет про падающее яблоко и ассоциацию с Ньютоном.",
-    ),
-    (
-        ["/m/object/apple", "/m/action/fall", "/m/place/floor"],
-        "Здесь смысл простой: яблоко падает вниз и оказывается на полу.",
-    ),
-]
-
-
 @dataclass(frozen=True)
 class SeedReport:
     aliases: int = 0
@@ -262,6 +533,7 @@ class SeedReport:
     responses: int = 0
     alphabets: int = 0
     common_words: int = 0
+    basic_concepts: int = 0
     changed: bool = False
 
     def to_dict(self) -> dict[str, int | bool]:
@@ -271,6 +543,7 @@ class SeedReport:
             "responses": self.responses,
             "alphabets": self.alphabets,
             "common_words": self.common_words,
+            "basic_concepts": self.basic_concepts,
             "changed": self.changed,
         }
 
@@ -284,6 +557,7 @@ def bootstrap_builtin_knowledge(checkpoint: Checkpoint, force: bool = False) -> 
     responses = _load_responses(checkpoint)
     alphabets = _load_alphabets(checkpoint)
     common_words = _load_common_words(checkpoint)
+    basic_concepts = _load_basic_concepts(checkpoint)
     checkpoint.metadata["builtin_seed_version"] = SEED_VERSION
     checkpoint.metadata["builtin_seed_loaded"] = True
     return SeedReport(
@@ -292,6 +566,7 @@ def bootstrap_builtin_knowledge(checkpoint: Checkpoint, force: bool = False) -> 
         responses=responses,
         alphabets=alphabets,
         common_words=common_words,
+        basic_concepts=basic_concepts,
         changed=True,
     )
 
@@ -318,11 +593,7 @@ def _load_edges(checkpoint: Checkpoint) -> int:
 
 
 def _load_responses(checkpoint: Checkpoint) -> int:
-    changed = 0
-    for concepts, response in SEED_RESPONSES:
-        checkpoint.remember_response(concepts, response, amount=2.0)
-        changed += 1
-    return changed
+    return 0
 
 
 def _load_alphabets(checkpoint: Checkpoint) -> int:
@@ -353,3 +624,50 @@ def _load_common_words(checkpoint: Checkpoint) -> int:
             checkpoint.metadata.setdefault("word_frequency_rank", {})[word_uri] = rank
             total += 1
     return total
+
+
+def _load_basic_concepts(checkpoint: Checkpoint) -> int:
+    total = 0
+    raw_definitions = checkpoint.metadata.get("concept_definitions", {})
+    definitions = dict(raw_definitions) if isinstance(raw_definitions, dict) else {}
+    basic_concepts: dict[str, dict[str, str]] = {}
+    for item in BASIC_CONCEPTS:
+        uri = str(item["uri"])
+        info = {
+            "label": str(item["label"]),
+            "definition": str(item["definition"]),
+            "action": str(item["action"]),
+            "image": str(item["image"]),
+            "category": str(item["category"]),
+        }
+        definitions[uri] = info
+        basic_concepts[uri] = info
+        category_uri = f"/m/basic/category/{item['category']}"
+        checkpoint.add_custom_edge(uri, category_uri, relation="IsA", weight=1.0)
+        total += 1
+        aliases = item.get("aliases", {})
+        if not isinstance(aliases, dict):
+            continue
+        for lang, words in aliases.items():
+            if not isinstance(words, list) or not words:
+                continue
+            word_uri = f"/c/{lang}/{_uri_word(str(words[0]))}"
+            checkpoint.add_custom_edge(word_uri, uri, relation="Means", weight=1.7)
+            checkpoint.add_custom_edge(uri, word_uri, relation="HasWord", weight=0.6)
+            definitions[word_uri] = info
+            for word in words:
+                clean = str(word).lower()
+                if checkpoint.aliases.get(clean) != word_uri:
+                    checkpoint.aliases[clean] = word_uri
+                    total += 1
+    for start, relation, end in BASIC_RELATIONS:
+        checkpoint.add_custom_edge(start, end, relation=relation, weight=1.2)
+        checkpoint.reinforce_edge(start, relation, end, amount=0.2)
+        total += 1
+    checkpoint.metadata["basic_concepts"] = basic_concepts
+    checkpoint.metadata["concept_definitions"] = definitions
+    return total
+
+
+def _uri_word(value: str) -> str:
+    return value.strip().lower().replace(" ", "_")

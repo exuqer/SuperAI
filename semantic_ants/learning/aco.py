@@ -11,7 +11,7 @@ from typing import Any
 from semantic_ants.ants import AntColony, AntConfig
 from semantic_ants.core.graph import SemanticGraph
 from semantic_ants.core.models import AntRoute, SemanticEdge, SemanticResult
-from semantic_ants.generation import MiniTransformerSpeechModule
+from semantic_ants.generation import TorchDialogueNavigator
 from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore
 
 
@@ -29,6 +29,7 @@ class Experience:
     reward: float | None = None
     lang: str = "auto"
     modality: str = "text"
+    history: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -47,6 +48,7 @@ class Experience:
             reward=float(reward) if reward is not None else None,
             lang=str(data.get("lang", "auto")),
             modality=str(data.get("modality", "text")),
+            history=[dict(value) for value in data.get("history", []) if isinstance(value, dict)],
             metadata=dict(data.get("metadata", {})),
         )
 
@@ -61,6 +63,7 @@ class Experience:
             "reward": self.reward,
             "lang": self.lang,
             "modality": self.modality,
+            "history": self.history,
             "metadata": self.metadata,
         }
 
@@ -282,12 +285,14 @@ class ACOTrainer:
         engine: Any,
         store: CheckpointStore,
         judge: Judge | None = None,
-        speech: MiniTransformerSpeechModule | None = None,
+        speech: TorchDialogueNavigator | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
         self.judge = judge or Judge()
-        self.speech = speech or MiniTransformerSpeechModule()
+        self.speech = speech or TorchDialogueNavigator()
+        self.model_dir = getattr(engine, "model_dir", self.store.path.parent.parent / "models")
+        self._deferred_dialogue_pairs: list[dict[str, Any]] = []
 
     def learn_file(self, path: str | Path, epochs: int = 1) -> ACOTrainingReport:
         items = self._read_jsonl(path)
@@ -296,34 +301,83 @@ class ACOTrainer:
             for index, item in enumerate(items, start=1):
                 try:
                     self.learn_experience(Experience.from_dict(item), report=report)
-                except (KeyError, TypeError, ValueError) as exc:
+                except (KeyError, RuntimeError, TypeError, ValueError) as exc:
                     report.errors.append(f"{path}:{index}: {exc}")
         self.store.save(self.engine.checkpoint)
         return report
 
-    def learn_experience(self, experience: Experience, report: ACOTrainingReport | None = None) -> RewardSignal:
+    def learn_dialogue_file(
+        self,
+        path: str | Path,
+        epochs: int = 1,
+        batch_size: int = 32,
+        max_examples: int | None = None,
+        torch_steps: int = 1,
+    ) -> ACOTrainingReport:
+        items = self._read_jsonl(path)
+        if max_examples is not None:
+            items = items[:max_examples]
+        report = ACOTrainingReport(examples=len(items), epochs=epochs)
+        for _ in range(epochs):
+            for index, item in enumerate(items, start=1):
+                try:
+                    self.learn_experience(Experience.from_dict(item), report=report, defer_speech=True)
+                except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+                    report.errors.append(f"{path}:{index}: {exc}")
+                if batch_size > 0 and index % batch_size == 0:
+                    self._flush_dialogue_training(torch_steps=torch_steps)
+                    self.store.save(self.engine.checkpoint)
+            self._flush_dialogue_training(torch_steps=torch_steps)
+        self.store.save(self.engine.checkpoint)
+        return report
+
+    def learn_experience(
+        self,
+        experience: Experience,
+        report: ACOTrainingReport | None = None,
+        defer_speech: bool = False,
+    ) -> RewardSignal:
         result = self.engine.analyze(
             experience.stimulus,
             lang=experience.lang,
             persist_result=False,
             mode="graph",
+            generate_response=False,
         )
         thought = SemanticThought.from_result(result)
-        semantic_prompt = thought.to_prompt()
-        candidates = self.speech.generate(
-            semantic_prompt,
-            self.engine.checkpoint,
-            fallback=result.response,
-            count=3,
+        semantic_prompt = self.speech.build_prompt(
+            input_text=experience.stimulus,
+            tokens=result.tokens,
+            activated_concepts=result.activated_concepts,
+            routes=result.routes,
+            checkpoint=self.engine.checkpoint,
+            chat_history=experience.history,
         )
         if experience.accepted_answer:
-            candidates.insert(0, experience.accepted_answer)
+            candidates = [experience.accepted_answer]
+        else:
+            candidates = self.speech.generate(
+                semantic_prompt,
+                self.engine.checkpoint,
+                model_dir=self.model_dir,
+                fallback=result.response,
+                count=3,
+            )
         candidates.extend(experience.rejected_answers)
         best_answer, signal = self.judge.rank(experience, thought, candidates)
         positive = signal.total >= 0.5 or bool(experience.accepted_answer or experience.positive_edges)
         negative = signal.total < 0.2 or bool(experience.rejected_answers or experience.negative_concepts)
         if positive:
-            self._reinforce(experience, thought, result.routes, best_answer, signal, report)
+            self._reinforce(
+                experience,
+                thought,
+                result.routes,
+                best_answer,
+                signal,
+                report,
+                semantic_prompt=semantic_prompt,
+                defer_speech=defer_speech,
+            )
         if negative:
             self._evaporate(experience, thought, result.routes, best_answer, signal, report)
         self.engine.checkpoint.remember_experience(
@@ -413,6 +467,18 @@ class ACOTrainer:
             "top_concepts": top_concepts,
         }
 
+    def _flush_dialogue_training(self, torch_steps: int = 1) -> None:
+        if not self._deferred_dialogue_pairs:
+            return
+        pairs = self._deferred_dialogue_pairs
+        self._deferred_dialogue_pairs = []
+        self.speech.train_pairs(
+            pairs,
+            self.engine.checkpoint,
+            model_dir=self.model_dir,
+            steps=torch_steps,
+        )
+
     def _reinforce(
         self,
         experience: Experience,
@@ -421,6 +487,8 @@ class ACOTrainer:
         answer: str,
         signal: RewardSignal,
         report: ACOTrainingReport | None,
+        semantic_prompt: str | None = None,
+        defer_speech: bool = False,
     ) -> None:
         checkpoint: Checkpoint = self.engine.checkpoint
         target = set(experience.target_concepts)
@@ -454,14 +522,27 @@ class ACOTrainer:
         accepted = experience.accepted_answer or answer
         if accepted:
             concepts = experience.target_concepts or thought.active_concepts
-            self.speech.train_pair(
-                experience.stimulus,
-                thought.to_prompt(),
-                concepts,
-                accepted,
-                checkpoint,
-                reward=max(signal.total, 0.1),
-            )
+            prompt = semantic_prompt or thought.to_prompt()
+            if defer_speech:
+                self._deferred_dialogue_pairs.append(
+                    {
+                        "stimulus": experience.stimulus,
+                        "prompt": prompt,
+                        "concepts": concepts,
+                        "answer": accepted,
+                        "reward": max(signal.total, 0.1),
+                    }
+                )
+            else:
+                self.speech.train_pair(
+                    experience.stimulus,
+                    prompt,
+                    concepts,
+                    accepted,
+                    checkpoint,
+                    reward=max(signal.total, 0.1),
+                    model_dir=self.model_dir,
+                )
             if report:
                 report.accepted_answers += 1
 

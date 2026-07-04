@@ -125,6 +125,8 @@ class SemanticResult:
     summary: str
     response: str
     sources: list[str]
+    session_id: str | None = None
+    context_turns: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +139,8 @@ class SemanticResult:
             "summary": self.summary,
             "response": self.response,
             "sources": self.sources,
+            "session_id": self.session_id,
+            "context_turns": self.context_turns,
         }
 
 

@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from semantic_ants.datasets import download_spc_dataset
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
 from semantic_ants.learning import ACOTrainer, CheckpointStore, FeedbackTrainer, Trainer
@@ -31,6 +32,8 @@ def analyze_command(args: argparse.Namespace) -> int:
         max_depth=args.depth,
         top_concepts=args.top_concepts,
         mode=args.mode,
+        session_id=getattr(args, "session_id", None),
+        reset_session=getattr(args, "reset_session", False),
     )
     if args.json:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -83,6 +86,45 @@ def learn_command(args: argparse.Namespace) -> int:
     return 1 if report.errors else 0
 
 
+def learn_dialogues_command(args: argparse.Namespace) -> int:
+    engine = _engine_from_args(args)
+    report = ACOTrainer(engine, engine.store).learn_dialogue_file(
+        args.path,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        max_examples=args.max_examples,
+        torch_steps=args.torch_steps,
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(
+            " ".join(
+                [
+                    f"examples={report.examples}",
+                    f"epochs={report.epochs}",
+                    f"reinforced={report.reinforced_edges}",
+                    f"evaporated={report.evaporated_edges}",
+                    f"accepted={report.accepted_answers}",
+                ]
+            )
+        )
+        if report.errors:
+            print("errors:")
+            for error in report.errors:
+                print(error)
+    return 1 if report.errors else 0
+
+
+def download_dataset_command(args: argparse.Namespace) -> int:
+    if args.dataset != "spc":
+        raise ValueError(f"Неподдерживаемый датасет: {args.dataset}")
+    count = download_spc_dataset(args.split, args.output, limit=args.limit)
+    payload = {"dataset": args.dataset, "split": args.split, "output": args.output, "examples": count}
+    print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else f"examples={count} output={args.output}")
+    return 0
+
+
 def feedback_command(args: argparse.Namespace) -> int:
     engine = _engine_from_args(args)
     corrected_concepts = _split_csv(args.corrected_concepts)
@@ -107,6 +149,9 @@ def bootstrap_command(args: argparse.Namespace) -> int:
 
 def chat_command(args: argparse.Namespace) -> int:
     engine = _engine_from_args(args)
+    if args.reset_session:
+        engine.checkpoint.reset_chat_session(args.session_id)
+        engine.store.save(engine.checkpoint)
     if args.once:
         return _chat_once(engine, args.once, args)
     print("semantic_ants chat. Команды выхода: /exit, /quit, выход.")
@@ -134,6 +179,7 @@ def _chat_once(engine: SemanticEngine, text: str, args: argparse.Namespace) -> i
         max_depth=args.depth,
         top_concepts=args.top_concepts,
         mode=args.mode,
+        session_id=args.session_id,
     )
     if args.json:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -212,6 +258,8 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("text")
     _add_runtime_args(analyze)
     analyze.add_argument("--mode", choices=["graph", "hybrid"], default="graph")
+    analyze.add_argument("--session-id")
+    analyze.add_argument("--reset-session", action="store_true")
     analyze.add_argument("--trace", action="store_true")
     analyze.add_argument("--json", action="store_true")
     analyze.set_defaults(handler=analyze_command)
@@ -230,6 +278,24 @@ def _parser() -> argparse.ArgumentParser:
     learn.add_argument("--json", action="store_true")
     learn.set_defaults(handler=learn_command)
 
+    learn_dialogues = subparsers.add_parser("learn-dialogues")
+    learn_dialogues.add_argument("path")
+    learn_dialogues.add_argument("--epochs", type=int, default=1)
+    learn_dialogues.add_argument("--batch-size", type=int, default=32)
+    learn_dialogues.add_argument("--max-examples", type=int)
+    learn_dialogues.add_argument("--torch-steps", type=int, default=1)
+    _add_runtime_args(learn_dialogues)
+    learn_dialogues.add_argument("--json", action="store_true")
+    learn_dialogues.set_defaults(handler=learn_dialogues_command)
+
+    download_dataset = subparsers.add_parser("download-dataset")
+    download_dataset.add_argument("dataset", choices=["spc"])
+    download_dataset.add_argument("--split", choices=["train", "dev", "valid", "test", "synth"], default="train")
+    download_dataset.add_argument("--limit", type=int)
+    download_dataset.add_argument("--output", required=True)
+    download_dataset.add_argument("--json", action="store_true")
+    download_dataset.set_defaults(handler=download_dataset_command)
+
     bootstrap = subparsers.add_parser("bootstrap")
     bootstrap.add_argument("--force", action="store_true")
     bootstrap.add_argument("--json", action="store_true")
@@ -239,6 +305,8 @@ def _parser() -> argparse.ArgumentParser:
     _add_runtime_args(chat)
     chat.add_argument("--once")
     chat.add_argument("--mode", choices=["graph", "hybrid"], default="graph")
+    chat.add_argument("--session-id", default="default")
+    chat.add_argument("--reset-session", action="store_true")
     chat.add_argument("--trace", action="store_true")
     chat.add_argument("--json", action="store_true")
     chat.set_defaults(handler=chat_command)
@@ -291,11 +359,13 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "bootstrap",
         "chat",
         "dream",
+        "download-dataset",
         "eval",
         "export",
         "feedback",
         "inspect-memory",
         "learn",
+        "learn-dialogues",
         "train",
     }
     if argv and argv[0] not in commands and not argv[0].startswith("-"):

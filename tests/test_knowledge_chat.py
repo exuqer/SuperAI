@@ -10,21 +10,43 @@ from semantic_ants.engine import EngineConfig, SemanticEngine
 
 
 class KnowledgeChatTest(unittest.TestCase):
-    def test_builtin_greeting_works_offline(self):
+    def test_builtin_greeting_routes_offline(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = SemanticEngine(
                 config=EngineConfig(state_dir=Path(tmp), allow_network=False, ant_count=8, max_depth=3)
             )
             result = engine.analyze("привет", lang="ru")
-            self.assertIn("Привет", result.response)
+            self.assertTrue(result.response)
             self.assertTrue(any(item["uri"] == "/m/dialogue/greeting" for item in result.activated_concepts))
 
-    def test_builtin_alphabet_response(self):
+    def test_builtin_alphabet_routes_without_template_response(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp), allow_network=False))
             result = engine.analyze("покажи русский алфавит", lang="ru")
-            self.assertIn("Русский алфавит", result.response)
-            self.assertIn("а б в", result.response)
+            self.assertTrue(result.response)
+            self.assertTrue(any(item["uri"] == "/m/language/alphabet" for item in result.activated_concepts))
+
+    def test_builtin_basic_concept_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp), allow_network=False))
+            result = engine.analyze("что такое солнце", lang="ru")
+            self.assertTrue(any(item["uri"] == "/m/basic/sun" for item in result.activated_concepts))
+
+    def test_chat_context_is_persisted_by_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp), allow_network=False))
+            first = engine.analyze("hello", lang="en", session_id="test")
+            second = engine.analyze("what now", lang="en", session_id="test")
+            self.assertEqual(first.context_turns, [])
+            self.assertTrue(any(turn["text"] == "hello" for turn in second.context_turns))
+            self.assertGreaterEqual(len(engine.checkpoint.chat_sessions["test"]), 4)
+
+    def test_chat_reset_session_clears_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp), allow_network=False))
+            engine.analyze("hello", lang="en", session_id="test")
+            result = engine.analyze("fresh start", lang="en", session_id="test", reset_session=True)
+            self.assertEqual(result.context_turns, [])
 
     def test_chat_once_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -48,7 +70,8 @@ class KnowledgeChatTest(unittest.TestCase):
                 env={**os.environ, "PYTHONUTF8": "1"},
             )
             payload = json.loads(completed.stdout)
-            self.assertIn("semantic_ants", payload["response"])
+            self.assertTrue(payload["response"])
+            self.assertEqual(payload["session_id"], "default")
 
 
 if __name__ == "__main__":

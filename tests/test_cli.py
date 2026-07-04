@@ -64,6 +64,45 @@ class CliTest(unittest.TestCase):
             )
             self.assertIn("examples=1", completed.stdout)
 
+    def test_learn_dialogues_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dialogues.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "stimulus": "hello",
+                        "accepted_answer": "learned dialogue reply",
+                        "history": [],
+                        "lang": "en",
+                        "reward": 1.0,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "semantic_ants",
+                    "--state-dir",
+                    tmp,
+                    "learn-dialogues",
+                    str(path),
+                    "--epochs",
+                    "1",
+                    "--max-examples",
+                    "1",
+                    "--no-cache-refresh",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("examples=1", completed.stdout)
+            self.assertTrue((Path(tmp) / "models" / "dialogue.pt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

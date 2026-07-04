@@ -9,7 +9,7 @@ from semantic_ants.ants import AntColony, AntConfig
 from semantic_ants.core.graph import SemanticGraph
 from semantic_ants.core.models import ConceptNode, SemanticEdge, SemanticResult
 from semantic_ants.core.normalization import detect_language, text_to_concept_uri, tokenize
-from semantic_ants.generation import Interpreter, MiniTransformerSpeechModule
+from semantic_ants.generation import Interpreter, TorchDialogueNavigator
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
 from semantic_ants.learning.aco import Judge, SemanticThought
 from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore
@@ -48,8 +48,9 @@ class SemanticEngine:
             report = bootstrap_builtin_knowledge(self.checkpoint)
             if report.changed:
                 self.store.save(self.checkpoint)
-        self.interpreter = Interpreter()
-        self.speech = MiniTransformerSpeechModule()
+        self.model_dir = self.config.state_dir / "models"
+        self.speech = TorchDialogueNavigator()
+        self.interpreter = Interpreter(navigator=self.speech, model_dir=self.model_dir)
         self.judge = Judge()
 
     def analyze(
@@ -62,7 +63,16 @@ class SemanticEngine:
         top_concepts: int | None = None,
         mode: str = "graph",
         candidates: int = 3,
+        session_id: str | None = None,
+        reset_session: bool = False,
+        generate_response: bool = True,
     ) -> SemanticResult:
+        if reset_session:
+            self.checkpoint.reset_chat_session(session_id)
+        chat_history = self.checkpoint.session_history(
+            session_id,
+            limit=self.speech.config.max_context_turns,
+        )
         selected_lang = self._select_lang(text, lang)
         tokens = tokenize(text)
         graph = SemanticGraph()
@@ -82,6 +92,8 @@ class SemanticEngine:
             graph=graph,
             checkpoint=self.checkpoint,
             top_concepts=top_concepts or self.config.top_concepts,
+            chat_history=chat_history,
+            generate_response=generate_response,
         )
         sources = sorted({edge.source for edge in graph.edges()})
         result = SemanticResult(
@@ -94,19 +106,33 @@ class SemanticEngine:
             summary=summary,
             response=response,
             sources=sources,
+            session_id=session_id,
+            context_turns=chat_history,
         )
-        if mode == "hybrid":
+        if mode == "hybrid" and generate_response:
             result = self._hybridize(result, candidates=candidates)
         if persist_result:
             self.checkpoint.remember_result(result.to_dict())
+            concepts = [str(item.get("uri")) for item in result.activated_concepts if item.get("uri")]
+            self.checkpoint.remember_chat_turn(session_id, "user", text, result.result_id, concepts)
+            self.checkpoint.remember_chat_turn(session_id, "assistant", result.response, result.result_id, concepts)
             self.store.save(self.checkpoint)
         return result
 
     def _hybridize(self, result: SemanticResult, candidates: int = 3) -> SemanticResult:
         thought = SemanticThought.from_result(result)
+        prompt = self.speech.build_prompt(
+            input_text=result.input_text,
+            tokens=result.tokens,
+            activated_concepts=result.activated_concepts,
+            routes=result.routes,
+            checkpoint=self.checkpoint,
+            chat_history=result.context_turns,
+        )
         generated = self.speech.generate(
-            thought.to_prompt(),
+            prompt,
             self.checkpoint,
+            model_dir=self.model_dir,
             fallback=result.response,
             count=candidates,
         )

@@ -27,6 +27,7 @@ class Checkpoint:
     learned_bridges: list[dict[str, Any]] = field(default_factory=list)
     accepted_answers: list[dict[str, Any]] = field(default_factory=list)
     route_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
+    chat_sessions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     mini_generator: dict[str, Any] = field(default_factory=dict)
     last_result_id: str | None = None
@@ -151,6 +152,40 @@ class Checkpoint:
             oldest = next(iter(self.results))
             del self.results[oldest]
 
+    def session_history(self, session_id: str | None, limit: int = 8) -> list[dict[str, Any]]:
+        if not session_id:
+            return []
+        history = self.chat_sessions.get(session_id, [])
+        return [dict(item) for item in history[-limit:]]
+
+    def reset_chat_session(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        self.chat_sessions[session_id] = []
+
+    def remember_chat_turn(
+        self,
+        session_id: str | None,
+        role: str,
+        text: str,
+        result_id: str,
+        concepts: list[str] | None = None,
+        limit: int = 80,
+    ) -> None:
+        if not session_id or not text:
+            return
+        turns = self.chat_sessions.setdefault(session_id, [])
+        turns.append(
+            {
+                "role": role,
+                "text": text,
+                "result_id": result_id,
+                "concepts": list(dict.fromkeys(concepts or [])),
+                "created_at": time.time(),
+            }
+        )
+        del turns[:-limit]
+
     def learned_edges(self) -> list[SemanticEdge]:
         edges: list[SemanticEdge] = []
         seen: set[str] = set()
@@ -236,6 +271,7 @@ class Checkpoint:
             "learned_bridges": self.learned_bridges,
             "accepted_answers": self.accepted_answers,
             "route_stats": self.route_stats,
+            "chat_sessions": self.chat_sessions,
             "metadata": self.metadata,
             "mini_generator": self.mini_generator,
             "last_result_id": self.last_result_id,
@@ -259,6 +295,11 @@ class Checkpoint:
             learned_bridges=list(data.get("learned_bridges", [])),
             accepted_answers=list(data.get("accepted_answers", [])),
             route_stats=dict(data.get("route_stats", {})),
+            chat_sessions={
+                str(key): list(value)
+                for key, value in dict(data.get("chat_sessions", {})).items()
+                if isinstance(value, list)
+            },
             metadata=dict(data.get("metadata", {})),
             mini_generator=dict(data.get("mini_generator", {})),
             last_result_id=data.get("last_result_id"),
