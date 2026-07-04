@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from semantic_ants.generation.torch_dialogue import TorchDialogueNavigator
+from semantic_ants.generation.sentences import build_vector_candidates, render_uri
 from semantic_ants.learning.checkpoint import Checkpoint
 
 
@@ -22,19 +24,25 @@ class SemanticVectorInterpreter:
         count: int = 1,
     ) -> str:
         normalized = _normalize_vector(semantic_vector)
-        fallback = self._fallback_sentence(normalized, checkpoint)
+        lang = _vector_lang(normalized)
+        fallback_candidates = build_vector_candidates(normalized, checkpoint, count=max(count, 4))
         prompt = self._prompt(normalized)
         candidates = self.navigator.generate(
             prompt,
             checkpoint,
             model_dir=self.model_dir,
-            fallback=fallback,
-            count=count,
+            fallback=fallback_candidates,
+            count=max(count, 4),
+            lang=lang,
         )
-        return candidates[0] if candidates else fallback
+        selected = _select_candidate(candidates, normalized, lang)
+        if selected:
+            return selected
+        return fallback_candidates[0] if fallback_candidates else "Смысл пока слишком разрежен для уверенного ответа."
 
     def _prompt(self, semantic_vector: dict[str, Any]) -> str:
         compact = {
+            "lang": semantic_vector.get("lang", "auto"),
             "input_text": semantic_vector.get("input_text", ""),
             "strength_vector": semantic_vector.get("strength_vector", []),
             "top_domain": semantic_vector.get("top_domain"),
@@ -44,29 +52,10 @@ class SemanticVectorInterpreter:
             [
                 "semantic_vector:",
                 json.dumps(compact, ensure_ascii=False, sort_keys=True),
-                "task: turn the semantic vector into one natural sentence",
+                "task: turn the semantic vector into one natural sentence in the same language as the input",
                 "assistant:",
             ]
         )
-
-    def _fallback_sentence(self, semantic_vector: dict[str, Any], checkpoint: Checkpoint) -> str:
-        items = [item for item in semantic_vector.get("items", []) if isinstance(item, dict)]
-        top_domain = semantic_vector.get("top_domain")
-        if not isinstance(top_domain, dict):
-            top_domain = next((item for item in items if int(item.get("layer", 1)) == 0), None)
-        domain_label = _label(top_domain, checkpoint) if isinstance(top_domain, dict) else ""
-        concept_labels = [
-            _label(item, checkpoint)
-            for item in items
-            if _label(item, checkpoint) and (not domain_label or _label(item, checkpoint) != domain_label)
-        ][:4]
-        if domain_label and concept_labels:
-            return f"Смысловой вектор указывает на область «{domain_label}» и понятия: {', '.join(concept_labels)}."
-        if domain_label:
-            return f"Смысловой вектор указывает на область «{domain_label}»."
-        if concept_labels:
-            return f"Смысловой вектор связан с понятиями: {', '.join(concept_labels)}."
-        return "Смысловой вектор пуст или недостаточно активирован."
 
 
 def _normalize_vector(value: dict[str, Any] | list[dict[str, Any]]) -> dict[str, Any]:
@@ -78,13 +67,51 @@ def _normalize_vector(value: dict[str, Any] | list[dict[str, Any]]) -> dict[str,
     return {"version": 1, "items": []}
 
 
+def _vector_lang(semantic_vector: dict[str, Any]) -> str:
+    lang = str(semantic_vector.get("lang", "auto"))
+    if lang in {"ru", "en"}:
+        return lang
+    text = str(semantic_vector.get("input_text", ""))
+    return "ru" if any(ch.lower() in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя" for ch in text) else "en"
+
+
+def _select_candidate(candidates: list[str], semantic_vector: dict[str, Any], lang: str) -> str:
+    values = [candidate for candidate in candidates if candidate and _language_matches(candidate, lang)]
+    if not values:
+        values = [candidate for candidate in candidates if candidate]
+    if not values:
+        return ""
+    seed = hashlib.sha256(
+        "|".join(
+            [
+                str(semantic_vector.get("input_text", "")),
+                lang,
+                str(semantic_vector.get("top_domain", {})),
+                ",".join(str(item.get("uri", "")) for item in semantic_vector.get("items", [])[:6] if isinstance(item, dict)),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    return values[int(seed[:2], 16) % len(values)]
+
+
+def _language_matches(text: str, lang: str) -> bool:
+    if lang == "ru":
+        return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text)
+    if lang == "en":
+        return not any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text)
+    return True
+
+
 def _label(item: dict[str, Any] | None, checkpoint: Checkpoint) -> str:
     if not item:
         return ""
-    label = str(item.get("label") or "")
+    uri = str(item.get("uri") or "")
+    label = render_uri(uri, checkpoint, str(item.get("language") or "auto"))
     if label:
         return label
-    uri = str(item.get("uri") or "")
+    raw_label = str(item.get("label") or "")
+    if raw_label:
+        return raw_label
     learned = _learned_label(uri, checkpoint)
     if learned:
         return learned

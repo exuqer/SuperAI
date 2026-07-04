@@ -131,6 +131,7 @@ class SemanticEngine:
             chat_history=chat_history,
             generate_response=generate_response,
             strength_vector=selected_strength,
+            lang=selected_lang,
         )
         sources = sorted({edge.source for edge in graph.edges()})
         signal_trace = self._signal_trace(routes)
@@ -171,6 +172,7 @@ class SemanticEngine:
             routes=result.routes,
             checkpoint=self.checkpoint,
             chat_history=result.context_turns,
+            lang=result.lang,
         )
         generated = self.speech.generate(
             prompt,
@@ -178,6 +180,7 @@ class SemanticEngine:
             model_dir=self.model_dir,
             fallback=result.response,
             count=candidates,
+            lang=result.lang,
         )
         answer, _ = self.judge.rank_freeform(result.input_text, thought, generated)
         return replace(result, response=answer)

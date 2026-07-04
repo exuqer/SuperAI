@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from semantic_ants.learning.checkpoint import Checkpoint
 
-SEED_VERSION = 4
+SEED_VERSION = 6
 
 ALPHABETS = {
     "ru": list("абвгдеёжзийклмнопрстуфхцчшщъыьэюя"),
@@ -25,6 +25,9 @@ COMMON_WORDS = {
         "а",
         "по",
         "это",
+        "такое",
+        "такая",
+        "такие",
         "она",
         "этот",
         "к",
@@ -428,6 +431,15 @@ BASIC_CONCEPTS = [
         "image": "солнце поднимается и делает день ярким",
     },
     {
+        "uri": "/m/basic/star",
+        "category": "nature",
+        "aliases": {"ru": ["звезда"], "en": ["star"]},
+        "label": "звезда",
+        "definition": "светящееся небесное тело",
+        "action": "горит далеко в небе",
+        "image": "звезда мерцает как маленький огонь в темноте",
+    },
+    {
         "uri": "/m/basic/light",
         "category": "nature",
         "aliases": {"ru": ["свет", "светло"], "en": ["light"]},
@@ -435,6 +447,15 @@ BASIC_CONCEPTS = [
         "definition": "то, благодаря чему можно видеть предметы",
         "action": "показывает форму и цвет",
         "image": "свет открывает предметы для глаз",
+    },
+    {
+        "uri": "/m/basic/heat",
+        "category": "nature",
+        "aliases": {"ru": ["тепло"], "en": ["heat", "warmth"]},
+        "label": "тепло",
+        "definition": "ощущение или состояние, когда становится теплее",
+        "action": "согревает и делает воздух мягче",
+        "image": "тепло ложится на кожу как мягкое одеяло",
     },
     {
         "uri": "/m/basic/sky",
@@ -611,8 +632,12 @@ BASIC_RELATIONS = [
     ("/m/basic/imagination", "Combines", "/m/basic/meaning"),
     ("/m/basic/thought", "Searches", "/m/basic/meaning"),
     ("/m/basic/sun", "Gives", "/m/basic/light"),
+    ("/m/basic/sun", "IsA", "/m/basic/star"),
+    ("/m/basic/sun", "Gives", "/m/basic/heat"),
     ("/m/basic/sun", "SeenIn", "/m/basic/sky"),
+    ("/m/basic/star", "SeenIn", "/m/basic/sky"),
     ("/m/basic/light", "Shows", "/m/basic/color"),
+    ("/m/basic/heat", "RelatedTo", "/m/basic/light"),
     ("/m/basic/water", "Helps", "/m/basic/tree"),
     ("/m/basic/earth", "Holds", "/m/basic/tree"),
     ("/m/basic/fire", "Gives", "/m/basic/light"),

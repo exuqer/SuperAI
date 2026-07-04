@@ -6,7 +6,9 @@ from typing import Any
 
 from semantic_ants.core.graph import SemanticGraph
 from semantic_ants.core.models import AntRoute
+from semantic_ants.core.normalization import detect_language
 from semantic_ants.generation.torch_dialogue import TorchDialogueNavigator
+from semantic_ants.generation.sentences import render_uri
 from semantic_ants.generation.vector_interpreter import SemanticVectorInterpreter
 from semantic_ants.learning.checkpoint import Checkpoint
 
@@ -30,11 +32,13 @@ class Interpreter:
         chat_history: list[dict[str, Any]] | None = None,
         generate_response: bool = True,
         strength_vector: tuple[int, ...] = (),
+        lang: str | None = None,
     ) -> tuple[list[dict[str, Any]], str, str, dict[str, Any]]:
-        activated = self._rank_concepts(routes, graph, checkpoint, top_concepts)
-        vector_items = self._rank_concepts(routes, graph, checkpoint, max(top_concepts, 12))
-        semantic_vector = self._semantic_vector(input_text, tokens, vector_items, routes, strength_vector)
-        summary = self._summary(tokens, activated)
+        selected_lang = lang if lang in {"ru", "en"} else detect_language(input_text)
+        activated = self._rank_concepts(routes, graph, checkpoint, top_concepts, selected_lang)
+        vector_items = self._rank_concepts(routes, graph, checkpoint, max(top_concepts, 12), selected_lang)
+        semantic_vector = self._semantic_vector(input_text, tokens, vector_items, routes, strength_vector, selected_lang)
+        summary = self._summary(tokens, activated, selected_lang)
         response = (
             self._response(input_text, tokens, routes, activated, checkpoint, summary, chat_history, semantic_vector)
             if generate_response
@@ -48,6 +52,7 @@ class Interpreter:
         graph: SemanticGraph,
         checkpoint: Checkpoint,
         top_concepts: int,
+        lang: str,
     ) -> list[dict[str, Any]]:
         scores: Counter[str] = Counter()
         sources: dict[str, set[str]] = {}
@@ -61,7 +66,7 @@ class Interpreter:
         ranked = []
         for uri, score in scores.most_common(top_concepts):
             node = graph.nodes.get(uri)
-            label = _label_for(uri, node, checkpoint)
+            label = _label_for(uri, node, checkpoint, lang)
             ranked.append(
                 {
                     "uri": uri,
@@ -81,6 +86,7 @@ class Interpreter:
         items: list[dict[str, Any]],
         routes: list[AntRoute],
         strength_vector: tuple[int, ...],
+        lang: str,
     ) -> dict[str, Any]:
         layers: dict[str, list[dict[str, Any]]] = {}
         for item in items:
@@ -89,6 +95,7 @@ class Interpreter:
         top_domain = next((item for item in items if int(item.get("layer", 1)) == 0), None)
         return {
             "version": 1,
+            "lang": lang,
             "input_text": input_text,
             "tokens": tokens,
             "strength_vector": list(strength_vector),
@@ -105,11 +112,13 @@ class Interpreter:
             ],
         }
 
-    def _summary(self, tokens: list[str], activated: list[dict[str, Any]]) -> str:
+    def _summary(self, tokens: list[str], activated: list[dict[str, Any]], lang: str) -> str:
         if not activated:
-            return "Смысловые маршруты не найдены."
+            return "No semantic routes found." if lang == "en" else "Смысловые маршруты не найдены."
         labels = ", ".join(item["label"] for item in activated[:3])
         token_text = " ".join(tokens)
+        if lang == "en":
+            return f'The phrase "{token_text}" is connected with concepts: {labels}.'
         return f"Фраза «{token_text}» связана с концептами: {labels}."
 
     def _response(
@@ -127,7 +136,10 @@ class Interpreter:
         return response or summary
 
 
-def _label_for(uri: str, node: Any, checkpoint: Checkpoint) -> str:
+def _label_for(uri: str, node: Any, checkpoint: Checkpoint, lang: str) -> str:
+    localized = render_uri(uri, checkpoint, lang)
+    if localized:
+        return localized
     learned = _learned_label(uri, checkpoint)
     if learned:
         return learned

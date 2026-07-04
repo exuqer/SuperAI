@@ -95,7 +95,9 @@ class ACOLearningTest(unittest.TestCase):
                 corrected_response="Corrected apple answer.",
             )
             hybrid = engine.analyze("apple", lang="en", mode="hybrid")
-            self.assertEqual(hybrid.response, "Corrected apple answer.")
+            self.assertNotEqual(hybrid.response, result.response)
+            self.assertIn("corrected", hybrid.response.lower())
+            self.assertIn("apple", hybrid.response.lower())
 
     def test_dream_creates_only_weak_bridges(self):
         with tempfile.TemporaryDirectory() as tmp:

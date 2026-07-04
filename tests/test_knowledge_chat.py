@@ -31,6 +31,17 @@ class KnowledgeChatTest(unittest.TestCase):
             engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp), allow_network=False))
             result = engine.analyze("что такое солнце", lang="ru")
             self.assertTrue(any(item["uri"] == "/m/basic/sun" for item in result.activated_concepts))
+            self.assertTrue(result.response)
+            self.assertNotIn("Солнце относится к области природы и природных явлений.", result.response)
+            self.assertTrue(any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in result.response))
+
+    def test_answer_language_matches_question_language(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp), allow_network=False))
+            ru_result = engine.analyze("что такое солнце", lang="ru")
+            en_result = engine.analyze("what is the sun", lang="en")
+            self.assertTrue(any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in ru_result.response))
+            self.assertFalse(any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in en_result.response))
 
     def test_chat_context_is_persisted_by_session(self):
         with tempfile.TemporaryDirectory() as tmp:

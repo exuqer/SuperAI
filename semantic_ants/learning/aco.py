@@ -375,6 +375,7 @@ class ACOTrainer:
             routes=result.routes,
             checkpoint=self.engine.checkpoint,
             chat_history=experience.history,
+            lang=experience.lang,
         )
         if experience.accepted_answer:
             candidates = [experience.accepted_answer]
@@ -385,6 +386,7 @@ class ACOTrainer:
                 model_dir=self.model_dir,
                 fallback=result.response,
                 count=3,
+                lang=experience.lang,
             )
         candidates.extend(experience.rejected_answers)
         best_answer, signal = self.judge.rank(experience, thought, candidates)

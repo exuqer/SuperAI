@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from semantic_ants.core.models import SemanticEdge, edge_key
+from semantic_ants.core.normalization import detect_language, text_to_concept_uri, tokenize
 
 
 @dataclass
 class Checkpoint:
     """Обучаемый слой поверх внешнего графа знаний."""
 
-    version: int = 3
+    version: int = 4
     pheromones: dict[str, float] = field(default_factory=dict)
     concept_pheromones: dict[str, float] = field(default_factory=dict)
     suppressed_concepts: dict[str, float] = field(default_factory=dict)
@@ -92,8 +93,19 @@ class Checkpoint:
         if not concepts or not response:
             return
         key = concept_set_key(concepts)
-        item = self.response_memory.setdefault(key, {"response": response, "weight": 0.0})
-        item["response"] = response
+        lang = _detect_lang_from_concepts(concepts) or detect_language(response)
+        item = self.response_memory.setdefault(
+            key,
+            {
+                "concepts": list(dict.fromkeys(concepts)),
+                "answer_concepts": [],
+                "lang": lang,
+                "weight": 0.0,
+            },
+        )
+        item["concepts"] = list(dict.fromkeys(concepts))
+        item["answer_concepts"] = _text_to_concepts(response, lang=lang, checkpoint=self)
+        item["lang"] = lang
         item["weight"] = float(item.get("weight", 0.0)) + amount
 
     def remember_concept_label(self, concept_uri: str, label: str) -> None:
@@ -118,14 +130,17 @@ class Checkpoint:
         answer: str,
         reward: float = 1.0,
         limit: int = 500,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if not answer:
-            return
+            return None
+        lang = _detect_lang_from_concepts(concepts) or detect_language(answer)
+        answer_concepts = _text_to_concepts(answer, lang=lang, checkpoint=self)
         item = {
             "stimulus": stimulus,
             "semantic_prompt": semantic_prompt,
             "concepts": list(dict.fromkeys(concepts)),
-            "answer": answer,
+            "answer_concepts": answer_concepts,
+            "lang": lang,
             "reward": float(reward),
             "created_at": time.time(),
         }
@@ -133,6 +148,7 @@ class Checkpoint:
         self.accepted_answers.sort(key=lambda value: float(value.get("reward", 0.0)), reverse=True)
         del self.accepted_answers[limit:]
         self.remember_response(item["concepts"], answer, amount=max(float(reward), 0.1))
+        return item
 
     def remember_negative(
         self,
@@ -142,17 +158,20 @@ class Checkpoint:
         answer: str,
         reason: str = "",
         limit: int = 500,
-    ) -> None:
+    ) -> dict[str, Any]:
+        lang = _detect_lang_from_concepts(concepts) or detect_language(answer or stimulus or semantic_prompt)
         item = {
             "stimulus": stimulus,
             "semantic_prompt": semantic_prompt,
             "concepts": list(dict.fromkeys(concepts)),
-            "answer": answer,
+            "answer_concepts": _text_to_concepts(answer, lang=lang, checkpoint=self) if answer else [],
+            "lang": lang,
             "reason": reason,
             "created_at": time.time(),
         }
         self.negative_memory.append(item)
         del self.negative_memory[:-limit]
+        return item
 
     def remember_experience(self, experience: dict[str, Any], limit: int = 2000) -> None:
         self.experiences.append({**experience, "stored_at": time.time()})
@@ -320,6 +339,7 @@ class Checkpoint:
             "experiences": self.experiences,
             "learned_bridges": self.learned_bridges,
             "accepted_answers": self.accepted_answers,
+            "speech_patterns": self.accepted_answers,
             "route_stats": self.route_stats,
             "chat_sessions": self.chat_sessions,
             "metadata": self.metadata,
@@ -332,18 +352,25 @@ class Checkpoint:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Checkpoint":
+        accepted_answers = _normalize_patterns(
+            data.get("speech_patterns", data.get("accepted_answers", [])),
+            fallback_lang=str(data.get("lang", "auto")),
+            checkpoint_data=data,
+        )
+        response_memory = _normalize_response_memory(data.get("response_memory", {}), checkpoint_data=data)
+        negative_memory = _normalize_negative_memory(data.get("negative_memory", []), checkpoint_data=data)
         return cls(
-            version=max(int(data.get("version", 1)), 3),
+            version=max(int(data.get("version", 1)), 4),
             pheromones=dict(data.get("pheromones", {})),
             concept_pheromones=dict(data.get("concept_pheromones", {})),
             suppressed_concepts=dict(data.get("suppressed_concepts", {})),
             aliases=dict(data.get("aliases", {})),
             custom_edges=list(data.get("custom_edges", [])),
-            response_memory=dict(data.get("response_memory", {})),
-            negative_memory=list(data.get("negative_memory", [])),
+            response_memory=response_memory,
+            negative_memory=negative_memory,
             experiences=list(data.get("experiences", [])),
             learned_bridges=list(data.get("learned_bridges", [])),
-            accepted_answers=list(data.get("accepted_answers", [])),
+            accepted_answers=accepted_answers,
             route_stats=dict(data.get("route_stats", {})),
             chat_sessions={
                 str(key): list(value)
@@ -390,6 +417,151 @@ class CheckpointStore:
 
 def concept_set_key(concepts: list[str]) -> str:
     return "|".join(sorted(dict.fromkeys(concepts)))
+
+
+def _text_to_concepts(text: str, lang: str | None, checkpoint: Checkpoint, limit: int = 8) -> list[str]:
+    selected_lang = lang if lang in {"ru", "en"} else detect_language(text)
+    stop_words = set(_common_words(checkpoint, selected_lang))
+    concepts: list[str] = []
+    for token in tokenize(text):
+        if token in stop_words:
+            continue
+        uri = checkpoint.aliases.get(token) or _token_to_uri(token, selected_lang)
+        if uri not in concepts:
+            concepts.append(uri)
+        if len(concepts) >= limit:
+            break
+    return concepts
+
+
+def _token_to_uri(token: str, lang: str) -> str:
+    try:
+        return text_to_concept_uri(token, lang=lang)
+    except ValueError:
+        return ""
+
+
+def _common_words(checkpoint: Checkpoint, lang: str) -> list[str]:
+    common_words = checkpoint.metadata.get("common_words", {})
+    if isinstance(common_words, dict):
+        values = common_words.get(lang, [])
+        if isinstance(values, list):
+            return [str(value).lower() for value in values]
+    return []
+
+
+def _detect_lang_from_concepts(concepts: list[str]) -> str | None:
+    for concept in concepts:
+        parts = str(concept).split("/", 3)
+        if len(parts) > 2 and parts[1] == "c" and parts[2] in {"ru", "en"}:
+            return parts[2]
+    return None
+
+
+def _normalize_patterns(
+    values: Any,
+    fallback_lang: str,
+    checkpoint_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    patterns: list[dict[str, Any]] = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        lang = str(item.get("lang") or fallback_lang)
+        concepts = [str(value) for value in item.get("concepts", []) if value]
+        answer_concepts = item.get("answer_concepts")
+        if not isinstance(answer_concepts, list) or not answer_concepts:
+            raw_answer = str(item.get("answer", ""))
+            answer_concepts = _text_to_concepts(raw_answer, lang=lang, checkpoint=_checkpoint_from_data(checkpoint_data))
+        pattern = {
+            "stimulus": str(item.get("stimulus", "")),
+            "semantic_prompt": str(item.get("semantic_prompt", "")),
+            "concepts": list(dict.fromkeys(concepts)),
+            "answer_concepts": [str(value) for value in answer_concepts if value],
+            "lang": lang if lang in {"ru", "en"} else detect_language(" ".join(answer_concepts or concepts)),
+            "reward": float(item.get("reward", 0.0)),
+            "created_at": float(item.get("created_at", time.time())),
+        }
+        patterns.append(pattern)
+    patterns.sort(key=lambda value: float(value.get("reward", 0.0)), reverse=True)
+    return patterns
+
+
+def _normalize_response_memory(values: Any, checkpoint_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not isinstance(values, dict):
+        return {}
+    checkpoint = _checkpoint_from_data(checkpoint_data)
+    normalized: dict[str, dict[str, Any]] = {}
+    for key, item in values.items():
+        if not isinstance(item, dict):
+            continue
+        concepts = [str(value) for value in str(key).split("|") if value]
+        lang = str(item.get("lang") or _detect_lang_from_concepts(concepts) or "auto")
+        answer_concepts = item.get("answer_concepts")
+        if not isinstance(answer_concepts, list) or not answer_concepts:
+            raw_response = str(item.get("response", ""))
+            answer_concepts = _text_to_concepts(raw_response, lang=lang, checkpoint=checkpoint)
+        normalized[str(key)] = {
+            "concepts": list(dict.fromkeys(concepts)),
+            "answer_concepts": [str(value) for value in answer_concepts if value],
+            "lang": lang if lang in {"ru", "en"} else _detect_lang_from_concepts(concepts) or detect_language(str(key)),
+            "weight": float(item.get("weight", 0.0)),
+        }
+    return normalized
+
+
+def _normalize_negative_memory(values: Any, checkpoint_data: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    checkpoint = _checkpoint_from_data(checkpoint_data)
+    normalized: list[dict[str, Any]] = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        concepts = [str(value) for value in item.get("concepts", []) if value]
+        lang = str(item.get("lang") or _detect_lang_from_concepts(concepts) or "auto")
+        answer_concepts = item.get("answer_concepts")
+        if not isinstance(answer_concepts, list):
+            raw_answer = str(item.get("answer", ""))
+            answer_concepts = _text_to_concepts(raw_answer, lang=lang, checkpoint=checkpoint)
+        normalized.append(
+            {
+                "stimulus": str(item.get("stimulus", "")),
+                "semantic_prompt": str(item.get("semantic_prompt", "")),
+                "concepts": list(dict.fromkeys(concepts)),
+                "answer_concepts": [str(value) for value in answer_concepts if value],
+                "lang": lang if lang in {"ru", "en"} else _detect_lang_from_concepts(concepts) or detect_language(str(item.get("answer", ""))),
+                "reason": str(item.get("reason", "")),
+                "created_at": float(item.get("created_at", time.time())),
+            }
+        )
+    return normalized
+
+
+def _checkpoint_from_data(data: dict[str, Any]) -> Checkpoint:
+    return Checkpoint(
+        version=max(int(data.get("version", 1)), 4),
+        pheromones=dict(data.get("pheromones", {})),
+        concept_pheromones=dict(data.get("concept_pheromones", {})),
+        suppressed_concepts=dict(data.get("suppressed_concepts", {})),
+        aliases=dict(data.get("aliases", {})),
+        custom_edges=list(data.get("custom_edges", [])),
+        response_memory={},
+        negative_memory=[],
+        experiences=[],
+        learned_bridges=[],
+        accepted_answers=[],
+        route_stats=dict(data.get("route_stats", {})),
+        chat_sessions={},
+        metadata=dict(data.get("metadata", {})),
+        mini_generator=dict(data.get("mini_generator", {})),
+        last_result_id=data.get("last_result_id"),
+        results={},
+        examples_seen=int(data.get("examples_seen", 0)),
+        seed=int(data.get("seed", 42)),
+    )
 
 
 def _replace_with_retry(tmp: Path, target: Path, attempts: int = 20) -> None:

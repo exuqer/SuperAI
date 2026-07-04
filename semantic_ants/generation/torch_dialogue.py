@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from semantic_ants.generation.sentences import render_concept_pattern
 from semantic_ants.learning.checkpoint import Checkpoint
 
 try:  # pragma: no cover - import path depends on runtime image
@@ -56,6 +57,7 @@ class TorchDialogueNavigator:
         routes: list[Any],
         checkpoint: Checkpoint,
         chat_history: list[dict[str, Any]] | None = None,
+        lang: str | None = None,
     ) -> str:
         lines: list[str] = ["context:"]
         for turn in (chat_history or [])[-self.config.max_context_turns :]:
@@ -65,6 +67,7 @@ class TorchDialogueNavigator:
                 lines.append(f"{role}: {text}")
         lines.extend(
             [
+                f"lang: {lang or 'auto'}",
                 f"user: {' '.join(input_text.split())}",
                 f"tokens: {', '.join(tokens)}",
                 "concepts:",
@@ -80,7 +83,7 @@ class TorchDialogueNavigator:
             concepts = getattr(route, "concepts", [])
             score = getattr(route, "total_score", 0.0)
             lines.append(f"- score={score}: {' -> '.join(map(str, concepts[:6]))}")
-        memory = self._memory_candidates("\n".join(lines), checkpoint, count=3)
+        memory = self._memory_candidates("\n".join(lines), checkpoint, count=3, lang=lang)
         if memory:
             lines.append("learned_memory:")
             for answer in memory:
@@ -93,16 +96,20 @@ class TorchDialogueNavigator:
         semantic_prompt: str,
         checkpoint: Checkpoint,
         model_dir: str | Path | None = None,
-        fallback: str = "",
+        fallback: str | list[str] = "",
         count: int = 3,
+        lang: str | None = None,
     ) -> list[str]:
         candidates: list[str] = []
         generated = self._generate_with_torch(semantic_prompt, checkpoint, model_dir)
-        if generated and self._plausible_answer(generated):
+        if generated and self._plausible_answer(generated) and _language_matches(generated, lang):
             candidates.append(generated)
-        candidates.extend(self._memory_candidates(semantic_prompt, checkpoint, count=count))
-        if fallback:
+        candidates.extend(self._memory_candidates(semantic_prompt, checkpoint, count=count, lang=lang))
+        if isinstance(fallback, list):
+            candidates.extend(fallback)
+        elif fallback:
             candidates.append(fallback)
+        candidates = [candidate for candidate in candidates if _language_matches(candidate, lang)]
         return _unique_nonempty(candidates)[: max(count, 1)]
 
     def train_pair(
@@ -139,7 +146,7 @@ class TorchDialogueNavigator:
         steps: int | None = None,
     ) -> None:
         training_pairs: list[dict[str, str]] = []
-        stored_pairs = checkpoint.mini_generator.setdefault("dialogue_pairs", [])
+        stored_pairs = checkpoint.mini_generator.setdefault("dialogue_patterns", [])
         for pair in pairs:
             stimulus = str(pair.get("stimulus", ""))
             semantic_prompt = str(pair.get("prompt", ""))
@@ -150,7 +157,7 @@ class TorchDialogueNavigator:
                 continue
             clipped_prompt = semantic_prompt[: self.config.max_prompt_chars]
             clipped_answer = accepted_answer[: self.config.max_answer_chars]
-            checkpoint.remember_accepted_answer(
+            pattern = checkpoint.remember_accepted_answer(
                 stimulus=stimulus,
                 semantic_prompt=clipped_prompt,
                 concepts=concepts,
@@ -158,18 +165,19 @@ class TorchDialogueNavigator:
                 reward=reward,
                 limit=self.config.max_pairs,
             )
-            stored_pairs.append(
-                {
-                    "stimulus": stimulus,
-                    "prompt": clipped_prompt,
-                    "answer": clipped_answer,
-                    "concepts": list(dict.fromkeys(concepts)),
-                    "reward": reward,
-                    "created_at": time.time(),
-                }
-            )
+            if isinstance(pattern, dict):
+                stored_pairs.append(
+                    {
+                        "concepts": list(dict.fromkeys(concepts)),
+                        "answer_concepts": list(pattern.get("answer_concepts", [])),
+                        "lang": pattern.get("lang", "auto"),
+                        "reward": reward,
+                        "created_at": time.time(),
+                    }
+                )
             training_pairs.append({"prompt": clipped_prompt, "answer": clipped_answer})
         del stored_pairs[:-self.config.max_pairs]
+        checkpoint.mini_generator["dialogue_patterns"] = stored_pairs
         checkpoint.mini_generator["dialogue_config"] = asdict(self.config)
         self._train_torch_pairs(training_pairs, checkpoint, model_dir, steps=steps)
 
@@ -306,26 +314,48 @@ class TorchDialogueNavigator:
         current.update(compatible)
         model.load_state_dict(current)
 
-    def _memory_candidates(self, semantic_prompt: str, checkpoint: Checkpoint, count: int) -> list[str]:
+    def _memory_candidates(
+        self,
+        semantic_prompt: str,
+        checkpoint: Checkpoint,
+        count: int,
+        lang: str | None = None,
+    ) -> list[str]:
         prompt_concepts = set(URI_RE.findall(semantic_prompt))
         prompt_terms = _terms(semantic_prompt)
         scored: list[tuple[float, str]] = []
-        for item in checkpoint.accepted_answers:
-            answer = str(item.get("answer", ""))
-            if not answer:
+        memory_items = [
+            *checkpoint.accepted_answers,
+            *checkpoint.response_memory.values(),
+        ]
+        for item in memory_items:
+            if not isinstance(item, dict):
                 continue
-            stored_prompt = str(item.get("semantic_prompt", ""))
-            stimulus = str(item.get("stimulus", ""))
-            concepts = set(map(str, item.get("concepts", [])))
-            overlap = len(prompt_concepts & concepts)
-            lexical_terms = _terms(stored_prompt) | _terms(stimulus)
+            answer_concepts = [str(value) for value in item.get("answer_concepts", []) if value]
+            concepts = [str(value) for value in item.get("concepts", []) if value]
+            if not answer_concepts and not concepts:
+                continue
+            source_concepts = set(concepts)
+            answer_concept_set = set(answer_concepts)
+            overlap = len(prompt_concepts & source_concepts)
+            answer_overlap = len(prompt_concepts & answer_concept_set)
+            lexical_terms = _terms(str(item.get("semantic_prompt", ""))) | _terms(str(item.get("stimulus", "")))
             lexical = len(prompt_terms & lexical_terms) / max(len(lexical_terms), 1)
-            reward = float(item.get("reward", 0.0))
-            score = overlap * 2.0 + lexical + reward
-            if score > 0:
-                scored.append((score, answer))
+            reward = float(item.get("reward", item.get("weight", 0.0)))
+            score = overlap * 2.0 + answer_overlap * 1.5 + lexical + reward
+            item_lang = str(item.get("lang") or lang or "auto")
+            rendered = render_concept_pattern(
+                answer_concepts or concepts,
+                checkpoint,
+                lang=item_lang if item_lang in {"ru", "en"} else None,
+                reward=reward,
+                count=max(1, min(count, 3)),
+            )
+            for answer in rendered:
+                if score > 0 and answer:
+                    scored.append((score, answer))
         scored.sort(key=lambda value: value[0], reverse=True)
-        return [answer for _, answer in scored[:count]]
+        return _unique_nonempty([answer for _, answer in scored[:count]])
 
     def _plausible_answer(self, value: str) -> bool:
         clean = " ".join(value.split())
@@ -341,6 +371,14 @@ class TorchDialogueNavigator:
         if len(set(TERM_RE.findall(clean.lower()))) <= 1 and len(clean) > 24:
             return False
         return True
+
+
+def _language_matches(value: str, lang: str | None) -> bool:
+    if lang == "ru":
+        return any("а" <= char.lower() <= "я" or char.lower() == "ё" for char in value)
+    if lang == "en":
+        return not any("а" <= char.lower() <= "я" or char.lower() == "ё" for char in value)
+    return True
 
 
 if nn is not None:  # pragma: no cover - exercised through integration tests

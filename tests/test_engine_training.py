@@ -89,7 +89,8 @@ class EngineTrainingTest(unittest.TestCase):
             report = Trainer(engine, engine.store).train_file(path, epochs=1)
             self.assertEqual(report.errors, [])
             self.assertEqual(engine.checkpoint.accepted_answers[0]["stimulus"], "как дела?")
-            self.assertEqual(engine.checkpoint.accepted_answers[0]["answer"], "Нормально, спасибо. А у тебя?")
+            self.assertEqual(engine.checkpoint.accepted_answers[0]["lang"], "ru")
+            self.assertTrue(engine.checkpoint.accepted_answers[0]["answer_concepts"])
 
     def test_top_layer_training_reinforces_layer_target(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,7 +150,8 @@ class EngineTrainingTest(unittest.TestCase):
             report = Trainer(engine, engine.store).train_file(path, epochs=1)
             self.assertEqual(report.errors, [])
             self.assertTrue(engine.checkpoint.accepted_answers)
-            self.assertEqual(engine.checkpoint.accepted_answers[0]["answer"], "Нормально, спасибо. А у тебя?")
+            self.assertEqual(engine.checkpoint.accepted_answers[0]["lang"], "ru")
+            self.assertTrue(engine.checkpoint.accepted_answers[0]["answer_concepts"])
             layer_targets = {
                 edge.get("metadata", {}).get("layer_target")
                 for edge in engine.checkpoint.custom_edges
