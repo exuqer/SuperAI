@@ -20,6 +20,7 @@ from semantic_ants.server.schemas import (
     FeedbackRequest,
     JsonlJobRequest,
     SpcDownloadRequest,
+    UnderstandRequest,
     VectorInterpretRequest,
     model_payload,
 )
@@ -63,6 +64,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/api/analyze")
     def analyze(payload: AnalyzeRequest) -> dict[str, Any]:
         return service.analyze(model_payload(payload))
+
+    @app.post("/api/understand")
+    def understand(payload: UnderstandRequest) -> dict[str, Any]:
+        return service.understand(model_payload(payload))
 
     @app.post("/api/chat/message")
     def chat_message(payload: AnalyzeRequest) -> dict[str, Any]:

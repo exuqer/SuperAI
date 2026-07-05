@@ -19,6 +19,7 @@ from semantic_ants.server.graph import (
     trace_interpretation,
 )
 from semantic_ants.server.jobs import Job, JobRegistry
+from semantic_ants.understanding import understand_text
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,17 @@ class EngineService:
                 "graph": graph_snapshot(graph, self.engine.checkpoint, result),
                 "trace_interpretation": trace_interpretation(result_dict),
             }
+
+    def understand(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            result = understand_text(
+                text=str(payload.get("text", "")),
+                lang=str(payload.get("lang", "auto")),
+                checkpoint=self.engine.checkpoint,
+                session_id=payload.get("session_id"),
+                turn_id=payload.get("turn_id"),
+            )
+            return result.to_dict()
 
     def chat_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         chat_payload = {

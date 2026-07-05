@@ -107,6 +107,50 @@ export type AnalyzeResponse = {
   trace_interpretation: TraceInterpretation;
 };
 
+export type UnderstandingToken = {
+  raw_token: string;
+  lemma: string;
+  search_token: string;
+  concept_uri: string | null;
+  match_status:
+    | 'found_as_alias'
+    | 'found_as_lemma'
+    | 'found_as_raw'
+    | 'candidate'
+    | 'partial_root_match'
+    | 'edit_distance_match'
+    | 'ignored_stop_word';
+  is_stop_word: boolean;
+  morphology: {
+    POS: string | null;
+    case: string | null;
+    number: string | null;
+    gender: string | null;
+    tense: string | null;
+    person: string | null;
+  };
+};
+
+export type UnderstandingSummary = {
+  total_tokens: number;
+  working_tokens: number;
+  stop_words: number;
+  matched: number;
+  candidates: number;
+  partial_root_matches: number;
+  edit_distance_matches: number;
+  search_tokens: string[];
+};
+
+export type UnderstandingResponse = {
+  input_text: string;
+  lang: string;
+  session_id?: string | null;
+  turn_id?: string | null;
+  tokens: UnderstandingToken[];
+  summary: UnderstandingSummary;
+};
+
 export type TraceInterpretation = {
   summary: Record<string, unknown>;
   chains: Array<{

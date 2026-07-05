@@ -35,6 +35,36 @@ class ServerApiTest(unittest.TestCase):
             self.assertTrue(any(edge["signal"]["active"] for edge in payload["graph"]["edges"]))
             self.assertTrue(payload["trace_interpretation"]["active_edge_ids"])
 
+    def test_understand_api_returns_tokens_without_writing_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            checkpoint_path = Path(tmp) / "checkpoints" / "model.json"
+            before = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+
+            response = client.post(
+                "/api/understand",
+                json={
+                    "text": "котики едят",
+                    "lang": "ru",
+                    "session_id": "diag-session",
+                    "turn_id": "turn-1",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["input_text"], "котики едят")
+            self.assertEqual(payload["lang"], "ru")
+            self.assertEqual(payload["session_id"], "diag-session")
+            self.assertEqual(payload["turn_id"], "turn-1")
+            self.assertEqual([token["search_token"] for token in payload["tokens"]], ["кот", "есть"])
+            self.assertEqual(payload["tokens"][0]["match_status"], "candidate")
+            self.assertEqual(payload["tokens"][1]["match_status"], "candidate")
+
+            after = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            self.assertEqual(before, after)
+            self.assertEqual(client.get("/api/memory/results").json(), [])
+            self.assertEqual(client.get("/api/chat/sessions").json(), [])
+
     def test_graph_and_concept_detail_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = self.make_client(tmp)

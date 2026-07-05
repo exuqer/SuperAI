@@ -75,6 +75,7 @@ semantic-ants-web --state-dir .semantic_ants --static-dir web/dist
 ## Основные API
 
 - `POST /api/analyze` возвращает `result`, `graph`, `trace_interpretation`;
+- `POST /api/understand` возвращает токены, леммы, статусы совпадения и morphology;
 - `POST /api/chat/message` сохраняет контекст сессии;
 - `GET /api/graph` возвращает checkpoint/seed graph с фильтрами;
 - `GET /api/concepts/detail?uri=...` возвращает узел и его связи;

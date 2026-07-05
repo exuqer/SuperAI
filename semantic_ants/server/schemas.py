@@ -18,6 +18,13 @@ class AnalyzeRequest(BaseModel):
     strength_vector: Optional[Union[list[int], str, int]] = None
 
 
+class UnderstandRequest(BaseModel):
+    text: str
+    lang: str = "auto"
+    session_id: Optional[str] = None
+    turn_id: Optional[str] = None
+
+
 class FeedbackRequest(BaseModel):
     result_id: Optional[str] = None
     score: int = Field(ge=0, le=5)

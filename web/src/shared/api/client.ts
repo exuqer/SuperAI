@@ -1,4 +1,11 @@
-import type { AnalyzeResponse, ChatSession, ConceptDetail, GraphPayload, Job } from './types';
+import type {
+  AnalyzeResponse,
+  ChatSession,
+  ConceptDetail,
+  GraphPayload,
+  Job,
+  UnderstandingResponse,
+} from './types';
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -31,6 +38,8 @@ export const api = {
   getConfig: () => request<Record<string, unknown>>('/api/config'),
   analyze: (payload: Record<string, unknown>) =>
     request<AnalyzeResponse>('/api/analyze', { method: 'POST', body: JSON.stringify(payload) }),
+  understand: (payload: Record<string, unknown>) =>
+    request<UnderstandingResponse>('/api/understand', { method: 'POST', body: JSON.stringify(payload) }),
   chatMessage: (payload: Record<string, unknown>) =>
     request<AnalyzeResponse>('/api/chat/message', { method: 'POST', body: JSON.stringify(payload) }),
   getSessions: () => request<ChatSession[]>('/api/chat/sessions'),
