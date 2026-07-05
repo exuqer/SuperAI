@@ -93,14 +93,16 @@ class EngineService:
             return result.to_dict()
 
     def decode(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = decode_words(
-            text=str(payload.get("text", "")),
-            tokens=[str(token) for token in payload.get("tokens", [])] if isinstance(payload.get("tokens"), list) else None,
-            lang=str(payload.get("lang", "auto")),
-            session_id=payload.get("session_id"),
-            turn_id=payload.get("turn_id"),
-        )
-        return result.to_dict()
+        with self._lock:
+            result = decode_words(
+                text=str(payload.get("text", "")),
+                tokens=[str(token) for token in payload.get("tokens", [])] if isinstance(payload.get("tokens"), list) else None,
+                lang=str(payload.get("lang", "auto")),
+                session_id=payload.get("session_id"),
+                turn_id=payload.get("turn_id"),
+                checkpoint=self.engine.checkpoint,
+            )
+            return result.to_dict()
 
     def chat_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         chat_payload = {

@@ -154,7 +154,7 @@ export type UnderstandingResponse = {
 export type DecodeToken = {
   input_token: string;
   normalized_token: string;
-  role: 'subject' | 'verb' | 'object';
+  role: 'subject' | 'verb' | 'object' | 'instrument' | 'location' | 'complement' | 'modifier';
   surface: string;
   concept_uri: string | null;
   transform_status: 'inflected' | 'surface' | 'fallback';
@@ -180,7 +180,7 @@ export type DecodeResponse = {
   input_tokens: string[];
   lang: string;
   sentence: string;
-  pattern: 'svo' | 'empty';
+  pattern: 'svo' | 'svoc' | 'svoi' | 'svm' | 'empty';
   session_id?: string | null;
   turn_id?: string | null;
   tokens: DecodeToken[];

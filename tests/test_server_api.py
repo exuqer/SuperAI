@@ -99,6 +99,38 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(client.get("/api/memory/results").json(), [])
             self.assertEqual(client.get("/api/chat/sessions").json(), [])
 
+    def test_decode_api_uses_checkpoint_edges_without_writing_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            service = client.app.state.service
+            service.engine.checkpoint.add_custom_edge("/c/ru/программист", "/c/ru/писать", relation="CanDo", weight=2.6)
+            service.engine.checkpoint.add_custom_edge("/c/ru/писать", "/c/ru/код", relation="TakesObject", weight=2.8)
+            service.engine.checkpoint.add_custom_edge("/c/ru/писать", "/c/ru/компьютер", relation="UsesInstrument", weight=2.4)
+            service.engine.store.save(service.engine.checkpoint)
+            checkpoint_path = Path(tmp) / "checkpoints" / "model.json"
+            before = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+
+            response = client.post(
+                "/api/decode",
+                json={
+                    "text": "компьютер код писать программист",
+                    "tokens": ["компьютер", "код", "писать", "программист"],
+                    "lang": "ru",
+                    "session_id": "decode-session",
+                    "turn_id": "turn-10",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["sentence"], "программист пишет код на компьютере")
+            self.assertEqual([token["role"] for token in payload["tokens"]], ["subject", "verb", "object", "instrument"])
+            self.assertEqual(payload["tokens"][3]["surface"], "на компьютере")
+
+            after = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            self.assertEqual(before, after)
+            self.assertEqual(client.get("/api/memory/results").json(), [])
+            self.assertEqual(client.get("/api/chat/sessions").json(), [])
+
     def test_graph_and_concept_detail_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = self.make_client(tmp)

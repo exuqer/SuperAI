@@ -55,6 +55,28 @@ class DecodingTest(unittest.TestCase):
         self.assertEqual([token.role for token in result.tokens], ["modifier", "subject", "verb", "complement"])
         self.assertEqual([token.surface for token in result.tokens], ["осенью", "лист", "становится", "жёлтым"])
 
+    def test_checkpoint_edges_bias_decoder_roles(self):
+        from semantic_ants.decoding import decode_words
+
+        checkpoint = self.make_checkpoint()
+        checkpoint.add_custom_edge("/c/ru/программист", "/c/ru/писать", relation="CanDo", weight=2.6)
+        checkpoint.add_custom_edge("/c/ru/писать", "/c/ru/код", relation="TakesObject", weight=2.8)
+        checkpoint.add_custom_edge("/c/ru/писать", "/c/ru/компьютер", relation="UsesInstrument", weight=2.4)
+        checkpoint.reinforce_edge("/c/ru/программист", "CanDo", "/c/ru/писать", amount=0.6)
+        checkpoint.reinforce_edge("/c/ru/писать", "TakesObject", "/c/ru/код", amount=0.6)
+        checkpoint.reinforce_edge("/c/ru/писать", "UsesInstrument", "/c/ru/компьютер", amount=0.6)
+
+        result = decode_words(
+            "",
+            lang="ru",
+            tokens=["компьютер", "код", "писать", "программист"],
+            checkpoint=checkpoint,
+        )
+
+        self.assertEqual(result.sentence, "программист пишет код на компьютере")
+        self.assertEqual([token.role for token in result.tokens], ["subject", "verb", "object", "instrument"])
+        self.assertEqual(result.tokens[3].surface, "на компьютере")
+
     def test_english_tokens_become_sentence(self):
         from semantic_ants.decoding import decode_words
 
