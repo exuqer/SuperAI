@@ -25,6 +25,14 @@ class UnderstandRequest(BaseModel):
     turn_id: Optional[str] = None
 
 
+class DecodeRequest(BaseModel):
+    text: str
+    tokens: list[str] = Field(default_factory=list)
+    lang: str = "auto"
+    session_id: Optional[str] = None
+    turn_id: Optional[str] = None
+
+
 class FeedbackRequest(BaseModel):
     result_id: Optional[str] = None
     score: int = Field(ge=0, le=5)

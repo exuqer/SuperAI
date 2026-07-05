@@ -14,6 +14,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised only without 
 from semantic_ants.server.schemas import (
     AnalyzeRequest,
     BootstrapRequest,
+    DecodeRequest,
     DreamRequest,
     EvalRequest,
     ExportRequest,
@@ -68,6 +69,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/api/understand")
     def understand(payload: UnderstandRequest) -> dict[str, Any]:
         return service.understand(model_payload(payload))
+
+    @app.post("/api/decode")
+    def decode(payload: DecodeRequest) -> dict[str, Any]:
+        return service.decode(model_payload(payload))
 
     @app.post("/api/chat/message")
     def chat_message(payload: AnalyzeRequest) -> dict[str, Any]:

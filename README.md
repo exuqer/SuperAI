@@ -31,6 +31,7 @@ python scripts/run_web.py --no-cache-refresh
 
 Подробнее: `docs/web.md`.
 Отдельно по новому диагностическому слою: `docs/understanding.md`.
+Отдельно по декодеру: `docs/decoding.md`.
 
 ## Режим чата
 

@@ -34,5 +34,6 @@ describe('AppShell', () => {
     expect(wrapper.text()).toContain('Пониматель');
     const links = wrapper.findAllComponents(RouterLinkStub);
     expect(links.some((link) => link.props('to') === '/understand')).toBe(true);
+    expect(links.some((link) => link.props('to') === '/decode')).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import type {
   AnalyzeResponse,
+  DecodeResponse,
   ChatSession,
   ConceptDetail,
   GraphPayload,
@@ -40,6 +41,8 @@ export const api = {
     request<AnalyzeResponse>('/api/analyze', { method: 'POST', body: JSON.stringify(payload) }),
   understand: (payload: Record<string, unknown>) =>
     request<UnderstandingResponse>('/api/understand', { method: 'POST', body: JSON.stringify(payload) }),
+  decode: (payload: Record<string, unknown>) =>
+    request<DecodeResponse>('/api/decode', { method: 'POST', body: JSON.stringify(payload) }),
   chatMessage: (payload: Record<string, unknown>) =>
     request<AnalyzeResponse>('/api/chat/message', { method: 'POST', body: JSON.stringify(payload) }),
   getSessions: () => request<ChatSession[]>('/api/chat/sessions'),

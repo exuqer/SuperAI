@@ -151,6 +151,42 @@ export type UnderstandingResponse = {
   summary: UnderstandingSummary;
 };
 
+export type DecodeToken = {
+  input_token: string;
+  normalized_token: string;
+  role: 'subject' | 'verb' | 'object';
+  surface: string;
+  concept_uri: string | null;
+  transform_status: 'inflected' | 'surface' | 'fallback';
+  morphology: {
+    POS: string | null;
+    case: string | null;
+    number: string | null;
+    gender: string | null;
+    tense: string | null;
+    person: string | null;
+  };
+};
+
+export type DecodeSummary = {
+  total_tokens: number;
+  used_tokens: number;
+  objects: number;
+  fallbacks: number;
+};
+
+export type DecodeResponse = {
+  input_text: string;
+  input_tokens: string[];
+  lang: string;
+  sentence: string;
+  pattern: 'svo' | 'empty';
+  session_id?: string | null;
+  turn_id?: string | null;
+  tokens: DecodeToken[];
+  summary: DecodeSummary;
+};
+
 export type TraceInterpretation = {
   summary: Record<string, unknown>;
   chains: Array<{

@@ -65,6 +65,40 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(client.get("/api/memory/results").json(), [])
             self.assertEqual(client.get("/api/chat/sessions").json(), [])
 
+    def test_decode_api_returns_sentence_without_writing_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            checkpoint_path = Path(tmp) / "checkpoints" / "model.json"
+            before = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+
+            response = client.post(
+                "/api/decode",
+                json={
+                    "text": "кот есть рыба мясо",
+                    "tokens": ["кот", "есть", "рыба", "мясо"],
+                    "lang": "ru",
+                    "session_id": "decode-session",
+                    "turn_id": "turn-9",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["input_text"], "кот есть рыба мясо")
+            self.assertEqual(payload["input_tokens"], ["кот", "есть", "рыба", "мясо"])
+            self.assertEqual(payload["lang"], "ru")
+            self.assertEqual(payload["sentence"], "кот ест рыбу и мясо")
+            self.assertEqual(payload["pattern"], "svo")
+            self.assertEqual(payload["session_id"], "decode-session")
+            self.assertEqual(payload["turn_id"], "turn-9")
+            self.assertEqual([token["role"] for token in payload["tokens"]], ["subject", "verb", "object", "object"])
+            self.assertEqual(payload["summary"]["objects"], 2)
+            self.assertEqual(payload["summary"]["fallbacks"], 0)
+
+            after = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            self.assertEqual(before, after)
+            self.assertEqual(client.get("/api/memory/results").json(), [])
+            self.assertEqual(client.get("/api/chat/sessions").json(), [])
+
     def test_graph_and_concept_detail_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = self.make_client(tmp)

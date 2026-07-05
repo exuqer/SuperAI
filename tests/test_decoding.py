@@ -1,0 +1,97 @@
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+
+PYMORPHY_AVAILABLE = bool(importlib.util.find_spec("pymorphy3"))
+
+
+@unittest.skipUnless(PYMORPHY_AVAILABLE, 'install dependencies with: pip install -e ".[web]"')
+class DecodingTest(unittest.TestCase):
+    def make_checkpoint(self):
+        from semantic_ants.engine import EngineConfig, SemanticEngine
+
+        engine = SemanticEngine(config=EngineConfig(state_dir=Path(self.tmp), allow_network=False))
+        return engine.checkpoint
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_russian_tokens_become_sentence(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("кот есть рыба мясо", lang="ru", tokens=["кот", "есть", "рыба", "мясо"])
+
+        self.assertEqual(result.lang, "ru")
+        self.assertEqual(result.pattern, "svo")
+        self.assertEqual(result.sentence, "кот ест рыбу и мясо")
+        self.assertEqual(result.summary.total_tokens, 4)
+        self.assertEqual(result.summary.used_tokens, 4)
+        self.assertEqual(result.summary.objects, 2)
+        self.assertEqual(result.summary.fallbacks, 0)
+        self.assertEqual([token.role for token in result.tokens], ["subject", "verb", "object", "object"])
+        self.assertEqual([token.surface for token in result.tokens], ["кот", "ест", "рыбу", "мясо"])
+
+    def test_russian_tokens_can_be_unordered(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("", lang="ru", tokens=["шкаф", "собирать", "рабочий"])
+
+        self.assertEqual(result.sentence, "рабочий собирает шкаф")
+        self.assertEqual([token.role for token in result.tokens], ["subject", "verb", "object"])
+        self.assertEqual([token.input_token for token in result.tokens], ["рабочий", "собирать", "шкаф"])
+
+    def test_russian_change_state_uses_modifier_and_complement(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("", lang="ru", tokens=["осень", "лист", "становиться", "желтый"])
+
+        self.assertEqual(result.sentence, "осенью лист становится жёлтым")
+        self.assertEqual([token.role for token in result.tokens], ["modifier", "subject", "verb", "complement"])
+        self.assertEqual([token.surface for token in result.tokens], ["осенью", "лист", "становится", "жёлтым"])
+
+    def test_english_tokens_become_sentence(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("cat eat fish meat", lang="en", tokens=["cat", "eat", "fish", "meat"])
+
+        self.assertEqual(result.lang, "en")
+        self.assertEqual(result.sentence, "cat eats fish and meat")
+        self.assertEqual(result.summary.objects, 2)
+        self.assertEqual(result.tokens[1].surface, "eats")
+
+    def test_text_input_works_without_tokens(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("кот есть рыба мясо", lang="ru")
+
+        self.assertEqual(result.input_tokens, ["кот", "есть", "рыба", "мясо"])
+        self.assertEqual(result.sentence, "кот ест рыбу и мясо")
+
+    def test_tokens_override_text(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("кот есть рыба мясо", lang="ru", tokens=["пёс", "есть", "кость"])
+
+        self.assertEqual(result.input_tokens, ["пёс", "есть", "кость"])
+        self.assertEqual(result.summary.total_tokens, 3)
+        self.assertEqual(result.summary.objects, 1)
+
+    def test_empty_input_returns_empty_result(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("", lang="auto", tokens=[])
+
+        self.assertEqual(result.pattern, "empty")
+        self.assertEqual(result.sentence, "")
+        self.assertEqual(result.summary.total_tokens, 0)
+        self.assertEqual(result.tokens, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

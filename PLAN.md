@@ -1,53 +1,95 @@
-# Первый Модуль «Пониматель»: Лемматизирующий Токенизатор
+# Декодер Search Tokens → Предложение
 
 ## Summary
-- Сделать отдельный backend API и вкладку `/understand` для первого шага понимания: `текст -> raw tokens -> леммы -> search tokens -> совпадения в памяти`.
-- Использовать `pymorphy3` как обязательную зависимость для русской лемматизации и сохранения грамматических тегов. Источник пакета: https://pypi.org/project/pymorphy3/
-- Не подключать модуль к текущему чату и `/api/analyze` на этом шаге. Он только диагностирует вход и не пишет в checkpoint.
+- Добавить read-only диагностический декодер, обратный к `/api/understand`: `tokens/text -> роли SVO -> формы слов -> нормальная фраза`.
+- Первый шаг покрывает русский и английский базовый SVO-паттерн: первый токен = субъект, второй = глагол, остальные = объекты.
+- Целевой пример:
+  - RU: `["кот", "есть", "рыба", "мясо"] -> "кот ест рыбу и мясо"`
+  - EN: `["cat", "eat", "fish", "meat"] -> "cat eats fish and meat"`
+- Декодер не пишет в checkpoint, не подключается к чату и не меняет `/api/analyze`.
 
-## Key Changes
-- Добавить `pymorphy3>=2,<3` в зависимости проекта.
-- Создать backend-модуль `semantic_ants/understanding`, который возвращает для каждого токена:
-  - `raw_token`, `lemma`, `search_token`, `concept_uri`;
-  - `match_status`: `found_as_alias`, `found_as_lemma`, `found_as_raw`, `candidate`, `partial_root_match`, `edit_distance_match`, `ignored_stop_word`;
-  - `is_stop_word`;
-  - `morphology`: `POS`, `case`, `number`, `gender`, `tense`, `person`, если теги доступны.
-- Добавить `POST /api/understand`:
-  - request: `{ "text": string, "lang": "auto" | "ru" | "en", "session_id"?: string, "turn_id"?: string }`
-  - response: `{ "input_text", "lang", "session_id", "turn_id", "tokens", "summary" }`
-- Добавить фронт-вкладку «Пониматель»:
-  - textarea для текста;
-  - поля `session_id` и `turn_id` как необязательные диагностические метки;
-  - таблица `raw -> lemma -> search token -> concept uri -> status -> morphology`;
-  - отдельное выделение стоп-слов и candidate/partial matches.
+## Public API / Types
+- Добавить `POST /api/decode`.
+- Request:
+  ```json
+  {
+    "text": "кот есть рыба мясо",
+    "tokens": ["кот", "есть", "рыба", "мясо"],
+    "lang": "auto",
+    "session_id": "optional",
+    "turn_id": "optional"
+  }
+  ```
+- `tokens` имеет приоритет над `text`; если `tokens` пустой, токены берутся из `text`.
+- Response:
+  ```json
+  {
+    "input_text": "...",
+    "input_tokens": ["..."],
+    "lang": "ru",
+    "sentence": "кот ест рыбу и мясо",
+    "pattern": "svo",
+    "session_id": "...",
+    "turn_id": "...",
+    "tokens": [
+      {
+        "input_token": "кот",
+        "normalized_token": "кот",
+        "role": "subject",
+        "surface": "кот",
+        "concept_uri": "/c/ru/кот",
+        "transform_status": "inflected",
+        "morphology": {}
+      }
+    ],
+    "summary": {
+      "total_tokens": 4,
+      "used_tokens": 4,
+      "objects": 2,
+      "fallbacks": 0
+    }
+  }
+  ```
 
-## Behavior
-- Для `котики едят` модуль должен показать рабочие токены `кот` и `есть`, например:
-  - `котики -> кот -> /c/ru/кот`;
-  - `едят -> есть -> /c/ru/есть`.
-- Стоп-слова, частицы, союзы, предлоги и междометия получают `ignored_stop_word`, не получают `concept_uri` и не идут в будущий муравьиный старт.
-- Грамматические теги сохраняются, но не участвуют в поисковом ключе первого шага. Они нужны как задел для будущей Марковской генерации.
-- Если точного совпадения нет, модуль возвращает `candidate`. Затем пробует легкие локальные эвристики без эмбеддингов:
-  - edit distance для опечаток;
-  - общий корень/подстрока по известным alias/search tokens.
-- `session_id` и `turn_id` только возвращаются в ответе и подготавливают контракт для будущей памяти диалога. В этом шаге они не создают историю.
+## Implementation Changes
+- Создать backend-модуль `semantic_ants/decoding` с функцией `decode_words(...)`.
+- RU-логика:
+  - использовать уже обязательный `pymorphy3`;
+  - субъект инфлектить в `nomn sing`;
+  - глагол инфлектить в `3per sing pres`;
+  - объекты инфлектить в `accs sing`;
+  - список объектов соединять через `и`.
+- EN-логика:
+  - субъект оставить как surface;
+  - глагол привести к 3rd-person singular для одиночного субъекта: `eat -> eats`, `go -> goes`, `have -> has`, `be -> is`, `do -> does`;
+  - объекты соединять через `and`.
+- Добавить `DecodeRequest` в backend schemas, `EngineService.decode`, endpoint `/api/decode`.
+- Добавить frontend-страницу `/decode` “Декодер”:
+  - textarea для `text`;
+  - optional поле `tokens`, разделение по пробелам/запятым;
+  - `lang`, `session_id`, `turn_id`;
+  - результат sentence и таблица ролей/форм.
+- Добавить клиентский метод `api.decode(...)`, TS-типы `DecodeResponse`, пункт меню и route.
+- Добавить `docs/decoding.md` и ссылку из README рядом с `docs/understanding.md`.
 
 ## Test Plan
-- Unit tests:
-  - `котики едят` дает search tokens `кот`, `есть`;
-  - `котиками` сохраняет lemma `кот` и morphology с множественным числом/падежом, если `pymorphy3` отдает эти теги;
-  - `эй, ну и как там мой кот?` помечает шумовые слова как `ignored_stop_word`, а `кот` остается рабочим токеном;
-  - неизвестное слово получает `candidate`, а близкая опечатка может получить `edit_distance_match`.
-- API tests:
-  - `/api/understand` возвращает tokens с raw/lemma/search/status/morphology;
-  - endpoint не пишет в checkpoint, results и chat_sessions;
-  - `session_id`/`turn_id` проходят через request-response без побочных эффектов.
-- Frontend tests:
-  - `/understand` доступна из меню;
-  - отправка текста вызывает новый API;
-  - таблица показывает леммы, статусы, стоп-слова и grammar tags.
+- Unit:
+  - RU `["кот", "есть", "рыба", "мясо"]` возвращает `кот ест рыбу и мясо`;
+  - EN `["cat", "eat", "fish", "meat"]` возвращает `cat eats fish and meat`;
+  - `text`-вход работает без `tokens`;
+  - при наличии `tokens` они переопределяют `text`;
+  - пустой вход возвращает пустой `sentence`, `pattern="empty"`, без ошибки.
+- API:
+  - `/api/decode` возвращает sentence, роли и summary;
+  - endpoint не пишет checkpoint, results и chat_sessions;
+  - `session_id`/`turn_id` проходят через request-response.
+- Frontend:
+  - `/decode` доступен из меню;
+  - отправка вызывает `api.decode`;
+  - страница показывает sentence и таблицу role → surface.
 
 ## Assumptions
-- Первый модуль готовит слова к поиску в памяти, но не генерирует ответ.
-- Эмбеддинги, FastText, векторный bridge и Марковская цепь остаются следующим этапом.
-- Существующий чат не меняется до отдельного шага подключения search tokens к общему муравьиному анализу.
+- Первый декодер детерминированный, без LLM и без обучения.
+- В v1 порядок слов обязателен: `subject verb object...`.
+- Выходная `sentence` возвращается без точки, чтобы совпадать с примером.
+- Свободный порядок слов, несколько субъектов и сложное согласование остаются следующим этапом.

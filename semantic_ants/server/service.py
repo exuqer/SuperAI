@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Any, Callable
 
 from semantic_ants.datasets import download_spc_dataset
+from semantic_ants.decoding import decode_words
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
 from semantic_ants.learning import ACOTrainer, FeedbackTrainer, Trainer
@@ -90,6 +91,16 @@ class EngineService:
                 turn_id=payload.get("turn_id"),
             )
             return result.to_dict()
+
+    def decode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = decode_words(
+            text=str(payload.get("text", "")),
+            tokens=[str(token) for token in payload.get("tokens", [])] if isinstance(payload.get("tokens"), list) else None,
+            lang=str(payload.get("lang", "auto")),
+            session_id=payload.get("session_id"),
+            turn_id=payload.get("turn_id"),
+        )
+        return result.to_dict()
 
     def chat_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         chat_payload = {
