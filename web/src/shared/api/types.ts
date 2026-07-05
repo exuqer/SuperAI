@@ -180,7 +180,7 @@ export type DecodeResponse = {
   input_tokens: string[];
   lang: string;
   sentence: string;
-  pattern: 'svo' | 'svoc' | 'svoi' | 'svm' | 'empty';
+  pattern: 's' | 'svo' | 'svoc' | 'svoi' | 'svm' | 'empty';
   session_id?: string | null;
   turn_id?: string | null;
   tokens: DecodeToken[];

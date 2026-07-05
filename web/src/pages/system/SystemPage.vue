@@ -12,6 +12,14 @@
             </label>
             <button type="button" @click="runBootstrap">Запустить</button>
           </article>
+          <article class="tool danger-tool">
+            <h3>Обнулить сеть</h3>
+            <label class="checkbox">
+              <input v-model="resetKeepBuiltin" type="checkbox" />
+              оставить встроенную базу
+            </label>
+            <button type="button" @click="resetNetwork">Обнулить</button>
+          </article>
           <article class="tool">
             <h3>Dream</h3>
             <label>
@@ -74,6 +82,7 @@ import { api } from '@/shared/api/client';
 
 const runtime = useRuntimeStore();
 const forceBootstrap = ref(false);
+const resetKeepBuiltin = ref(true);
 const dreamSteps = ref(100);
 const evalPath = ref('data/examples.jsonl');
 const evalJsonl = ref('');
@@ -89,6 +98,10 @@ async function track(promise: Promise<Awaited<ReturnType<typeof api.dream>>>) {
 
 function runBootstrap() {
   void track(api.bootstrap({ force: forceBootstrap.value }));
+}
+
+function resetNetwork() {
+  void track(api.resetNetwork({ keep_builtin: resetKeepBuiltin.value }));
 }
 
 function runDream() {
@@ -142,5 +155,9 @@ h3 {
 
 .checkbox input {
   width: auto;
+}
+
+.danger-tool {
+  border-color: rgba(185, 28, 28, 0.35);
 }
 </style>

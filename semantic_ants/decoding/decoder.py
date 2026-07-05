@@ -446,10 +446,7 @@ def _materialize_ru_plan(
         _ru_complement_token(analyses[index], subject, checkpoint)
         for index in plan.complements
     ]
-    instruments = [
-        _ru_prepositional_token(analyses[index], "instrument", "на", checkpoint)
-        for index in plan.instruments
-    ]
+    instruments = [_ru_instrument_token(analyses[index], checkpoint) for index in plan.instruments]
     locations = [
         _ru_prepositional_token(analyses[index], "location", "в", checkpoint)
         for index in plan.locations
@@ -460,7 +457,9 @@ def _materialize_ru_plan(
     ]
     tokens = [*modifiers, subject, *([verb] if verb else []), *objects, *complements, *instruments, *locations]
     pattern = "svo"
-    if instruments:
+    if verb is None:
+        pattern = "s"
+    elif instruments:
         pattern = "svoi"
     elif complements:
         pattern = "svoc"
@@ -597,6 +596,34 @@ def _ru_prepositional_token(
         role=role,
         surface=surface,
         concept_uri=concept_uri,
+        transform_status=status,
+        morphology=morphology,
+    )
+
+
+def _ru_instrument_token(analysis: _RUAnalysis, checkpoint: Checkpoint | None) -> DecodeToken:
+    if analysis.normal_form in _RU_DEVICE_HINTS:
+        return _ru_prepositional_token(analysis, "instrument", "на", checkpoint)
+    raw = analysis.input_token
+    normalized = analysis.normalized_token
+    parsed = _parse_ru(raw, {"ablt", "sing"}) or _parse_ru(raw, {"ablt"}) or _parse_ru(raw, {"sing"})
+    surface_word = normalized
+    morphology = _morphology_from_parse(parsed) if parsed else _empty_morphology()
+    status = "fallback"
+    if parsed:
+        inflected = parsed.inflect({"ablt", "sing"})
+        if inflected and inflected.word:
+            surface_word = _normalized_token(inflected.word)
+            morphology = _morphology_from_parse(inflected)
+            status = "inflected"
+        else:
+            surface_word = _normalized_token(parsed.word or parsed.normal_form or normalized)
+    return DecodeToken(
+        input_token=raw,
+        normalized_token=normalized,
+        role="instrument",
+        surface=f"с {surface_word}".strip(),
+        concept_uri=_concept_uri(normalized, "ru"),
         transform_status=status,
         morphology=morphology,
     )
@@ -795,6 +822,8 @@ def _en_third_person_singular(token: str) -> str:
 
 
 def _select_ru_verb_index(analyses: list[_RUAnalysis]) -> int | None:
+    if len(analyses) < 2:
+        return None
     scored = sorted(analyses, key=lambda analysis: _verb_score(analysis, analyses, None), reverse=True)
     if not scored:
         return None

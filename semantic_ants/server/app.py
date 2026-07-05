@@ -20,6 +20,8 @@ from semantic_ants.server.schemas import (
     ExportRequest,
     FeedbackRequest,
     JsonlJobRequest,
+    ResetNetworkRequest,
+    SimpleTrainingRequest,
     SpcDownloadRequest,
     UnderstandRequest,
     VectorInterpretRequest,
@@ -167,6 +169,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     def learn_dialogues(payload: JsonlJobRequest) -> dict[str, Any]:
         return service.submit_learn_dialogues(model_payload(payload)).to_dict()
 
+    @app.post("/api/training/simple")
+    def simple_train(payload: SimpleTrainingRequest) -> dict[str, Any]:
+        return service.submit_simple_train(model_payload(payload)).to_dict()
+
     @app.post("/api/eval")
     def evaluate(payload: EvalRequest) -> dict[str, Any]:
         return service.submit_eval(model_payload(payload)).to_dict()
@@ -178,6 +184,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/api/system/bootstrap")
     def bootstrap(payload: BootstrapRequest) -> dict[str, Any]:
         return service.submit_bootstrap(model_payload(payload)).to_dict()
+
+    @app.post("/api/system/reset-network")
+    def reset_network(payload: ResetNetworkRequest) -> dict[str, Any]:
+        return service.submit_reset_network(model_payload(payload)).to_dict()
 
     @app.post("/api/datasets/spc/download")
     def download_spc(payload: SpcDownloadRequest) -> dict[str, Any]:

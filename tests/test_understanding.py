@@ -103,6 +103,18 @@ class UnderstandingTest(unittest.TestCase):
         self.assertEqual(typo.tokens[0].match_status, "edit_distance_match")
         self.assertEqual(typo.tokens[0].concept_uri, "/c/en/apple")
 
+    def test_russian_word_is_not_replaced_by_edit_distance_neighbor(self):
+        from semantic_ants.understanding import understand_text
+
+        checkpoint = self.make_checkpoint()
+        checkpoint.aliases["огонь"] = "/c/ru/огонь"
+
+        result = understand_text("осень", lang="ru", checkpoint=checkpoint)
+
+        self.assertEqual(result.tokens[0].search_token, "осень")
+        self.assertEqual(result.tokens[0].concept_uri, "/c/ru/осень")
+        self.assertEqual(result.tokens[0].match_status, "candidate")
+
 
 if __name__ == "__main__":
     unittest.main()

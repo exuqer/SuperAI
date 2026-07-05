@@ -30,6 +30,16 @@ class SemanticVectorInterpreter:
         lang = _vector_lang(normalized)
         fallback_candidates = build_vector_candidates(normalized, checkpoint, count=max(count, 4))
         prompt = self._prompt(normalized)
+        memory_candidates = self.navigator._memory_candidates(
+            prompt,
+            checkpoint,
+            count=max(count, 4),
+            lang=lang,
+        )
+        if memory_candidates:
+            return memory_candidates[0]
+        if fallback_candidates:
+            return fallback_candidates[0]
         candidates = self.navigator.generate(
             prompt,
             checkpoint,
@@ -38,8 +48,9 @@ class SemanticVectorInterpreter:
             count=max(count, 4),
             lang=lang,
         )
-        if not candidates:
-            candidates = fallback_candidates
+        if candidates:
+            return candidates[0]
+        candidates = fallback_candidates
         selected = _select_candidate(candidates, normalized, lang)
         if selected:
             return selected

@@ -47,6 +47,15 @@ class EngineTrainingTest(unittest.TestCase):
                 any(item["uri"] == "/m/top/object" for item in result.semantic_vector.get("items", []))
             )
 
+    def test_strength_vector_falls_back_when_no_configured_layer_edge_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            result = engine.analyze("кот", lang="ru", strength_vector=(3,))
+
+            self.assertTrue(result.routes)
+            self.assertTrue(any(route.steps for route in result.routes))
+            self.assertTrue(result.signal_trace)
+
     def test_training_reinforces_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)

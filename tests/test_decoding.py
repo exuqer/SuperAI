@@ -55,6 +55,15 @@ class DecodingTest(unittest.TestCase):
         self.assertEqual([token.role for token in result.tokens], ["modifier", "subject", "verb", "complement"])
         self.assertEqual([token.surface for token in result.tokens], ["осенью", "лист", "становится", "жёлтым"])
 
+    def test_russian_single_token_does_not_duplicate_as_verb(self):
+        from semantic_ants.decoding import decode_words
+
+        result = decode_words("", lang="ru", tokens=["кот"])
+
+        self.assertEqual(result.pattern, "s")
+        self.assertEqual(result.sentence, "кот")
+        self.assertEqual([token.role for token in result.tokens], ["subject"])
+
     def test_checkpoint_edges_bias_decoder_roles(self):
         from semantic_ants.decoding import decode_words
 
@@ -76,6 +85,28 @@ class DecodingTest(unittest.TestCase):
         self.assertEqual(result.sentence, "программист пишет код на компьютере")
         self.assertEqual([token.role for token in result.tokens], ["subject", "verb", "object", "instrument"])
         self.assertEqual(result.tokens[3].surface, "на компьютере")
+
+    def test_checkpoint_edges_use_ablative_with_non_device_instrument(self):
+        from semantic_ants.decoding import decode_words
+
+        checkpoint = self.make_checkpoint()
+        checkpoint.add_custom_edge("/c/ru/рабочий", "/c/ru/забивать", relation="CanDo", weight=2.6)
+        checkpoint.add_custom_edge("/c/ru/забивать", "/c/ru/гвоздь", relation="TakesObject", weight=2.8)
+        checkpoint.add_custom_edge("/c/ru/забивать", "/c/ru/молоток", relation="UsesInstrument", weight=2.4)
+        checkpoint.reinforce_edge("/c/ru/рабочий", "CanDo", "/c/ru/забивать", amount=0.6)
+        checkpoint.reinforce_edge("/c/ru/забивать", "TakesObject", "/c/ru/гвоздь", amount=0.6)
+        checkpoint.reinforce_edge("/c/ru/забивать", "UsesInstrument", "/c/ru/молоток", amount=0.6)
+
+        result = decode_words(
+            "",
+            lang="ru",
+            tokens=["молоток", "гвоздь", "забивать", "рабочий"],
+            checkpoint=checkpoint,
+        )
+
+        self.assertEqual(result.sentence, "рабочий забивает гвоздь с молотком")
+        self.assertEqual([token.role for token in result.tokens], ["subject", "verb", "object", "instrument"])
+        self.assertEqual(result.tokens[3].surface, "с молотком")
 
     def test_english_tokens_become_sentence(self):
         from semantic_ants.decoding import decode_words

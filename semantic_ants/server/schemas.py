@@ -53,6 +53,21 @@ class JsonlJobRequest(BaseModel):
     torch_steps: int = 1
 
 
+class ConceptMeaningRequest(BaseModel):
+    concept: Optional[str] = None
+    label: Optional[str] = None
+    meaning: str
+
+
+class SimpleTrainingRequest(BaseModel):
+    question: str
+    expected_answer: str
+    lang: str = "auto"
+    concept_meanings: list[ConceptMeaningRequest] = Field(default_factory=list)
+    reward: float = 1.0
+    epochs: int = 1
+
+
 class EvalRequest(BaseModel):
     path: Optional[str] = None
     jsonl: Optional[str] = None
@@ -64,6 +79,10 @@ class DreamRequest(BaseModel):
 
 class BootstrapRequest(BaseModel):
     force: bool = False
+
+
+class ResetNetworkRequest(BaseModel):
+    keep_builtin: bool = True
 
 
 class SpcDownloadRequest(BaseModel):

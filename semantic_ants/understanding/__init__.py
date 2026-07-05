@@ -360,7 +360,7 @@ def _heuristic_match(
     if candidate_token:
         return candidate_token, alias_map.get(candidate_token), "partial_root_match"
 
-    if lang == "en" or len(search_token) >= 5:
+    if lang == "en":
         edit_token = _edit_distance_match(search_token, known_tokens)
         if edit_token:
             return edit_token, alias_map.get(edit_token), "edit_distance_match"

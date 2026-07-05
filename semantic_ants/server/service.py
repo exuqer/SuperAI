@@ -11,7 +11,7 @@ from semantic_ants.datasets import download_spc_dataset
 from semantic_ants.decoding import decode_words
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
-from semantic_ants.learning import ACOTrainer, FeedbackTrainer, Trainer
+from semantic_ants.learning import ACOTrainer, Checkpoint, FeedbackTrainer, SimpleQATrainer, Trainer
 from semantic_ants.server.graph import (
     concept_detail,
     concept_list,
@@ -220,6 +220,9 @@ class EngineService:
     def submit_learn_dialogues(self, payload: dict[str, Any]) -> Job:
         return self._submit("learn-dialogues", self._learn_dialogues, payload)
 
+    def submit_simple_train(self, payload: dict[str, Any]) -> Job:
+        return self._submit("simple-train", self._simple_train, payload)
+
     def submit_eval(self, payload: dict[str, Any]) -> Job:
         return self._submit("eval", self._eval, payload)
 
@@ -228,6 +231,9 @@ class EngineService:
 
     def submit_bootstrap(self, payload: dict[str, Any]) -> Job:
         return self._submit("bootstrap", self._bootstrap, payload)
+
+    def submit_reset_network(self, payload: dict[str, Any]) -> Job:
+        return self._submit("reset-network", self._reset_network, payload)
 
     def submit_download_spc(self, payload: dict[str, Any]) -> Job:
         return self._submit("download-spc", self._download_spc, payload)
@@ -270,6 +276,10 @@ class EngineService:
         )
         return report.to_dict()
 
+    def _simple_train(self, payload: dict[str, Any]) -> dict[str, Any]:
+        report = SimpleQATrainer(self.engine, self.engine.store).train_payload(payload)
+        return report.to_dict()
+
     def _eval(self, payload: dict[str, Any]) -> dict[str, Any]:
         path = self._payload_jsonl_path(payload, "eval")
         total = 0
@@ -301,6 +311,29 @@ class EngineService:
         report = bootstrap_builtin_knowledge(self.engine.checkpoint, force=bool(payload.get("force", False)))
         self.engine.store.save(self.engine.checkpoint)
         return report.to_dict()
+
+    def _reset_network(self, payload: dict[str, Any]) -> dict[str, Any]:
+        keep_builtin = bool(payload.get("keep_builtin", True))
+        old_checkpoint = self.engine.checkpoint
+        self.engine.checkpoint = Checkpoint(seed=old_checkpoint.seed)
+        bootstrap_report = None
+        if keep_builtin:
+            bootstrap_report = bootstrap_builtin_knowledge(self.engine.checkpoint, force=True).to_dict()
+        model_path = self.engine.speech.model_path(self.engine.model_dir)
+        removed_model = False
+        if model_path is not None and model_path.exists():
+            model_path.unlink()
+            removed_model = True
+        self.engine.store.save(self.engine.checkpoint)
+        return {
+            "reset": True,
+            "keep_builtin": keep_builtin,
+            "removed_dialogue_model": removed_model,
+            "examples_seen": self.engine.checkpoint.examples_seen,
+            "custom_edges": len(self.engine.checkpoint.custom_edges),
+            "accepted_answers": len(self.engine.checkpoint.accepted_answers),
+            "bootstrap": bootstrap_report,
+        }
 
     def _download_spc(self, payload: dict[str, Any]) -> dict[str, Any]:
         output = Path(str(payload.get("output") or self.config.state_dir / "datasets" / "spc_dialogues.jsonl"))

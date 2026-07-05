@@ -70,12 +70,16 @@ export const api = {
     request<Job>('/api/training/learn', { method: 'POST', body: JSON.stringify(payload) }),
   learnDialogues: (payload: Record<string, unknown>) =>
     request<Job>('/api/training/learn-dialogues', { method: 'POST', body: JSON.stringify(payload) }),
+  simpleTrain: (payload: Record<string, unknown>) =>
+    request<Job>('/api/training/simple', { method: 'POST', body: JSON.stringify(payload) }),
   eval: (payload: Record<string, unknown>) =>
     request<Job>('/api/eval', { method: 'POST', body: JSON.stringify(payload) }),
   dream: (payload: Record<string, unknown>) =>
     request<Job>('/api/system/dream', { method: 'POST', body: JSON.stringify(payload) }),
   bootstrap: (payload: Record<string, unknown>) =>
     request<Job>('/api/system/bootstrap', { method: 'POST', body: JSON.stringify(payload) }),
+  resetNetwork: (payload: Record<string, unknown>) =>
+    request<Job>('/api/system/reset-network', { method: 'POST', body: JSON.stringify(payload) }),
   downloadSpc: (payload: Record<string, unknown>) =>
     request<Job>('/api/datasets/spc/download', { method: 'POST', body: JSON.stringify(payload) }),
   exportCheckpoint: (payload: Record<string, unknown>) =>

@@ -168,6 +168,62 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(job["status"], "completed")
             self.assertEqual(job["result"]["examples"], 1)
 
+    def test_simple_training_job_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            response = client.post(
+                "/api/training/simple",
+                json={
+                    "question": "что делает программист?",
+                    "expected_answer": "Программист пишет код на компьютере.",
+                    "lang": "ru",
+                    "concept_meanings": [
+                        {
+                            "concept": "/c/ru/программист",
+                            "label": "программист",
+                            "meaning": "человек, который пишет код",
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            job_id = response.json()["job_id"]
+            for _ in range(50):
+                job = client.get(f"/api/jobs/{job_id}").json()
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(job["status"], "completed")
+            self.assertEqual(job["result"]["examples"], 1)
+            self.assertGreater(job["result"]["reinforced_edges"], 0)
+
+    def test_reset_network_job_api_clears_learned_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            service = client.app.state.service
+            service.engine.checkpoint.add_custom_edge("/c/ru/осень", "/c/ru/время", relation="ExpectedAnswerToken")
+            service.engine.checkpoint.remember_accepted_answer(
+                stimulus="осень",
+                semantic_prompt="test",
+                concepts=["/c/ru/осень"],
+                answer="обученный ответ",
+            )
+            service.engine.store.save(service.engine.checkpoint)
+
+            response = client.post("/api/system/reset-network", json={"keep_builtin": False})
+            self.assertEqual(response.status_code, 200)
+            job_id = response.json()["job_id"]
+            for _ in range(50):
+                job = client.get(f"/api/jobs/{job_id}").json()
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(job["status"], "completed")
+            self.assertTrue(job["result"]["reset"])
+            self.assertEqual(service.engine.checkpoint.custom_edges, [])
+            self.assertEqual(service.engine.checkpoint.accepted_answers, [])
+
 
 if __name__ == "__main__":
     unittest.main()

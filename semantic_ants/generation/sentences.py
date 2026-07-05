@@ -14,6 +14,8 @@ class SenseSentenceBuilder:
         if _is_sparse_unknown_vector(items):
             return [_fallback(lang)]
         subject = _surface_for_item(_best_item(items, checkpoint, lang), checkpoint, lang)
+        definition = _meaning_for_subject(items, checkpoint, lang)
+        definition_candidate = _variant_definition(lang, subject, definition)
         items = _ordered_surfaces(items, checkpoint, lang, subject)
         domain = _surface_for_uri(_domain_uri(semantic_vector), checkpoint, lang)
         vectors = _nonempty([subject, *items[:5], domain])
@@ -22,6 +24,7 @@ class SenseSentenceBuilder:
 
         candidates = _unique_nonempty(
             [
+                definition_candidate,
                 _variant_is_a(lang, subject, items, domain),
                 _variant_source(lang, subject, items, domain),
                 _variant_related(lang, subject, items, domain),
@@ -266,6 +269,14 @@ def _variant_image(lang: str, subject: str, items: list[str], domain: str) -> st
     return f"Seen loosely, {subject} feels like {terms[0]}."
 
 
+def _variant_definition(lang: str, subject: str, meaning: str) -> str:
+    if not subject or not meaning:
+        return ""
+    if lang == "ru":
+        return f"{subject} — это {meaning}."
+    return f"{subject} is {meaning}."
+
+
 def _phrase_is_a(lang: str, subject: str, rest: list[str], domain: str, seed: int) -> str:
     predicate = _choose_anchor(rest, lang, preferred=("star", "звезда", "light", "свет", "nature", "природа", "object", "предмет"))
     if not predicate:
@@ -371,6 +382,20 @@ def _join_list(values: list[str], lang: str) -> str:
 
 def _fallback(lang: str) -> str:
     return "Смысл пока слишком разрежен для уверенного ответа." if lang == "ru" else "The meaning is still too sparse for a confident answer."
+
+
+def _meaning_for_subject(items: list[dict[str, Any]], checkpoint: Checkpoint, lang: str) -> str:
+    item = _best_item(items, checkpoint, lang)
+    if not item:
+        return ""
+    uri = str(item.get("uri", ""))
+    definitions = checkpoint.metadata.get("concept_definitions", {})
+    if not isinstance(definitions, dict):
+        return ""
+    info = definitions.get(uri)
+    if not isinstance(info, dict):
+        return ""
+    return " ".join(str(info.get("meaning", "")).split())
 
 
 def _word_lang(word: str) -> str:

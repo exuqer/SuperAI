@@ -56,11 +56,7 @@ class AntColony:
         budgets = list(self.config.strength_vector) if self.config.strength_vector else None
         max_steps = sum(max(value, 0) for value in budgets) if budgets is not None else self.config.max_depth
         for _ in range(max_steps):
-            candidates = [
-                edge
-                for edge in graph.neighbors(current)
-                if edge.end not in visited and self._has_strength(edge.layer, budgets)
-            ]
+            candidates = self._candidate_edges(graph.neighbors(current), visited, budgets, allow_layer_fallback=not steps)
             if not candidates:
                 break
             edge, pheromone, score = self._choose_edge(candidates, checkpoint, rng)
@@ -84,6 +80,24 @@ class AntColony:
             current = edge.end
             visited.add(current)
         return AntRoute(ant_id=ant_id, start=start, steps=steps, total_score=total_score)
+
+    def _candidate_edges(
+        self,
+        edges: list[SemanticEdge],
+        visited: set[str],
+        budgets: list[int] | None,
+        allow_layer_fallback: bool,
+    ) -> list[SemanticEdge]:
+        unvisited = [edge for edge in edges if edge.end not in visited]
+        if budgets is None:
+            return unvisited
+        allowed = [edge for edge in unvisited if self._has_strength(edge.layer, budgets)]
+        if allowed:
+            return allowed
+        # A short strength_vector such as "3" means "prefer top-layer search".
+        # If the current word has no edge in that layer, keep the ants moving
+        # through ordinary semantic edges instead of returning empty routes.
+        return unvisited if allow_layer_fallback else []
 
     def _choose_edge(
         self,
@@ -124,6 +138,8 @@ class AntColony:
 
     def _consume_strength(self, layer: int, budgets: list[int] | None) -> int | None:
         if budgets is None:
+            return None
+        if layer < 0 or layer >= len(budgets):
             return None
         budgets[layer] = max(budgets[layer] - 1, 0)
         return budgets[layer]
