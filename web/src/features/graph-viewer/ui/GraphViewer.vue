@@ -9,6 +9,7 @@ import cytoscape from 'cytoscape';
 import fcose from 'cytoscape-fcose';
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { GraphEdge, GraphNode, GraphPayload } from '@/shared/api/types';
+import { selectGraphViewport } from '../model/select-graph';
 
 cytoscape.use(fcose);
 
@@ -25,11 +26,21 @@ const container = ref<HTMLDivElement | null>(null);
 let cy: cytoscape.Core | null = null;
 
 function renderGraph() {
-  if (!container.value || !props.graph) return;
-  const nodeById = new Map(props.graph.nodes.map((node) => [node.id, node]));
-  const edgeById = new Map(props.graph.edges.map((edge) => [edge.id, edge]));
+  if (!container.value || !props.graph) {
+    cy?.destroy();
+    cy = null;
+    return;
+  }
+  const viewport = selectGraphViewport(props.graph);
+  if (!viewport.nodes.length && !viewport.edges.length) {
+    cy?.destroy();
+    cy = null;
+    return;
+  }
+  const nodeById = new Map(viewport.nodes.map((node) => [node.id, node]));
+  const edgeById = new Map(viewport.edges.map((edge) => [edge.id, edge]));
   const elements: cytoscape.ElementDefinition[] = [
-    ...props.graph.nodes.map((node) => ({
+    ...viewport.nodes.map((node) => ({
       group: 'nodes' as const,
       data: {
         id: node.id,
@@ -40,7 +51,7 @@ function renderGraph() {
       },
       classes: [node.signal.active ? 'signal' : '', `layer-${node.layer}`].filter(Boolean).join(' '),
     })),
-    ...props.graph.edges.map((edge) => ({
+    ...viewport.edges.map((edge) => ({
       group: 'edges' as const,
       data: {
         id: edge.id,
@@ -135,7 +146,7 @@ function renderGraph() {
 }
 
 onMounted(renderGraph);
-watch(() => props.graph, renderGraph, { deep: true });
+watch(() => props.graph, renderGraph);
 
 onBeforeUnmount(() => {
   cy?.destroy();

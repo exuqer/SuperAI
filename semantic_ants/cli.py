@@ -140,10 +140,13 @@ def feedback_command(args: argparse.Namespace) -> int:
 
 
 def bootstrap_command(args: argparse.Namespace) -> int:
-    store = CheckpointStore(default_checkpoint_path(args.state_dir))
-    checkpoint = store.load()
-    report = bootstrap_builtin_knowledge(checkpoint, force=args.force)
-    store.save(checkpoint)
+    engine = _engine_from_args(args)
+    report = bootstrap_builtin_knowledge(
+        engine.checkpoint,
+        force=args.force,
+        allow_network=not getattr(args, "no_cache_refresh", False),
+    )
+    engine.store.save(engine.checkpoint)
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2) if args.json else report.to_dict())
     return 0
 
@@ -313,6 +316,7 @@ def _parser() -> argparse.ArgumentParser:
     download_dataset.set_defaults(handler=download_dataset_command)
 
     bootstrap = subparsers.add_parser("bootstrap")
+    _add_runtime_args(bootstrap)
     bootstrap.add_argument("--force", action="store_true")
     bootstrap.add_argument("--json", action="store_true")
     bootstrap.set_defaults(handler=bootstrap_command)

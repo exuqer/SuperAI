@@ -48,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { onMounted, reactive, ref, watch } from 'vue';
 import { useRuntimeStore } from '@/app/stores/runtime';
 import GraphViewer from '@/features/graph-viewer/ui/GraphViewer.vue';
 import NodeInspector from '@/features/node-inspector/ui/NodeInspector.vue';
@@ -74,6 +74,7 @@ async function load() {
     ...filters,
     layer: filters.layer || undefined,
     min_pheromone: filters.min_pheromone || undefined,
+    result_id: runtime.lastResult?.result_id,
   });
 }
 
@@ -90,6 +91,11 @@ function selectEdge(edge: GraphEdge) {
 }
 
 onMounted(load);
+watch(() => runtime.lastResult?.result_id, () => {
+  if (runtime.graph) {
+    load().catch(() => undefined);
+  }
+});
 </script>
 
 <style scoped lang="scss">

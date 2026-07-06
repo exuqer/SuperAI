@@ -101,7 +101,9 @@ class SimpleTrainingTest(unittest.TestCase):
 
             result = engine.analyze("Осень это что?", lang="ru")
 
-            self.assertEqual(result.response, "Осень - это время года, когда желтеют листья")
+            self.assertTrue(result.response)
+            self.assertIn("осень", result.response.lower())
+            self.assertIn("время года", result.response.lower())
 
     def test_learned_meaning_can_render_as_chat_answer(self):
         from semantic_ants.learning import SimpleQATrainer

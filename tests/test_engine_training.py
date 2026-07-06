@@ -10,7 +10,7 @@ from tests.fixtures import FakeConceptNetClient
 
 class EngineTrainingTest(unittest.TestCase):
     def make_engine(self, tmp: str) -> SemanticEngine:
-        store = CheckpointStore(Path(tmp) / "model.json")
+        store = CheckpointStore(Path(tmp) / "model.bin")
         return SemanticEngine(
             config=EngineConfig(state_dir=Path(tmp), allow_network=False, ant_count=4, max_depth=2),
             client=FakeConceptNetClient(),
@@ -207,7 +207,24 @@ class EngineTrainingTest(unittest.TestCase):
             before = dict(engine.checkpoint.suppressed_concepts)
             feedback = FeedbackTrainer(engine, engine.store).apply(result.result_id, score=1)
             self.assertGreater(feedback["changed_edges"], 0)
+            self.assertEqual(feedback["trained_dialogues"], 0)
+            self.assertEqual(feedback["rejected_dialogues"], 1)
             self.assertNotEqual(before, engine.checkpoint.suppressed_concepts)
+
+    def test_feedback_trains_positive_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            result = engine.analyze("apple", lang="en")
+            before_answers = len(engine.checkpoint.accepted_answers)
+            before_responses = len(engine.checkpoint.response_memory)
+            before_patterns = len(engine.checkpoint.mini_generator.get("dialogue_patterns", []))
+            feedback = FeedbackTrainer(engine, engine.store).apply(result.result_id, score=5)
+            self.assertGreater(feedback["changed_edges"], 0)
+            self.assertEqual(feedback["trained_dialogues"], 1)
+            self.assertEqual(feedback["rejected_dialogues"], 0)
+            self.assertGreater(len(engine.checkpoint.accepted_answers), before_answers)
+            self.assertGreater(len(engine.checkpoint.response_memory), before_responses)
+            self.assertGreater(len(engine.checkpoint.mini_generator.get("dialogue_patterns", [])), before_patterns)
 
 
 if __name__ == "__main__":

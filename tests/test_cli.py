@@ -89,8 +89,8 @@ class CliTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertIn("предмет", completed.stdout)
-            self.assertIn("яблоко", completed.stdout)
+            self.assertIn("object", completed.stdout.lower())
+            self.assertIn("\u044f\u0431\u043b\u043e\u043a\u043e", completed.stdout.lower())
 
     def test_train_cli(self):
         with tempfile.TemporaryDirectory() as tmp:

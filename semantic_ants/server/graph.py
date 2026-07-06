@@ -30,6 +30,7 @@ def graph_snapshot(
 ) -> dict[str, Any]:
     signal = signal_index(result)
     query_value = query.casefold().strip() if query else ""
+    has_signal = bool(signal["nodes"] or signal["edges"])
     edges = []
     degree: Counter[str] = Counter()
 
@@ -40,17 +41,22 @@ def graph_snapshot(
         edges.append(payload)
         degree[edge.start] += 1
         degree[edge.end] += 1
-        if limit is not None and len(edges) >= limit:
+        if not has_signal and limit is not None and len(edges) >= limit:
             break
 
-    node_ids = {edge["start"] for edge in edges} | {edge["end"] for edge in edges}
-    if not only_signal:
-        for uri, node in graph.nodes.items():
-            payload = _node_payload(uri, node, checkpoint, degree, signal)
-            if _node_matches(payload, layer, source, query_value):
-                node_ids.add(uri)
-                if limit is not None and len(node_ids) >= limit and not edges:
-                    break
+    focused = _focused_signal_graph(edges, signal, limit, only_signal) if has_signal else None
+    if focused is not None:
+        edges = focused["edges"]
+        node_ids = focused["node_ids"]
+    else:
+        node_ids = {edge["start"] for edge in edges} | {edge["end"] for edge in edges}
+        if not only_signal:
+            for uri, node in graph.nodes.items():
+                payload = _node_payload(uri, node, checkpoint, degree, signal)
+                if _node_matches(payload, layer, source, query_value):
+                    node_ids.add(uri)
+                    if limit is not None and len(node_ids) >= limit and not edges:
+                        break
 
     nodes = [
         _node_payload(uri, graph.nodes.get(uri), checkpoint, degree, signal)
@@ -69,6 +75,52 @@ def graph_snapshot(
             "signal_edges": len(signal["edges"]),
         },
     }
+
+
+def _focused_signal_graph(
+    edges: list[dict[str, Any]],
+    signal: dict[str, Any],
+    limit: int | None,
+    only_signal: bool,
+) -> dict[str, Any] | None:
+    active_node_ids = set(signal["nodes"])
+    active_edge_ids = set(signal["edges"])
+    if not active_node_ids and not active_edge_ids:
+        return None
+
+    required_edge_ids = set(active_edge_ids)
+    if not only_signal:
+        required_edge_ids.update(_coverage_edge_ids(edges, active_node_ids, active_edge_ids))
+
+    seed_node_ids = set(active_node_ids)
+    for edge in edges:
+        if edge["id"] in active_edge_ids:
+            seed_node_ids.add(edge["start"])
+            seed_node_ids.add(edge["end"])
+
+    if only_signal:
+        visible_edges = [edge for edge in edges if edge["signal"]["active"]]
+    else:
+        visible_edges = [
+            edge
+            for edge in edges
+            if edge["id"] in required_edge_ids or edge["start"] in seed_node_ids or edge["end"] in seed_node_ids
+        ]
+        visible_edges.sort(key=lambda edge: _focus_edge_rank(edge, active_node_ids, active_edge_ids))
+        required_edges = [edge for edge in visible_edges if edge["id"] in required_edge_ids]
+        optional_edges = [edge for edge in visible_edges if edge["id"] not in required_edge_ids]
+        edge_limit = limit if limit is not None else 800
+        if len(required_edges) >= edge_limit:
+            visible_edges = required_edges
+        else:
+            visible_edges = required_edges + optional_edges[: max(edge_limit - len(required_edges), 0)]
+
+    node_ids = set(active_node_ids)
+    for edge in visible_edges:
+        node_ids.add(edge["start"])
+        node_ids.add(edge["end"])
+
+    return {"edges": visible_edges, "node_ids": node_ids}
 
 
 def concept_detail(
@@ -321,6 +373,40 @@ def _chain_from_steps(steps: list[dict[str, Any]]) -> list[str]:
     chain = [str(ordered[0].get("start", ""))]
     chain.extend(str(step.get("end", "")) for step in ordered)
     return [value for value in chain if value]
+
+
+def _focus_edge_rank(edge: dict[str, Any], active_node_ids: set[str], active_edge_ids: set[str]) -> tuple[Any, ...]:
+    touches_active_node = edge["start"] in active_node_ids or edge["end"] in active_node_ids
+    return (
+        0 if edge["id"] in active_edge_ids else 1,
+        0 if touches_active_node else 1,
+        0 if edge.get("signal", {}).get("active") else 1,
+        -float(edge.get("pheromone", 0.0) or 0.0),
+        int(edge.get("layer", 1) or 1),
+        float(edge.get("distance", 0.0) or 0.0),
+        str(edge.get("relation", "")),
+        str(edge.get("id", "")),
+    )
+
+
+def _coverage_edge_ids(
+    edges: list[dict[str, Any]],
+    active_node_ids: set[str],
+    active_edge_ids: set[str],
+) -> set[str]:
+    incident_edges: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        incident_edges.setdefault(str(edge["start"]), []).append(edge)
+        incident_edges.setdefault(str(edge["end"]), []).append(edge)
+
+    selected: set[str] = set()
+    for node_id in active_node_ids:
+        candidates = incident_edges.get(node_id)
+        if not candidates:
+            continue
+        best = min(candidates, key=lambda edge: _focus_edge_rank(edge, active_node_ids, active_edge_ids))
+        selected.add(str(best["id"]))
+    return selected
 
 
 def edge_id_parts(edge_id: str) -> tuple[str, str, str]:

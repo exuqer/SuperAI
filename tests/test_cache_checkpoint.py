@@ -16,7 +16,7 @@ class CacheCheckpointTest(unittest.TestCase):
 
     def test_checkpoint_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "model.json"
+            path = Path(tmp) / "model.bin"
             store = CheckpointStore(path)
             checkpoint = Checkpoint()
             checkpoint.reinforce_edge("/c/en/a", "RelatedTo", "/c/en/b")

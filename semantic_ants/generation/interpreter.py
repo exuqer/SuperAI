@@ -138,7 +138,7 @@ class Interpreter:
             count=1,
             chat_history=chat_history,
         )
-        return response or summary
+        return response
 
 
 def _label_for(uri: str, node: Any, checkpoint: Checkpoint, lang: str) -> str:

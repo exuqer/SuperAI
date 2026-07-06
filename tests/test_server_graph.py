@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from semantic_ants.core.graph import SemanticGraph
+from semantic_ants.core.models import SemanticEdge
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.learning import CheckpointStore, FeedbackTrainer
 from semantic_ants.server.graph import concept_detail, graph_from_checkpoint, graph_snapshot, trace_interpretation
@@ -10,7 +12,7 @@ from tests.fixtures import FakeConceptNetClient
 
 class ServerGraphTest(unittest.TestCase):
     def make_engine(self, tmp: str) -> SemanticEngine:
-        store = CheckpointStore(Path(tmp) / "model.json")
+        store = CheckpointStore(Path(tmp) / "model.bin")
         return SemanticEngine(
             config=EngineConfig(state_dir=Path(tmp), allow_network=False, ant_count=4, max_depth=2),
             client=FakeConceptNetClient(),
@@ -26,6 +28,66 @@ class ServerGraphTest(unittest.TestCase):
             self.assertTrue(snapshot["edges"])
             self.assertTrue(any(edge["signal"]["active"] for edge in snapshot["edges"]))
             self.assertTrue(any(node["signal"]["active"] for node in snapshot["nodes"]))
+
+    def test_focused_graph_keeps_coverage_edges_for_active_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            graph = SemanticGraph()
+            graph.add_edge(SemanticEdge("a", "b", "r1"))
+            graph.add_edge(SemanticEdge("c", "d", "r2"))
+            result = {
+                "routes": [
+                    {
+                        "ant_id": 1,
+                        "start": "a",
+                        "concepts": ["a", "b"],
+                        "total_score": 1.0,
+                        "steps": [
+                            {
+                                "start": "a",
+                                "end": "b",
+                                "relation": "r1",
+                                "edge_weight": 1.0,
+                                "pheromone": 1.0,
+                                "score": 1.0,
+                                "source": "checkpoint",
+                                "layer": 1,
+                                "distance": 1.0,
+                                "remaining_strength": None,
+                                "edge_type": "semantic",
+                            }
+                        ],
+                    },
+                    {
+                        "ant_id": 2,
+                        "start": "c",
+                        "concepts": ["c", "d"],
+                        "total_score": 1.0,
+                        "steps": [
+                            {
+                                "start": "c",
+                                "end": "d",
+                                "relation": "r2",
+                                "edge_weight": 1.0,
+                                "pheromone": 1.0,
+                                "score": 1.0,
+                                "source": "checkpoint",
+                                "layer": 1,
+                                "distance": 1.0,
+                                "remaining_strength": None,
+                                "edge_type": "semantic",
+                            }
+                        ],
+                    },
+                ],
+                "signal_trace": [],
+                "semantic_vector": {"items": []},
+            }
+
+            snapshot = graph_snapshot(graph, engine.checkpoint, result, limit=1)
+            edge_ids = [edge["id"] for edge in snapshot["edges"]]
+            self.assertIn("a|r1|b", edge_ids)
+            self.assertIn("c|r2|d", edge_ids)
 
     def test_checkpoint_graph_filter_by_layer(self):
         with tempfile.TemporaryDirectory() as tmp:

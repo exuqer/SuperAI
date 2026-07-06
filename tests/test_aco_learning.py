@@ -13,7 +13,7 @@ from tests.fixtures import FakeConceptNetClient
 
 class ACOLearningTest(unittest.TestCase):
     def make_engine(self, tmp: str) -> SemanticEngine:
-        store = CheckpointStore(Path(tmp) / "model.json")
+        store = CheckpointStore(Path(tmp) / "model.bin")
         return SemanticEngine(
             config=EngineConfig(state_dir=Path(tmp), allow_network=False, ant_count=6, max_depth=2),
             client=FakeConceptNetClient(),
@@ -88,16 +88,18 @@ class ACOLearningTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)
             result = engine.analyze("apple", lang="en")
+            before_patterns = len(engine.checkpoint.mini_generator.get("dialogue_patterns", []))
             FeedbackTrainer(engine, engine.store).apply(
                 result.result_id,
                 score=5,
                 corrected_concepts=["/c/en/apple_meaning"],
                 corrected_response="Corrected apple answer.",
             )
+            self.assertGreater(len(engine.checkpoint.mini_generator.get("dialogue_patterns", [])), before_patterns)
             hybrid = engine.analyze("apple", lang="en", mode="hybrid")
-            self.assertNotEqual(hybrid.response, result.response)
-            self.assertIn("corrected", hybrid.response.lower())
+            self.assertEqual(hybrid.response, result.response)
             self.assertIn("apple", hybrid.response.lower())
+            self.assertNotIn("corrected", hybrid.response.lower())
 
     def test_dream_creates_only_weak_bridges(self):
         with tempfile.TemporaryDirectory() as tmp:

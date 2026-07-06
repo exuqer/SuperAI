@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from semantic_ants.learning.checkpoint import Checkpoint
+from semantic_ants.knowledge.conceptnet_seed import bootstrap_conceptnet_knowledge
 
 SEED_VERSION = 7
 
@@ -906,6 +907,9 @@ class SeedReport:
     common_words: int = 0
     basic_concepts: int = 0
     top_layer: int = 0
+    conceptnet_concepts: int = 0
+    conceptnet_edges: int = 0
+    conceptnet_matches: int = 0
     changed: bool = False
 
     def to_dict(self) -> dict[str, int | bool]:
@@ -917,23 +921,33 @@ class SeedReport:
             "common_words": self.common_words,
             "basic_concepts": self.basic_concepts,
             "top_layer": self.top_layer,
+            "conceptnet_concepts": self.conceptnet_concepts,
+            "conceptnet_edges": self.conceptnet_edges,
+            "conceptnet_matches": self.conceptnet_matches,
             "changed": self.changed,
         }
 
 
-def bootstrap_builtin_knowledge(checkpoint: Checkpoint, force: bool = False) -> SeedReport:
-    if not force and checkpoint.metadata.get("builtin_seed_version") == SEED_VERSION:
-        return SeedReport(changed=False)
+def bootstrap_builtin_knowledge(
+    checkpoint: Checkpoint,
+    force: bool = False,
+    allow_network: bool = True,
+) -> SeedReport:
+    builtin_changed = force or checkpoint.metadata.get("builtin_seed_version") != SEED_VERSION
+    if builtin_changed:
+        aliases = _load_aliases(checkpoint)
+        edges = _load_edges(checkpoint)
+        alphabets = _load_alphabets(checkpoint)
+        common_words = _load_common_words(checkpoint)
+        basic_concepts = _load_basic_concepts(checkpoint)
+        top_layer = _load_top_layer(checkpoint)
+        responses = _load_responses(checkpoint)
+        checkpoint.metadata["builtin_seed_version"] = SEED_VERSION
+        checkpoint.metadata["builtin_seed_loaded"] = True
+    else:
+        aliases = edges = responses = alphabets = common_words = basic_concepts = top_layer = 0
 
-    aliases = _load_aliases(checkpoint)
-    edges = _load_edges(checkpoint)
-    alphabets = _load_alphabets(checkpoint)
-    common_words = _load_common_words(checkpoint)
-    basic_concepts = _load_basic_concepts(checkpoint)
-    top_layer = _load_top_layer(checkpoint)
-    responses = _load_responses(checkpoint)
-    checkpoint.metadata["builtin_seed_version"] = SEED_VERSION
-    checkpoint.metadata["builtin_seed_loaded"] = True
+    conceptnet_report = bootstrap_conceptnet_knowledge(checkpoint, force=force, allow_network=allow_network)
     return SeedReport(
         aliases=aliases,
         edges=edges,
@@ -942,7 +956,10 @@ def bootstrap_builtin_knowledge(checkpoint: Checkpoint, force: bool = False) -> 
         common_words=common_words,
         basic_concepts=basic_concepts,
         top_layer=top_layer,
-        changed=True,
+        conceptnet_concepts=conceptnet_report.concepts,
+        conceptnet_edges=conceptnet_report.edges,
+        conceptnet_matches=conceptnet_report.matched_existing,
+        changed=bool(builtin_changed or conceptnet_report.changed),
     )
 
 

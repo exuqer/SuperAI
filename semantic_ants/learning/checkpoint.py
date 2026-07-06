@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import pickle
 import time
@@ -13,7 +12,6 @@ from semantic_ants.core.normalization import detect_language, text_to_concept_ur
 
 
 DEFAULT_CHECKPOINT_NAME = "model.bin"
-JSON_SUFFIX = ".json"
 
 
 def default_checkpoint_path(state_dir: Path | str = ".semantic_ants") -> Path:
@@ -423,7 +421,7 @@ class Checkpoint:
 
 
 class CheckpointStore:
-    """Читает и сохраняет checkpoint в JSON или быстром бинарном формате."""
+    """Читает и сохраняет checkpoint в быстром бинарном формате."""
 
     def __init__(self, path: Path | str = default_checkpoint_path()) -> None:
         self.path = Path(path)
@@ -446,9 +444,6 @@ class CheckpointStore:
         self._save_path(target, checkpoint)
 
     def _load_path(self, path: Path) -> Checkpoint:
-        if path.suffix.lower() == JSON_SUFFIX:
-            with path.open("r", encoding="utf-8") as handle:
-                return Checkpoint.from_dict(json.load(handle))
         with path.open("rb") as handle:
             payload = pickle.load(handle)
         if isinstance(payload, Checkpoint):
@@ -458,23 +453,10 @@ class CheckpointStore:
         raise ValueError(f"Некорректный checkpoint: {path}")
 
     def _save_path(self, path: Path, checkpoint: Checkpoint) -> None:
-        if path.suffix.lower() == JSON_SUFFIX:
-            self._save_json(path, checkpoint)
-        else:
-            self._save_binary(path, checkpoint)
-
-    def _save_json(self, path: Path, checkpoint: Checkpoint) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-        with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(checkpoint.to_dict(), handle, ensure_ascii=False, indent=2, sort_keys=True)
-        _replace_with_retry(tmp, path)
-
-    def _save_binary(self, path: Path, checkpoint: Checkpoint) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
         with tmp.open("wb") as handle:
-            pickle.dump(checkpoint.to_dict(), handle, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(checkpoint, handle, protocol=pickle.HIGHEST_PROTOCOL)
         _replace_with_retry(tmp, path)
 
 

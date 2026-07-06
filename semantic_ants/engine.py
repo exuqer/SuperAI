@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from semantic_ants.ants import AntColony, AntConfig
@@ -46,7 +46,7 @@ class SemanticEngine:
         self.store = store or CheckpointStore(default_checkpoint_path(self.config.state_dir))
         self.checkpoint = checkpoint or self.store.load()
         if self.config.autoload_builtin:
-            report = bootstrap_builtin_knowledge(self.checkpoint)
+            report = bootstrap_builtin_knowledge(self.checkpoint, allow_network=self.config.allow_network)
             if report.changed:
                 self.store.save(self.checkpoint)
         self.model_dir = self.config.state_dir / "models"
@@ -164,26 +164,7 @@ class SemanticEngine:
         return self.vector_interpreter.interpret(semantic_vector, self.checkpoint)
 
     def _hybridize(self, result: SemanticResult, candidates: int = 3) -> SemanticResult:
-        thought = SemanticThought.from_result(result)
-        prompt = self.speech.build_prompt(
-            input_text=result.input_text,
-            tokens=result.tokens,
-            activated_concepts=result.activated_concepts,
-            routes=result.routes,
-            checkpoint=self.checkpoint,
-            chat_history=result.context_turns,
-            lang=result.lang,
-        )
-        generated = self.speech.generate(
-            prompt,
-            self.checkpoint,
-            model_dir=self.model_dir,
-            fallback=result.response,
-            count=candidates,
-            lang=result.lang,
-        )
-        answer, _ = self.judge.rank_freeform(result.input_text, thought, generated)
-        return replace(result, response=answer)
+        return result
 
     def _select_lang(self, text: str, lang: str) -> str:
         requested = self.config.lang if lang == "auto" else lang
@@ -198,30 +179,12 @@ class SemanticEngine:
             try:
                 nodes, edges = self.client.edges_for(uri, limit=self.config.conceptnet_limit)
             except ConceptNetError:
-                nodes, edges = self._fallback_edges(uri, token, lang)
+                continue
             for node in nodes:
                 graph.add_node(node)
             graph.add_edges(edges, include_reverse=True)
         self._connect_input_tokens(start_uris, graph)
         return start_uris
-
-    def _fallback_edges(
-        self,
-        uri: str,
-        token: str,
-        lang: str,
-    ) -> tuple[list[ConceptNode], list[SemanticEdge]]:
-        root_uri = f"/c/{lang}/unknown_context"
-        node = ConceptNode(uri=root_uri, label="unknown context", language=lang, source="fallback")
-        edge = SemanticEdge(
-            start=uri,
-            end=root_uri,
-            relation="RelatedTo",
-            weight=0.1,
-            source="fallback",
-            surface_text=f"Fallback-связь для {token}",
-        )
-        return [node], [edge]
 
     def _connect_input_tokens(self, start_uris: list[str], graph: SemanticGraph) -> None:
         for left, right in zip(start_uris, start_uris[1:]):

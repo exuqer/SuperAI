@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 from semantic_ants.core.normalization import detect_language
@@ -12,7 +11,7 @@ class SenseSentenceBuilder:
         lang = _vector_lang(semantic_vector)
         items = [item for item in semantic_vector.get("items", []) if isinstance(item, dict)]
         if _is_sparse_unknown_vector(items):
-            return [_fallback(lang)]
+            return []
         subject = _surface_for_item(_best_item(items, checkpoint, lang), checkpoint, lang)
         definition = _meaning_for_subject(items, checkpoint, lang)
         definition_candidate = _variant_definition(lang, subject, definition)
@@ -20,7 +19,7 @@ class SenseSentenceBuilder:
         domain = _surface_for_uri(_domain_uri(semantic_vector), checkpoint, lang)
         vectors = _nonempty([subject, *items[:5], domain])
         if not vectors:
-            return [_fallback(lang)]
+            return []
 
         candidates = _unique_nonempty(
             [
@@ -31,8 +30,6 @@ class SenseSentenceBuilder:
                 _variant_image(lang, subject, items, domain),
             ]
         )
-        if not candidates:
-            candidates = [_fallback(lang)]
         return candidates[: max(count, 1)]
 
     def render_pattern(
@@ -80,6 +77,12 @@ def render_uri(uri: str, checkpoint: Checkpoint, lang: str | None = None) -> str
     if not uri:
         return ""
     selected_lang = lang if lang in {"ru", "en"} else None
+    aliased = _surface_from_aliases(uri, checkpoint, selected_lang)
+    if aliased:
+        return aliased
+    translated = _cross_language_surface(uri, checkpoint, selected_lang)
+    if translated:
+        return translated
     localized = _definition_label(uri, checkpoint, selected_lang)
     if localized:
         return localized
@@ -91,9 +94,9 @@ def render_uri(uri: str, checkpoint: Checkpoint, lang: str | None = None) -> str
             if selected_lang is None or uri_lang == selected_lang:
                 return token
             if uri_lang in {"ru", "en"}:
-                return _surface_from_aliases(uri, checkpoint, selected_lang) or token
+                return aliased or token
             return token
-    return _surface_from_aliases(uri, checkpoint, selected_lang) or uri.rstrip("/").split("/")[-1].replace("_", " ")
+    return aliased or uri.rstrip("/").split("/")[-1].replace("_", " ")
 
 
 def render_concepts(concepts: list[str], checkpoint: Checkpoint, lang: str | None = None) -> list[str]:
@@ -140,12 +143,13 @@ def _surface_for_item(item: dict[str, Any] | None, checkpoint: Checkpoint, lang:
     if not item:
         return ""
     uri = str(item.get("uri", ""))
-    if uri.startswith("/c/"):
-        return render_uri(uri, checkpoint, lang)
+    surface = render_uri(uri, checkpoint, lang)
+    if surface:
+        return surface
     label = str(item.get("label") or "")
     if label:
         return label
-    return render_uri(uri, checkpoint, lang)
+    return ""
 
 
 def _surface_for_uri(uri: str, checkpoint: Checkpoint, lang: str) -> str:
@@ -164,6 +168,28 @@ def _surface_from_aliases(uri: str, checkpoint: Checkpoint, lang: str | None) ->
         candidates.append(word.replace("_", " "))
     if candidates:
         return candidates[0]
+    return ""
+
+
+def _cross_language_surface(uri: str, checkpoint: Checkpoint, lang: str | None) -> str:
+    if lang not in {"ru", "en"} or not uri.startswith("/c/"):
+        return ""
+    token = uri.split("/", 3)[-1].replace("_", " ")
+    basic_concepts = checkpoint.metadata.get("basic_concepts", {})
+    if not isinstance(basic_concepts, dict):
+        return ""
+    for info in basic_concepts.values():
+        if not isinstance(info, dict):
+            continue
+        aliases = info.get("aliases", {})
+        if not isinstance(aliases, dict):
+            continue
+        source_words = aliases.get("ru" if lang == "en" else "en", [])
+        target_words = aliases.get(lang, [])
+        if not isinstance(source_words, list) or not isinstance(target_words, list):
+            continue
+        if token in {str(word).replace("_", " ") for word in source_words} and target_words:
+            return str(target_words[0]).replace("_", " ")
     return ""
 
 
@@ -378,10 +404,6 @@ def _join_list(values: list[str], lang: str) -> str:
     tail = items[-1]
     head = ", ".join(items[:-1])
     return f"{head} и {tail}" if lang == "ru" else f"{head}, and {tail}"
-
-
-def _fallback(lang: str) -> str:
-    return "Смысл пока слишком разрежен для уверенного ответа." if lang == "ru" else "The meaning is still too sparse for a confident answer."
 
 
 def _meaning_for_subject(items: list[dict[str, Any]], checkpoint: Checkpoint, lang: str) -> str:

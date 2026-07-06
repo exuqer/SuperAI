@@ -351,7 +351,7 @@ class TorchDialogueNavigator:
             lexical = lexical_overlap / max(len(lexical_terms), 1)
             stimulus_clean = _clean_text(str(item.get("stimulus", "")))
             exact_stimulus = bool(stimulus_clean and _contains_term_sequence(input_terms, stimulus_clean))
-            if not (overlap or answer_overlap or lexical_overlap or exact_stimulus):
+            if not (overlap or answer_overlap or exact_stimulus):
                 continue
             reward = min(float(item.get("reward", item.get("weight", 0.0))), 3.0)
             score = overlap + answer_overlap * 0.5 + lexical * 2.0 + lexical_overlap * 2.0 + reward

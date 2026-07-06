@@ -215,6 +215,8 @@ class FeedbackTrainer:
         positive = score >= 4
         negative = score <= 2
         changed_edges = 0
+        trained_dialogues = 0
+        rejected_dialogues = 0
         for route in result.get("routes", []):
             for step in route.get("steps", []):
                 if positive:
@@ -228,32 +230,39 @@ class FeedbackTrainer:
             for concept in corrected_concepts:
                 checkpoint.suppressed_concepts.pop(concept, None)
             if corrected_response:
-                checkpoint.remember_response(corrected_concepts, corrected_response, amount=2.0)
-                checkpoint.remember_accepted_answer(
+                self.engine.speech.train_pair(
                     stimulus=str(result.get("input_text", "")),
                     semantic_prompt=str(result.get("summary", "")),
                     concepts=corrected_concepts,
-                    answer=corrected_response,
+                    accepted_answer=corrected_response,
+                    checkpoint=checkpoint,
                     reward=max(score / 5, 0.1),
+                    model_dir=self.engine.model_dir,
                 )
+                trained_dialogues += 1
         elif positive and result.get("response"):
             concepts = [str(item.get("uri")) for item in result.get("activated_concepts", []) if item.get("uri")]
-            checkpoint.remember_accepted_answer(
+            self.engine.speech.train_pair(
                 stimulus=str(result.get("input_text", "")),
                 semantic_prompt=str(result.get("summary", "")),
                 concepts=concepts,
-                answer=str(result["response"]),
+                accepted_answer=str(result["response"]),
+                checkpoint=checkpoint,
                 reward=max(score / 5, 0.1),
+                model_dir=self.engine.model_dir,
             )
+            trained_dialogues += 1
         if negative and result.get("response"):
             concepts = [str(item.get("uri")) for item in result.get("activated_concepts", []) if item.get("uri")]
-            checkpoint.remember_negative(
+            self.engine.speech.train_negative(
                 stimulus=str(result.get("input_text", "")),
                 semantic_prompt=str(result.get("summary", "")),
                 concepts=concepts,
-                answer=str(result["response"]),
+                rejected_answer=str(result["response"]),
+                checkpoint=checkpoint,
                 reason=f"human feedback score={score}",
             )
+            rejected_dialogues += 1
         self.store.save(checkpoint)
         return {
             "result_id": selected_id,
@@ -261,6 +270,8 @@ class FeedbackTrainer:
             "positive": positive,
             "negative": negative,
             "changed_edges": changed_edges,
+            "trained_dialogues": trained_dialogues,
+            "rejected_dialogues": rejected_dialogues,
             "corrected_concepts": corrected_concepts or [],
         }
 
