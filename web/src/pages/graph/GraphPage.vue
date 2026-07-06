@@ -41,7 +41,12 @@
     </div>
 
     <div class="split">
-      <GraphViewer :graph="runtime.graph" @select-node="selectNode" @select-edge="selectEdge" />
+      <GraphViewer
+        :graph="runtime.graph"
+        :viewport-limit="filters.limit"
+        @select-node="selectNode"
+        @select-edge="selectEdge"
+      />
       <NodeInspector :node="selectedNode" :edge="selectedEdge" :detail="detail" @select-edge="selectedEdge = $event" />
     </div>
   </section>

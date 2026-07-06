@@ -91,6 +91,22 @@ class SpcDownloadRequest(BaseModel):
     output: Optional[str] = None
 
 
+class KozievDownloadRequest(BaseModel):
+    path: Optional[str] = None
+    limit: Optional[int] = None
+    timeout: float = 60.0
+    output: Optional[str] = None
+
+
+class TatoebaDownloadRequest(BaseModel):
+    source_lang: str = "ru"
+    target_lang: str = "en"
+    bidirectional: bool = True
+    limit: Optional[int] = None
+    timeout: float = 60.0
+    output: Optional[str] = None
+
+
 class ExportRequest(BaseModel):
     destination: str
 

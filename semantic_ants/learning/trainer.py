@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from semantic_ants.core.models import SemanticResult
+from semantic_ants.core.normalization import detect_response_language
 from semantic_ants.learning.checkpoint import CheckpointStore
 
 
@@ -54,6 +55,14 @@ class Trainer:
             raise ValueError("Пример требует text, stimulus или question")
         text = str(text_value)
         lang = str(example.get("lang", "auto"))
+        answer_lang_value = str(
+            example.get("answer_lang")
+            or example.get("response_lang")
+            or example.get("target_lang")
+            or lang
+        )
+        answer_lang = answer_lang_value if answer_lang_value in {"ru", "en"} else (lang if lang in {"ru", "en"} else None)
+        source_lang = lang if lang in {"ru", "en"} else None
         result = self.engine.analyze(
             text,
             lang=lang,
@@ -78,7 +87,7 @@ class Trainer:
         reinforced_any = False
 
         for concept, label in _parse_concept_labels(example.get("concept_labels")).items():
-            checkpoint.remember_concept_label(concept, label)
+            checkpoint.remember_concept_label(checkpoint.canonical_uri(concept), label)
 
         for route in result.routes:
             concepts = route.concepts
@@ -90,7 +99,13 @@ class Trainer:
                         report.reinforced_edges += 1
             for target in target_concepts:
                 if target in concepts:
-                    checkpoint.remember_response(target_concepts, target_response, amount=1.0)
+                    checkpoint.remember_response(
+                        target_concepts,
+                        target_response,
+                        amount=1.0,
+                        lang=answer_lang,
+                        source_lang=source_lang,
+                    )
 
         if target_concepts and not reinforced_any:
             for route in result.routes[:1]:
@@ -111,8 +126,8 @@ class Trainer:
                 edge_type = str(edge_value.get("edge_type", "semantic"))
                 metadata = dict(edge_value.get("metadata", {})) if isinstance(edge_value.get("metadata"), dict) else {}
                 checkpoint.add_custom_edge(
-                    start,
-                    end,
+                    checkpoint.canonical_uri(start),
+                    checkpoint.canonical_uri(end),
                     relation=relation,
                     weight=weight,
                     layer=layer,
@@ -125,7 +140,7 @@ class Trainer:
                     report.reinforced_edges += 1
                 continue
             start, relation, end = edge_value
-            checkpoint.add_custom_edge(start, end, relation=relation, weight=1.0)
+            checkpoint.add_custom_edge(checkpoint.canonical_uri(start), checkpoint.canonical_uri(end), relation=relation, weight=1.0)
             checkpoint.reinforce_edge(start, relation, end, amount=0.5)
             if report:
                 report.reinforced_edges += 1
@@ -160,13 +175,21 @@ class Trainer:
                 report.suppressed_concepts += 1
 
         if target_response and target_concepts:
-            checkpoint.remember_response(target_concepts, target_response, amount=1.0)
+            checkpoint.remember_response(
+                target_concepts,
+                target_response,
+                amount=1.0,
+                lang=answer_lang,
+                source_lang=source_lang,
+            )
             checkpoint.remember_accepted_answer(
                 stimulus=text,
                 semantic_prompt=result.summary,
                 concepts=target_concepts,
                 answer=target_response,
                 reward=reward,
+                lang=answer_lang,
+                source_lang=source_lang,
             )
             if report:
                 report.remembered_responses += 1
@@ -178,6 +201,8 @@ class Trainer:
                 concepts=target_concepts,
                 answer=rejected,
                 reason="supervised rejected answer",
+                lang=answer_lang,
+                source_lang=source_lang,
             )
 
         checkpoint.examples_seen += 1
@@ -230,6 +255,10 @@ class FeedbackTrainer:
             for concept in corrected_concepts:
                 checkpoint.suppressed_concepts.pop(concept, None)
             if corrected_response:
+                answer_lang = detect_response_language(
+                    str(result.get("input_text", "")),
+                    default=str(result.get("lang", "auto")),
+                )
                 self.engine.speech.train_pair(
                     stimulus=str(result.get("input_text", "")),
                     semantic_prompt=str(result.get("summary", "")),
@@ -238,10 +267,15 @@ class FeedbackTrainer:
                     checkpoint=checkpoint,
                     reward=max(score / 5, 0.1),
                     model_dir=self.engine.model_dir,
+                    answer_lang=answer_lang,
                 )
                 trained_dialogues += 1
         elif positive and result.get("response"):
             concepts = [str(item.get("uri")) for item in result.get("activated_concepts", []) if item.get("uri")]
+            answer_lang = detect_response_language(
+                str(result.get("input_text", "")),
+                default=str(result.get("lang", "auto")),
+            )
             self.engine.speech.train_pair(
                 stimulus=str(result.get("input_text", "")),
                 semantic_prompt=str(result.get("summary", "")),
@@ -250,10 +284,15 @@ class FeedbackTrainer:
                 checkpoint=checkpoint,
                 reward=max(score / 5, 0.1),
                 model_dir=self.engine.model_dir,
+                answer_lang=answer_lang,
             )
             trained_dialogues += 1
         if negative and result.get("response"):
             concepts = [str(item.get("uri")) for item in result.get("activated_concepts", []) if item.get("uri")]
+            answer_lang = detect_response_language(
+                str(result.get("input_text", "")),
+                default=str(result.get("lang", "auto")),
+            )
             self.engine.speech.train_negative(
                 stimulus=str(result.get("input_text", "")),
                 semantic_prompt=str(result.get("summary", "")),
@@ -261,6 +300,7 @@ class FeedbackTrainer:
                 rejected_answer=str(result["response"]),
                 checkpoint=checkpoint,
                 reason=f"human feedback score={score}",
+                answer_lang=answer_lang,
             )
             rejected_dialogues += 1
         self.store.save(checkpoint)

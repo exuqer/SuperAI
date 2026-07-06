@@ -104,6 +104,36 @@ class ServerGraphTest(unittest.TestCase):
             self.assertEqual(detail["node"]["uri"], "/m/top/object")
             self.assertTrue(detail["incoming"] or detail["outgoing"])
 
+    def test_query_snapshot_links_unseen_concept_to_language(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            graph = graph_from_checkpoint(engine.checkpoint)
+            snapshot = graph_snapshot(
+                graph,
+                engine.checkpoint,
+                layer=1,
+                relation="InLanguage",
+                edge_type="language",
+                min_pheromone=1.0,
+                query="/c/ru/\u043a\u043d\u0438\u0433\u0430",
+                limit=50,
+            )
+            self.assertTrue(snapshot["edges"])
+            self.assertTrue(
+                any(
+                    edge["start"] == "/c/ru/\u043a\u043d\u0438\u0433\u0430"
+                    and edge["end"] == "/m/language/ru"
+                    for edge in snapshot["edges"]
+                )
+            )
+
+    def test_concept_detail_links_unseen_concept_to_language(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            detail = concept_detail(engine.checkpoint, "/c/ru/\u043a\u043d\u0438\u0433\u0430")
+            self.assertEqual(detail["node"]["uri"], "/c/ru/\u043a\u043d\u0438\u0433\u0430")
+            self.assertTrue(any(edge["relation"] == "InLanguage" for edge in detail["outgoing"]))
+
     def test_trace_interpretation_lists_active_edges(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)

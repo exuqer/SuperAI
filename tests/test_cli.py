@@ -87,9 +87,10 @@ class CliTest(unittest.TestCase):
                 ],
                 check=True,
                 capture_output=True,
+                encoding="utf-8",
                 text=True,
             )
-            self.assertIn("object", completed.stdout.lower())
+            self.assertIn("плод", completed.stdout.lower())
             self.assertIn("\u044f\u0431\u043b\u043e\u043a\u043e", completed.stdout.lower())
 
     def test_train_cli(self):

@@ -148,6 +148,10 @@ class SemanticResult:
     context_turns: list[dict[str, Any]] = field(default_factory=list)
     semantic_vector: dict[str, Any] = field(default_factory=dict)
     signal_trace: list[dict[str, Any]] = field(default_factory=list)
+    response_source: str = ""
+    response_lang: str = ""
+    response_candidates: list[str] = field(default_factory=list)
+    canonical_concepts: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,6 +168,10 @@ class SemanticResult:
             "context_turns": self.context_turns,
             "semantic_vector": self.semantic_vector,
             "signal_trace": self.signal_trace,
+            "response_source": self.response_source,
+            "response_lang": self.response_lang,
+            "response_candidates": self.response_candidates,
+            "canonical_concepts": self.canonical_concepts,
         }
 
 

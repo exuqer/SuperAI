@@ -105,6 +105,42 @@ class EngineTrainingTest(unittest.TestCase):
             self.assertEqual(learned["lang"], "ru")
             self.assertTrue(learned["answer_concepts"])
 
+    def test_training_records_translation_languages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            path = Path(tmp) / "translation.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "text": "яблоко",
+                        "lang": "ru",
+                        "answer_lang": "en",
+                        "target_concepts": ["/c/ru/яблоко"],
+                        "target_response": "apple",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            report = Trainer(engine, engine.store).train_file(path, epochs=1)
+            self.assertEqual(report.errors, [])
+            learned = [
+                item
+                for item in engine.checkpoint.accepted_answers
+                if item.get("stimulus") == "яблоко" and item.get("answer") == "apple"
+            ][0]
+            self.assertEqual(learned["lang"], "en")
+            self.assertEqual(learned["source_lang"], "ru")
+            self.assertTrue(
+                any(
+                    item.get("answer") == "apple"
+                    and item.get("lang") == "en"
+                    and item.get("source_lang") == "ru"
+                    for item in engine.checkpoint.response_memory.values()
+                )
+            )
+
     def test_top_layer_training_reinforces_layer_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)

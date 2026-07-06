@@ -70,6 +70,20 @@ describe('selectGraphViewport', () => {
     );
   });
 
+  it('caps the focused viewport by nodes while keeping the active path first', () => {
+    const graph: GraphPayload = {
+      nodes: [node('a', true), node('b'), node('c'), node('d')],
+      edges: [edge('a-b', 'a', 'b', true), edge('b-c', 'b', 'c', true), edge('c-d', 'c', 'd')],
+      stats: { nodes: 4, edges: 3, signal_nodes: 1, signal_edges: 2 },
+    };
+
+    const viewport = selectGraphViewport(graph, { focusedNodeLimit: 3, focusedEdgeLimit: 10 });
+
+    expect(viewport.focused).toBe(true);
+    expect(viewport.nodes.map((item) => item.id)).toEqual(['a', 'b', 'c']);
+    expect(viewport.edges.map((item) => item.id)).toEqual(['a-b', 'b-c']);
+  });
+
   it('falls back to a bounded subset when no signal is available', () => {
     const graph: GraphPayload = {
       nodes: [node('a'), node('b'), node('c')],

@@ -11,9 +11,11 @@ from semantic_ants.core.models import ConceptNode, SemanticEdge, SemanticResult
 from semantic_ants.core.normalization import detect_language, text_to_concept_uri, tokenize
 from semantic_ants.generation import Interpreter, SemanticVectorInterpreter, TorchDialogueNavigator
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
+from semantic_ants.knowledge.isolation import ensure_isolated_concept_edges
 from semantic_ants.learning.aco import Judge, SemanticThought
 from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore, default_checkpoint_path
 from semantic_ants.providers import ConceptNetClient, ConceptNetError, JsonCache
+from semantic_ants.understanding import understand_text
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,7 @@ class SemanticEngine:
         graph = SemanticGraph()
         start_uris = self._seed_graph(tokens, selected_lang, graph)
         graph.add_edges(self.checkpoint.learned_edges(), include_reverse=True)
+        self._connect_input_concepts_to_top(text, selected_lang, start_uris, graph)
         selected_strength = tuple(strength_vector) if strength_vector is not None else self.config.strength_vector
         routes = AntColony(
             AntConfig(
@@ -149,6 +152,10 @@ class SemanticEngine:
             context_turns=chat_history,
             semantic_vector=semantic_vector,
             signal_trace=signal_trace,
+            response_source=str(semantic_vector.get("response_source", "")),
+            response_lang=str(semantic_vector.get("response_lang", selected_lang)),
+            response_candidates=[str(value) for value in semantic_vector.get("response_candidates", []) if value],
+            canonical_concepts=[str(value) for value in self.checkpoint.canonical_concepts.keys()],
         )
         if mode == "hybrid" and generate_response:
             result = self._hybridize(result, candidates=candidates)
@@ -173,18 +180,50 @@ class SemanticEngine:
     def _seed_graph(self, tokens: list[str], lang: str, graph: SemanticGraph) -> list[str]:
         start_uris: list[str] = []
         for token in tokens:
-            uri = self.checkpoint.aliases.get(token) or text_to_concept_uri(token, lang)
+            raw_uri = self.checkpoint.aliases.get(token) or text_to_concept_uri(token, lang)
+            uri = self.checkpoint.canonical_uri(raw_uri)
+            self.checkpoint.register_canonical_concept(
+                uri,
+                aliases=[token],
+                lang=lang,
+                source_uri=raw_uri,
+            )
+            self.checkpoint.register_surface_form(uri, token, lang=lang)
             start_uris.append(uri)
             graph.add_node(ConceptNode(uri=uri, label=token.replace("_", " "), language=lang, source="input"))
             try:
-                nodes, edges = self.client.edges_for(uri, limit=self.config.conceptnet_limit)
+                nodes, edges = self.client.edges_for(raw_uri, limit=self.config.conceptnet_limit)
             except ConceptNetError:
                 continue
             for node in nodes:
-                graph.add_node(node)
-            graph.add_edges(edges, include_reverse=True)
+                canonical_node_uri = self.checkpoint.canonical_uri(node.uri)
+                graph.add_node(
+                    ConceptNode(
+                        uri=canonical_node_uri,
+                        label=node.label,
+                        language=node.language,
+                        source=node.source,
+                        layer=node.layer,
+                        metadata={**node.metadata, "source_uri": node.uri},
+                    )
+                )
+            graph.add_edges([self._canonical_edge(edge) for edge in edges], include_reverse=True)
         self._connect_input_tokens(start_uris, graph)
         return start_uris
+
+    def _canonical_edge(self, edge: SemanticEdge) -> SemanticEdge:
+        return SemanticEdge(
+            start=self.checkpoint.canonical_uri(edge.start),
+            end=self.checkpoint.canonical_uri(edge.end),
+            relation=edge.relation,
+            weight=edge.weight,
+            source=edge.source,
+            surface_text=edge.surface_text,
+            layer=edge.layer,
+            distance=edge.distance,
+            edge_type=edge.edge_type,
+            metadata={**edge.metadata, "source_start": edge.start, "source_end": edge.end},
+        )
 
     def _connect_input_tokens(self, start_uris: list[str], graph: SemanticGraph) -> None:
         for left, right in zip(start_uris, start_uris[1:]):
@@ -198,6 +237,37 @@ class SemanticEngine:
                 ),
                 include_reverse=True,
             )
+
+    def _connect_input_concepts_to_top(
+        self,
+        text: str,
+        lang: str,
+        start_uris: list[str],
+        graph: SemanticGraph,
+    ) -> None:
+        understood = understand_text(text, lang=lang, checkpoint=self.checkpoint)
+        content_uris = {
+            self.checkpoint.canonical_uri(str(token.concept_uri))
+            for token in understood.tokens
+            if token.concept_uri and not token.is_stop_word
+        }
+        top_domains = {
+            self.checkpoint.canonical_uri(str(token.concept_uri)): self._inferred_top_domain(token)
+            for token in understood.tokens
+            if token.concept_uri and not token.is_stop_word
+        }
+        for uri in start_uris:
+            if uri in content_uris:
+                ensure_isolated_concept_edges(graph, uri, lang=lang, top_domain=top_domains.get(uri))
+
+    def _inferred_top_domain(self, token: object) -> str:
+        morphology = getattr(token, "morphology", {}) or {}
+        pos = str(morphology.get("POS") or "")
+        if pos in {"VERB", "INFN", "PRTS", "GRND"}:
+            return "/m/top/action"
+        if pos in {"NPRO"}:
+            return "/m/top/person"
+        return "/m/top/object"
 
     def _result_id(self, text: str) -> str:
         base = f"{time.time_ns()}:{text}"

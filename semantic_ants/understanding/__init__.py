@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from functools import lru_cache
 from typing import Any
 
@@ -236,6 +236,8 @@ def understand_text(
 
     for raw_token in _raw_tokens(input_text):
         token = _build_token(raw_token, selected_lang, alias_map, known_tokens, stop_words)
+        if token.concept_uri:
+            token = replace(token, concept_uri=checkpoint.canonical_uri(token.concept_uri))
         tokens.append(token)
         if token.is_stop_word:
             counts["stop_words"] += 1
@@ -457,27 +459,27 @@ def _edit_distance_match(token: str, known_tokens: tuple[str, ...]) -> str | Non
 def _collect_aliases(checkpoint: Checkpoint) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for token, uri in checkpoint.aliases.items():
-        _register_alias(aliases, token, uri)
+        _register_alias(aliases, token, uri, checkpoint)
 
     labels = checkpoint.metadata.get("concept_labels", {})
     if isinstance(labels, dict):
         for uri, label in labels.items():
-            _register_alias(aliases, str(label), str(uri))
+            _register_alias(aliases, str(label), str(uri), checkpoint)
 
     definitions = checkpoint.metadata.get("concept_definitions", {})
     if isinstance(definitions, dict):
         for uri, info in definitions.items():
             if not isinstance(info, dict):
                 continue
-            _register_alias(aliases, str(info.get("label", "")), str(uri))
+            _register_alias(aliases, str(info.get("label", "")), str(uri), checkpoint)
 
     return aliases
 
 
-def _register_alias(aliases: dict[str, str], token: str, uri: str) -> None:
+def _register_alias(aliases: dict[str, str], token: str, uri: str, checkpoint: Checkpoint) -> None:
     key = _normalized_lookup_key(token)
     if key and uri and key not in aliases:
-        aliases[key] = uri
+        aliases[key] = checkpoint.canonical_uri(uri)
 
 
 def _stop_words(checkpoint: Checkpoint, lang: str) -> set[str]:

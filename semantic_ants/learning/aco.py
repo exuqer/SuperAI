@@ -11,6 +11,7 @@ from typing import Any
 from semantic_ants.ants import AntColony, AntConfig
 from semantic_ants.core.graph import SemanticGraph
 from semantic_ants.core.models import AntRoute, SemanticEdge, SemanticResult
+from semantic_ants.core.normalization import detect_response_language
 from semantic_ants.generation import TorchDialogueNavigator
 from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore
 
@@ -28,6 +29,7 @@ class Experience:
     negative_concepts: list[str] = field(default_factory=list)
     reward: float | None = None
     lang: str = "auto"
+    answer_lang: str = ""
     strength_vector: tuple[int, ...] = ()
     layer_targets: dict[str, list[str]] = field(default_factory=dict)
     concept_labels: dict[str, str] = field(default_factory=dict)
@@ -55,6 +57,7 @@ class Experience:
             negative_concepts=[str(value) for value in data.get("negative_concepts", [])],
             reward=float(reward) if reward is not None else None,
             lang=str(data.get("lang", "auto")),
+            answer_lang=str(data.get("answer_lang") or data.get("response_lang") or data.get("target_lang") or ""),
             strength_vector=_parse_strength_vector(data.get("strength_vector")),
             layer_targets=_parse_layer_targets(data.get("layer_targets")),
             concept_labels=_parse_concept_labels(data.get("concept_labels")),
@@ -73,6 +76,7 @@ class Experience:
             "negative_concepts": self.negative_concepts,
             "reward": self.reward,
             "lang": self.lang,
+            "answer_lang": self.answer_lang,
             "strength_vector": list(self.strength_vector),
             "layer_targets": self.layer_targets,
             "concept_labels": self.concept_labels,
@@ -368,6 +372,11 @@ class ACOTrainer:
             strength_vector=experience.strength_vector or None,
         )
         thought = SemanticThought.from_result(result)
+        response_lang = (
+            experience.answer_lang
+            if experience.answer_lang in {"ru", "en"}
+            else detect_response_language(experience.stimulus, default=result.lang) or result.lang
+        )
         semantic_prompt = self.speech.build_prompt(
             input_text=experience.stimulus,
             tokens=result.tokens,
@@ -375,7 +384,7 @@ class ACOTrainer:
             routes=result.routes,
             checkpoint=self.engine.checkpoint,
             chat_history=experience.history,
-            lang=experience.lang,
+            lang=response_lang,
         )
         if experience.accepted_answer:
             candidates = [experience.accepted_answer]
@@ -386,7 +395,7 @@ class ACOTrainer:
                 model_dir=self.model_dir,
                 fallback=result.response,
                 count=3,
-                lang=experience.lang,
+                lang=response_lang,
             )
         candidates.extend(experience.rejected_answers)
         best_answer, signal = self.judge.rank(experience, thought, candidates)
@@ -403,9 +412,10 @@ class ACOTrainer:
                 report,
                 semantic_prompt=semantic_prompt,
                 defer_speech=defer_speech,
+                response_lang=response_lang,
             )
         if negative:
-            self._evaporate(experience, thought, result.routes, best_answer, signal, report)
+            self._evaporate(experience, thought, result.routes, best_answer, signal, report, response_lang=response_lang)
         self.engine.checkpoint.remember_experience(
             {
                 **experience.to_dict(),
@@ -519,6 +529,7 @@ class ACOTrainer:
         report: ACOTrainingReport | None,
         semantic_prompt: str | None = None,
         defer_speech: bool = False,
+        response_lang: str | None = None,
     ) -> None:
         checkpoint: Checkpoint = self.engine.checkpoint
         learning_targets = experience.learning_targets
@@ -549,8 +560,8 @@ class ACOTrainer:
                 raw_metadata = edge_value.get("metadata", {})
                 edge_metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else dict(raw_metadata or {})
                 checkpoint.add_custom_edge(
-                    edge_start,
-                    edge_end,
+                    checkpoint.canonical_uri(edge_start),
+                    checkpoint.canonical_uri(edge_end),
                     relation=edge_relation,
                     weight=edge_weight,
                     layer=edge_layer,
@@ -559,9 +570,9 @@ class ACOTrainer:
                     metadata=edge_metadata,
                 )
                 if checkpoint.add_learned_bridge(
-                    edge_start,
+                    checkpoint.canonical_uri(edge_start),
                     edge_relation,
-                    edge_end,
+                    checkpoint.canonical_uri(edge_end),
                     weight=edge_weight,
                     confirmed=True,
                     metadata={
@@ -578,6 +589,8 @@ class ACOTrainer:
                     report.reinforced_edges += 1
                 continue
             start, relation, end = edge_value
+            start = checkpoint.canonical_uri(start)
+            end = checkpoint.canonical_uri(end)
             checkpoint.add_custom_edge(start, end, relation=relation, weight=max(1.0, amount))
             if checkpoint.add_learned_bridge(start, relation, end, weight=max(1.0, amount), confirmed=True):
                 if report:
@@ -623,6 +636,7 @@ class ACOTrainer:
                         "prompt": prompt,
                         "concepts": concepts,
                         "answer": accepted,
+                        "answer_lang": response_lang or experience.answer_lang or experience.lang,
                         "reward": max(signal.total, 0.1),
                     }
                 )
@@ -635,6 +649,7 @@ class ACOTrainer:
                     checkpoint,
                     reward=max(signal.total, 0.1),
                     model_dir=self.model_dir,
+                    answer_lang=response_lang or experience.answer_lang or experience.lang,
                 )
             if report:
                 report.accepted_answers += 1
@@ -647,6 +662,7 @@ class ACOTrainer:
         answer: str,
         signal: RewardSignal,
         report: ACOTrainingReport | None,
+        response_lang: str | None = None,
     ) -> None:
         checkpoint: Checkpoint = self.engine.checkpoint
         amount = max(0.1, min(abs(signal.total) + signal.contradiction_penalty + 0.2, 2.0) * 0.15)
@@ -676,6 +692,7 @@ class ACOTrainer:
                 rejected,
                 checkpoint,
                 reason="dataset rejected answer",
+                answer_lang=response_lang or experience.answer_lang or experience.lang,
             )
             if report:
                 report.negative_samples += 1
@@ -687,6 +704,7 @@ class ACOTrainer:
                 answer,
                 checkpoint,
                 reason="low reward selected answer",
+                answer_lang=response_lang or experience.answer_lang or experience.lang,
             )
             if report:
                 report.negative_samples += 1

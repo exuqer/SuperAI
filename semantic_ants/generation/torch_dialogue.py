@@ -123,6 +123,8 @@ class TorchDialogueNavigator:
         reward: float = 1.0,
         model_dir: str | Path | None = None,
         steps: int | None = None,
+        answer_lang: str | None = None,
+        source_lang: str | None = None,
     ) -> None:
         self.train_pairs(
             [
@@ -132,6 +134,8 @@ class TorchDialogueNavigator:
                     "concepts": concepts,
                     "answer": accepted_answer,
                     "reward": reward,
+                    "answer_lang": answer_lang,
+                    "source_lang": source_lang,
                 }
             ],
             checkpoint,
@@ -154,6 +158,10 @@ class TorchDialogueNavigator:
             accepted_answer = str(pair.get("answer", ""))
             concepts = [str(value) for value in pair.get("concepts", [])]
             reward = float(pair.get("reward", 1.0))
+            answer_lang = str(pair.get("answer_lang") or pair.get("response_lang") or pair.get("target_lang") or "")
+            source_lang = str(pair.get("source_lang") or pair.get("lang") or "")
+            normalized_answer_lang = answer_lang if answer_lang in {"ru", "en"} else ""
+            normalized_source_lang = source_lang if source_lang in {"ru", "en"} else ""
             if not accepted_answer:
                 continue
             clipped_prompt = semantic_prompt[: self.config.max_prompt_chars]
@@ -165,6 +173,8 @@ class TorchDialogueNavigator:
                 answer=clipped_answer,
                 reward=reward,
                 limit=self.config.max_pairs,
+                lang=normalized_answer_lang or None,
+                source_lang=normalized_source_lang or None,
             )
             if isinstance(pattern, dict):
                 stored_pairs.append(
@@ -173,6 +183,7 @@ class TorchDialogueNavigator:
                         "answer_concepts": list(pattern.get("answer_concepts", [])),
                         "answer": clipped_answer,
                         "lang": pattern.get("lang", "auto"),
+                        "source_lang": pattern.get("source_lang", normalized_source_lang or ""),
                         "reward": reward,
                         "created_at": time.time(),
                     }
@@ -191,6 +202,8 @@ class TorchDialogueNavigator:
         rejected_answer: str,
         checkpoint: Checkpoint,
         reason: str = "",
+        answer_lang: str | None = None,
+        source_lang: str | None = None,
     ) -> None:
         if not rejected_answer:
             return
@@ -200,6 +213,8 @@ class TorchDialogueNavigator:
             concepts=concepts,
             answer=rejected_answer[: self.config.max_answer_chars],
             reason=reason,
+            lang=answer_lang,
+            source_lang=source_lang,
         )
 
     def _train_torch_pairs(

@@ -15,6 +15,7 @@ cytoscape.use(fcose);
 
 const props = defineProps<{
   graph: GraphPayload | null;
+  viewportLimit?: number;
 }>();
 
 const emit = defineEmits<{
@@ -31,7 +32,19 @@ function renderGraph() {
     cy = null;
     return;
   }
-  const viewport = selectGraphViewport(props.graph);
+  const viewportLimit =
+    typeof props.viewportLimit === 'number' && Number.isFinite(props.viewportLimit)
+      ? props.viewportLimit
+      : undefined;
+  const viewport =
+    viewportLimit == null
+      ? selectGraphViewport(props.graph)
+      : selectGraphViewport(props.graph, {
+          focusedNodeLimit: viewportLimit,
+          focusedEdgeLimit: viewportLimit,
+          fallbackNodeLimit: viewportLimit,
+          fallbackEdgeLimit: viewportLimit,
+        });
   if (!viewport.nodes.length && !viewport.edges.length) {
     cy?.destroy();
     cy = null;
@@ -146,7 +159,7 @@ function renderGraph() {
 }
 
 onMounted(renderGraph);
-watch(() => props.graph, renderGraph);
+watch(() => [props.graph, props.viewportLimit], renderGraph);
 
 onBeforeUnmount(() => {
   cy?.destroy();

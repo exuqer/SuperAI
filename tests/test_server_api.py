@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from semantic_ants.learning import default_checkpoint_path
 
@@ -169,6 +170,53 @@ class ServerApiTest(unittest.TestCase):
                 time.sleep(0.05)
             self.assertEqual(job["status"], "completed")
             self.assertEqual(job["result"]["examples"], 1)
+
+    def test_dataset_download_job_apis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.make_client(tmp)
+            with patch("semantic_ants.server.service.download_koziev_dialogues_dataset", return_value=2) as mocked_koziev, patch(
+                "semantic_ants.server.service.download_tatoeba_translation_dataset",
+                return_value=4,
+            ) as mocked_tatoeba:
+                response = client.post(
+                    "/api/datasets/koziev/download",
+                    json={
+                        "path": "Conversations/Data/chan_dialogues.txt",
+                        "limit": 2,
+                        "output": str(Path(tmp) / "koziev.jsonl"),
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                job_id = response.json()["job_id"]
+                for _ in range(50):
+                    job = client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"completed", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "completed")
+                self.assertEqual(job["result"]["dataset"], "koziev")
+                mocked_koziev.assert_called_once()
+
+                response = client.post(
+                    "/api/datasets/tatoeba/download",
+                    json={
+                        "source_lang": "ru",
+                        "target_lang": "en",
+                        "bidirectional": False,
+                        "limit": 4,
+                        "output": str(Path(tmp) / "tatoeba.jsonl"),
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                job_id = response.json()["job_id"]
+                for _ in range(50):
+                    job = client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"completed", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "completed")
+                self.assertEqual(job["result"]["dataset"], "tatoeba")
+                mocked_tatoeba.assert_called_once()
 
     def test_simple_training_job_api(self):
         with tempfile.TemporaryDirectory() as tmp:

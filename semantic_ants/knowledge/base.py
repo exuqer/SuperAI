@@ -173,6 +173,20 @@ ALIASES = {
         "саша": "/c/ru/саша",
         "шла": "/c/ru/идти",
         "шоссе": "/c/ru/шоссе",
+        "супераи": "/m/concept/superai",
+        "superai": "/m/concept/superai",
+        "граф": "/m/concept/graph",
+        "graph": "/m/concept/graph",
+        "память": "/m/concept/memory",
+        "memory": "/m/concept/memory",
+        "чекпоинт": "/m/concept/checkpoint",
+        "checkpoint": "/m/concept/checkpoint",
+        "semantic_vector": "/m/concept/semantic_vector",
+        "semanticvector": "/m/concept/semantic_vector",
+        "обратная": "/m/concept/feedback",
+        "feedback": "/m/concept/feedback",
+        "обучение": "/m/concept/learning",
+        "learning": "/m/concept/learning",
     },
     "en": {
         "hello": "/c/en/hello",
@@ -201,6 +215,13 @@ ALIASES = {
         "fall": "/c/en/fall",
         "head": "/c/en/head",
         "floor": "/c/en/floor",
+        "superai": "/m/concept/superai",
+        "graph": "/m/concept/graph",
+        "memory": "/m/concept/memory",
+        "checkpoint": "/m/concept/checkpoint",
+        "semantic_vector": "/m/concept/semantic_vector",
+        "feedback": "/m/concept/feedback",
+        "learning": "/m/concept/learning",
     },
 }
 
@@ -987,6 +1008,7 @@ def _load_edges(checkpoint: Checkpoint) -> int:
 def _load_responses(checkpoint: Checkpoint) -> int:
     total = 0
     for concept_uri, label in DIALOGUE_CONCEPTS.items():
+        checkpoint.register_canonical_concept(concept_uri, label=label, source_uri=concept_uri)
         checkpoint.remember_concept_label(concept_uri, label)
         checkpoint.add_custom_edge(
             concept_uri,
@@ -1037,6 +1059,8 @@ def _remember_seed_dialogue(
         answer=clean_answer,
         reward=1.4,
         limit=1500,
+        lang=lang,
+        source_lang=lang,
     )
     for concept in concepts:
         checkpoint.reinforce_concept(concept, amount=0.25)
@@ -1093,6 +1117,7 @@ def _load_basic_concepts(checkpoint: Checkpoint) -> int:
         }
         definitions[uri] = info
         basic_concepts[uri] = info
+        checkpoint.register_canonical_concept(uri, label=info["label"], aliases=[], source_uri=uri)
         category_uri = f"/m/basic/category/{item['category']}"
         checkpoint.add_custom_edge(uri, category_uri, relation="IsA", weight=1.0)
         total += 1
@@ -1110,7 +1135,8 @@ def _load_basic_concepts(checkpoint: Checkpoint) -> int:
                 clean = str(word).lower()
                 if checkpoint.aliases.get(clean) != word_uri:
                     checkpoint.aliases[clean] = word_uri
-                    total += 1
+                checkpoint.register_canonical_concept(uri, aliases=[clean], lang=lang, source_uri=word_uri)
+                total += 1
     for start, relation, end in BASIC_RELATIONS:
         checkpoint.add_custom_edge(start, end, relation=relation, weight=1.2)
         checkpoint.reinforce_edge(start, relation, end, amount=0.2)
@@ -1134,6 +1160,7 @@ def _load_top_layer(checkpoint: Checkpoint) -> int:
         }
         top_domains[key] = {"uri": uri, **top_info}
         definitions[uri] = top_info
+        checkpoint.register_canonical_concept(uri, label=key, aliases=[alias for values in info.get("aliases", {}).values() for alias in values], source_uri=uri)
         checkpoint.add_custom_edge(
             "/m/top/root",
             uri,

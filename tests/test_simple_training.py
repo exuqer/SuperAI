@@ -49,7 +49,7 @@ class SimpleTrainingTest(unittest.TestCase):
             self.assertIn("MeaningHint", relations)
             self.assertIn("DescribedByToken", relations)
             definitions = engine.checkpoint.metadata["concept_definitions"]
-            self.assertEqual(definitions["/c/ru/программист"]["meaning"], "человек, который пишет код")
+            self.assertEqual(definitions["/m/concept/программист"]["meaning"], "человек, который пишет код")
 
     def test_simple_training_teaches_decoder_role_edges(self):
         from semantic_ants.decoding import decode_words

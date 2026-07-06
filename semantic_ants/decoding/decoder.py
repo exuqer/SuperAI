@@ -1079,6 +1079,8 @@ def _relation_support(
 ) -> float:
     if not start_uri or not end_uri:
         return 0.0
+    start_uri = checkpoint.canonical_uri(start_uri)
+    end_uri = checkpoint.canonical_uri(end_uri)
     supported = 0.0
     for edge in checkpoint.learned_edges():
         if edge.start == start_uri and edge.end == end_uri and edge.relation in _RU_RELATIONS[role]:

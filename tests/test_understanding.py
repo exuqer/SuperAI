@@ -29,8 +29,8 @@ class UnderstandingTest(unittest.TestCase):
         result = understand_text("котики едят", lang="ru", checkpoint=checkpoint)
 
         self.assertEqual([token.search_token for token in result.tokens], ["кот", "есть"])
-        self.assertEqual(result.tokens[0].concept_uri, "/c/ru/кот")
-        self.assertEqual(result.tokens[1].concept_uri, "/c/ru/есть")
+        self.assertEqual(result.tokens[0].concept_uri, "/m/concept/кот")
+        self.assertEqual(result.tokens[1].concept_uri, "/m/concept/есть")
         self.assertEqual(result.tokens[0].match_status, "candidate")
         self.assertEqual(result.tokens[1].match_status, "candidate")
 
@@ -44,7 +44,7 @@ class UnderstandingTest(unittest.TestCase):
         self.assertEqual(token.lemma, "кот")
         self.assertEqual(token.morphology["number"], "plur")
         self.assertTrue(token.morphology["case"])
-        self.assertEqual(token.concept_uri, "/c/ru/кот")
+        self.assertEqual(token.concept_uri, "/m/concept/кот")
         self.assertEqual(token.match_status, "candidate")
 
     def test_known_russian_lemma_is_not_stemmed(self):
@@ -56,7 +56,7 @@ class UnderstandingTest(unittest.TestCase):
         token = result.tokens[0]
         self.assertEqual(token.lemma, "голова")
         self.assertEqual(token.search_token, "голова")
-        self.assertEqual(token.concept_uri, "/c/ru/голова")
+        self.assertEqual(token.concept_uri, "/m/concept/голова")
         self.assertEqual(token.match_status, "found_as_lemma")
 
     def test_russian_name_keeps_its_normalized_form(self):
@@ -68,7 +68,7 @@ class UnderstandingTest(unittest.TestCase):
         token = result.tokens[0]
         self.assertEqual(token.lemma, "яна")
         self.assertEqual(token.search_token, "яна")
-        self.assertEqual(token.concept_uri, "/c/ru/яна")
+        self.assertEqual(token.concept_uri, "/m/concept/яна")
         self.assertEqual(token.match_status, "found_as_raw")
 
     def test_kushat_uses_dictionary_entry_not_thought(self):
@@ -78,8 +78,8 @@ class UnderstandingTest(unittest.TestCase):
         result = understand_text("кушать", lang="ru", checkpoint=checkpoint)
 
         token = result.tokens[0]
-        self.assertEqual(token.concept_uri, "/c/ru/есть")
-        self.assertNotEqual(token.concept_uri, "/c/ru/мысль")
+        self.assertEqual(token.concept_uri, "/m/concept/есть")
+        self.assertNotEqual(token.concept_uri, "/m/concept/мысль")
         self.assertNotEqual(token.search_token, "думать")
 
     def test_noise_words_are_ignored(self):
@@ -101,7 +101,7 @@ class UnderstandingTest(unittest.TestCase):
 
         self.assertEqual(unknown.tokens[0].match_status, "candidate")
         self.assertEqual(typo.tokens[0].match_status, "edit_distance_match")
-        self.assertEqual(typo.tokens[0].concept_uri, "/c/en/apple")
+        self.assertEqual(typo.tokens[0].concept_uri, "/m/concept/apple")
 
     def test_russian_word_is_not_replaced_by_edit_distance_neighbor(self):
         from semantic_ants.understanding import understand_text
@@ -112,7 +112,7 @@ class UnderstandingTest(unittest.TestCase):
         result = understand_text("осень", lang="ru", checkpoint=checkpoint)
 
         self.assertEqual(result.tokens[0].search_token, "осень")
-        self.assertEqual(result.tokens[0].concept_uri, "/c/ru/осень")
+        self.assertEqual(result.tokens[0].concept_uri, "/m/concept/осень")
         self.assertEqual(result.tokens[0].match_status, "candidate")
 
 

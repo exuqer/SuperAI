@@ -50,6 +50,13 @@ class SimpleQATrainer:
 
         epochs = max(int(payload.get("epochs") or 1), 1)
         lang = str(payload.get("lang", "auto"))
+        answer_lang_value = str(
+            payload.get("answer_lang")
+            or payload.get("response_lang")
+            or payload.get("target_lang")
+            or ""
+        )
+        answer_lang = answer_lang_value if answer_lang_value in {"ru", "en"} else None
         reward = float(payload.get("reward", 1.0))
         meanings = _parse_meanings(payload.get("concept_meanings"))
         report = SimpleTrainingReport(examples=1, epochs=epochs)
@@ -59,6 +66,7 @@ class SimpleQATrainer:
                 question=question,
                 expected_answer=expected_answer,
                 lang=lang,
+                answer_lang=answer_lang,
                 reward=reward,
                 meanings=meanings,
                 report=report,
@@ -72,6 +80,7 @@ class SimpleQATrainer:
         question: str,
         expected_answer: str,
         lang: str,
+        answer_lang: str | None,
         reward: float,
         meanings: list[SimpleConceptMeaning],
         report: SimpleTrainingReport,
@@ -79,7 +88,8 @@ class SimpleQATrainer:
         checkpoint = self.engine.checkpoint
         question_result = understand_text(question, lang=lang, checkpoint=checkpoint)
         selected_lang = question_result.lang
-        answer_result = understand_text(expected_answer, lang=selected_lang, checkpoint=checkpoint)
+        selected_answer_lang = answer_lang if answer_lang in {"ru", "en"} else selected_lang
+        answer_result = understand_text(expected_answer, lang=selected_answer_lang, checkpoint=checkpoint)
         question_tokens = _working_tokens(question_result)
         answer_tokens = _working_tokens(answer_result)
         question_concepts = _concepts(question_tokens)
@@ -125,7 +135,7 @@ class SimpleQATrainer:
             meaning_token_values.extend(token.search_token for token in meaning_tokens)
             concept_uri = _meaning_concept_uri(meaning, selected_lang, checkpoint)
             if concept_uri and meaning.label:
-                checkpoint.remember_concept_label(concept_uri, meaning.label)
+                checkpoint.remember_concept_label(checkpoint.canonical_uri(concept_uri), meaning.label)
             if concept_uri:
                 _remember_concept_meaning(checkpoint, concept_uri, meaning)
             for meaning_token in meaning_tokens:
@@ -156,13 +166,21 @@ class SimpleQATrainer:
         report.role_edges += self._add_role_edges(answer_tokens, reward, report)
 
         concepts = list(dict.fromkeys([*question_concepts, *answer_concepts]))
-        checkpoint.remember_response(concepts or answer_concepts, expected_answer, amount=max(reward, 0.1))
+        checkpoint.remember_response(
+            concepts or answer_concepts,
+            expected_answer,
+            amount=max(reward, 0.1),
+            lang=selected_answer_lang,
+            source_lang=selected_lang,
+        )
         remembered = checkpoint.remember_accepted_answer(
             stimulus=question,
             semantic_prompt="simple supervised question-answer",
             concepts=concepts,
             answer=expected_answer,
             reward=reward,
+            lang=selected_answer_lang,
+            source_lang=selected_lang,
         )
         if remembered is not None:
             report.accepted_answers += 1
@@ -223,8 +241,8 @@ class SimpleQATrainer:
     ) -> None:
         checkpoint = self.engine.checkpoint
         checkpoint.add_custom_edge(
-            start,
-            end,
+            checkpoint.canonical_uri(start),
+            checkpoint.canonical_uri(end),
             relation=relation,
             weight=max(amount, 0.1),
             layer=1,
@@ -346,6 +364,7 @@ def _meaning_concept_uri(meaning: SimpleConceptMeaning, lang: str, checkpoint: A
 
 
 def _remember_concept_meaning(checkpoint: Any, concept_uri: str, meaning: SimpleConceptMeaning) -> None:
+    concept_uri = checkpoint.canonical_uri(concept_uri)
     definitions = checkpoint.metadata.setdefault("concept_definitions", {})
     if not isinstance(definitions, dict):
         return

@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Callable
 
-from semantic_ants.datasets import download_spc_dataset
+from semantic_ants.datasets import download_koziev_dialogues_dataset, download_spc_dataset, download_tatoeba_translation_dataset
 from semantic_ants.decoding import decode_words
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
@@ -152,6 +152,8 @@ class EngineService:
                 "version": checkpoint.version,
                 "examples_seen": checkpoint.examples_seen,
                 "last_result_id": checkpoint.last_result_id,
+                "canonical_concepts": len(checkpoint.canonical_concepts),
+                "concept_redirects": len(checkpoint.concept_redirects),
                 "pheromones": len(checkpoint.pheromones),
                 "concept_pheromones": len(checkpoint.concept_pheromones),
                 "suppressed_concepts": len(checkpoint.suppressed_concepts),
@@ -208,6 +210,9 @@ class EngineService:
                 "response_memory": checkpoint.response_memory,
                 "experiences": checkpoint.experiences[-200:],
                 "aliases": checkpoint.aliases,
+                "canonical_concepts": checkpoint.canonical_concepts,
+                "concept_redirects": checkpoint.concept_redirects,
+                "surface_forms": checkpoint.surface_forms,
                 "suppressed_concepts": checkpoint.suppressed_concepts,
             }
 
@@ -237,6 +242,12 @@ class EngineService:
 
     def submit_download_spc(self, payload: dict[str, Any]) -> Job:
         return self._submit("download-spc", self._download_spc, payload)
+
+    def submit_download_koziev(self, payload: dict[str, Any]) -> Job:
+        return self._submit("download-koziev", self._download_koziev, payload)
+
+    def submit_download_tatoeba(self, payload: dict[str, Any]) -> Job:
+        return self._submit("download-tatoeba", self._download_tatoeba, payload)
 
     def submit_export(self, payload: dict[str, Any]) -> Job:
         return self._submit("export", self._export, payload)
@@ -343,6 +354,40 @@ class EngineService:
             limit=_optional_int(payload.get("limit")),
         )
         return {"dataset": "spc", "split": payload.get("split") or "train", "output": str(output), "examples": count}
+
+    def _download_koziev(self, payload: dict[str, Any]) -> dict[str, Any]:
+        output = Path(str(payload.get("output") or self.config.state_dir / "datasets" / "koziev_dialogues.jsonl"))
+        count = download_koziev_dialogues_dataset(
+            output=output,
+            source=payload.get("path"),
+            limit=_optional_int(payload.get("limit")),
+            timeout=float(payload.get("timeout") or 60.0),
+        )
+        return {
+            "dataset": "koziev",
+            "path": payload.get("path"),
+            "output": str(output),
+            "examples": count,
+        }
+
+    def _download_tatoeba(self, payload: dict[str, Any]) -> dict[str, Any]:
+        output = Path(str(payload.get("output") or self.config.state_dir / "datasets" / "tatoeba_translation.jsonl"))
+        count = download_tatoeba_translation_dataset(
+            output=output,
+            source_lang=str(payload.get("source_lang") or "ru"),
+            target_lang=str(payload.get("target_lang") or "en"),
+            limit=_optional_int(payload.get("limit")),
+            bidirectional=bool(payload.get("bidirectional", True)),
+            timeout=float(payload.get("timeout") or 60.0),
+        )
+        return {
+            "dataset": "tatoeba",
+            "source_lang": payload.get("source_lang") or "ru",
+            "target_lang": payload.get("target_lang") or "en",
+            "bidirectional": bool(payload.get("bidirectional", True)),
+            "output": str(output),
+            "examples": count,
+        }
 
     def _export(self, payload: dict[str, Any]) -> dict[str, Any]:
         destination = payload.get("destination")

@@ -1,6 +1,7 @@
 import type { GraphEdge, GraphNode, GraphPayload } from '@/shared/api/types';
 
 export type GraphViewportOptions = {
+  focusedNodeLimit?: number;
   focusedEdgeLimit?: number;
   fallbackNodeLimit?: number;
   fallbackEdgeLimit?: number;
@@ -13,6 +14,7 @@ export type GraphViewport = {
 };
 
 const DEFAULT_FOCUSED_EDGE_LIMIT = 240;
+const DEFAULT_FOCUSED_NODE_LIMIT = 240;
 const DEFAULT_FALLBACK_NODE_LIMIT = 240;
 const DEFAULT_FALLBACK_EDGE_LIMIT = 360;
 
@@ -22,6 +24,7 @@ export function selectGraphViewport(graph: GraphPayload | null, options: GraphVi
   }
 
   const focusedEdgeLimit = options.focusedEdgeLimit ?? DEFAULT_FOCUSED_EDGE_LIMIT;
+  const focusedNodeLimit = options.focusedNodeLimit ?? DEFAULT_FOCUSED_NODE_LIMIT;
   const fallbackNodeLimit = options.fallbackNodeLimit ?? DEFAULT_FALLBACK_NODE_LIMIT;
   const fallbackEdgeLimit = options.fallbackEdgeLimit ?? DEFAULT_FALLBACK_EDGE_LIMIT;
 
@@ -47,23 +50,26 @@ export function selectGraphViewport(graph: GraphPayload | null, options: GraphVi
         (edge) =>
           requiredEdgeIds.has(edge.id) || seedNodeIds.has(edge.start) || seedNodeIds.has(edge.end),
       )
-      .sort((left, right) => compareFocusedEdges(left, right, activeNodeIds, activeEdgeIds))
+      .sort((left, right) => compareFocusedEdges(left, right, activeNodeIds, activeEdgeIds));
     const requiredEdges = edges.filter((edge) => requiredEdgeIds.has(edge.id));
     const optionalEdges = edges.filter((edge) => !requiredEdgeIds.has(edge.id));
-    const edgesToShow =
-      requiredEdges.length >= focusedEdgeLimit
-        ? requiredEdges
-        : [...requiredEdges, ...optionalEdges.slice(0, focusedEdgeLimit - requiredEdges.length)];
-
+    const selectedEdgeIds = new Set<string>();
     const nodeIds = new Set(activeNodeIds);
-    for (const edge of edgesToShow) {
-      nodeIds.add(edge.start);
-      nodeIds.add(edge.end);
+
+    for (const edge of requiredEdges) {
+      includeEdge(edge, nodeIds, selectedEdgeIds, focusedNodeLimit, true);
+    }
+
+    for (const edge of optionalEdges) {
+      if (selectedEdgeIds.size >= focusedEdgeLimit) {
+        break;
+      }
+      includeEdge(edge, nodeIds, selectedEdgeIds, focusedNodeLimit, false);
     }
 
     return {
       nodes: graph.nodes.filter((node) => nodeIds.has(node.id)),
-      edges: edgesToShow,
+      edges: edges.filter((edge) => selectedEdgeIds.has(edge.id)),
       focused: true,
     };
   }
@@ -123,6 +129,31 @@ function rankFallbackNode(node: GraphNode) {
 
 function compareFallbackEdges(left: GraphEdge, right: GraphEdge) {
   return compareRank(rankFallbackEdge(left), rankFallbackEdge(right));
+}
+
+function includeEdge(
+  edge: GraphEdge,
+  nodeIds: Set<string>,
+  selectedEdgeIds: Set<string>,
+  nodeLimit: number,
+  allowNodeOverflow: boolean,
+) {
+  if (selectedEdgeIds.has(edge.id)) {
+    return false;
+  }
+
+  const nextNodeCount =
+    nodeIds.size +
+    (nodeIds.has(edge.start) ? 0 : 1) +
+    (nodeIds.has(edge.end) ? 0 : 1);
+  if (!allowNodeOverflow && nextNodeCount > nodeLimit) {
+    return false;
+  }
+
+  selectedEdgeIds.add(edge.id);
+  nodeIds.add(edge.start);
+  nodeIds.add(edge.end);
+  return true;
 }
 
 function rankFallbackEdge(edge: GraphEdge) {

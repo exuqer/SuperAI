@@ -5,6 +5,7 @@ from typing import Any
 
 from semantic_ants.core.graph import SemanticGraph
 from semantic_ants.core.models import ConceptNode, SemanticEdge, SemanticResult, edge_key, split_edge_key
+from semantic_ants.knowledge.isolation import ensure_isolated_language_edge, ensure_query_language_edge
 from semantic_ants.learning.checkpoint import Checkpoint
 
 
@@ -28,6 +29,7 @@ def graph_snapshot(
     only_signal: bool = False,
     limit: int | None = None,
 ) -> dict[str, Any]:
+    ensure_query_language_edge(graph, query)
     signal = signal_index(result)
     query_value = query.casefold().strip() if query else ""
     has_signal = bool(signal["nodes"] or signal["edges"])
@@ -130,6 +132,7 @@ def concept_detail(
     result: SemanticResult | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     local_graph = graph or graph_from_checkpoint(checkpoint)
+    ensure_isolated_language_edge(local_graph, uri)
     signal = signal_index(result)
     degree: Counter[str] = Counter()
     incoming = []
@@ -150,6 +153,8 @@ def concept_detail(
         "incoming": incoming,
         "outgoing": outgoing,
         "aliases": sorted(alias for alias, target in checkpoint.aliases.items() if target == uri),
+        "canonical_uri": checkpoint.canonical_uri(uri),
+        "redirects": sorted(source for source, target in checkpoint.concept_redirects.items() if target == checkpoint.canonical_uri(uri)),
     }
 
 
@@ -280,6 +285,7 @@ def _node_payload(
     return {
         "id": uri,
         "uri": uri,
+        "canonical_uri": checkpoint.canonical_uri(uri),
         "label": _label_for_uri(uri, node, checkpoint),
         "language": node.language if node else _language_from_uri(uri),
         "source": node.source if node else "checkpoint",
@@ -292,6 +298,8 @@ def _node_payload(
             "active": uri in signal["nodes"],
             "count": int(signal["node_counts"].get(uri, 0)),
         },
+        "aliases": sorted(alias for alias, target in checkpoint.aliases.items() if target == checkpoint.canonical_uri(uri)),
+        "redirects": sorted(source for source, target in checkpoint.concept_redirects.items() if target == checkpoint.canonical_uri(uri)),
     }
 
 

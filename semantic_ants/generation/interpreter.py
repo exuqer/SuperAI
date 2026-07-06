@@ -6,11 +6,12 @@ from typing import Any
 
 from semantic_ants.core.graph import SemanticGraph
 from semantic_ants.core.models import AntRoute
-from semantic_ants.core.normalization import detect_language
+from semantic_ants.core.normalization import detect_language, detect_response_language, tokenize
 from semantic_ants.generation.torch_dialogue import TorchDialogueNavigator
-from semantic_ants.generation.sentences import render_uri
+from semantic_ants.generation.sentences import render_uri, select_vector_response
 from semantic_ants.generation.vector_interpreter import SemanticVectorInterpreter
 from semantic_ants.learning.checkpoint import Checkpoint
+from semantic_ants.understanding import understand_text
 
 
 class Interpreter:
@@ -35,15 +36,35 @@ class Interpreter:
         lang: str | None = None,
     ) -> tuple[list[dict[str, Any]], str, str, dict[str, Any]]:
         selected_lang = lang if lang in {"ru", "en"} else detect_language(input_text)
-        activated = self._rank_concepts(routes, graph, checkpoint, top_concepts, selected_lang)
-        vector_items = self._rank_concepts(routes, graph, checkpoint, max(top_concepts, 12), selected_lang)
-        semantic_vector = self._semantic_vector(input_text, tokens, vector_items, routes, strength_vector, selected_lang)
-        summary = self._summary(tokens, activated, selected_lang)
-        response = (
-            self._response(input_text, tokens, routes, activated, checkpoint, summary, chat_history, semantic_vector)
-            if generate_response
-            else summary
+        response_lang = detect_response_language(input_text, default=selected_lang) or selected_lang
+        token_focus = self._token_focus(input_text, checkpoint, selected_lang, chat_history)
+        activated = self._rank_concepts(routes, graph, checkpoint, top_concepts, response_lang, token_focus)
+        vector_items = self._rank_concepts(routes, graph, checkpoint, max(top_concepts, 12), response_lang, token_focus)
+        semantic_vector = self._semantic_vector(
+            input_text,
+            tokens,
+            vector_items,
+            routes,
+            strength_vector,
+            selected_lang,
+            response_lang,
+            token_focus,
+            chat_history,
         )
+        summary = self._summary(tokens, activated, response_lang)
+        response_data = self._response(
+            input_text,
+            tokens,
+            routes,
+            activated,
+            checkpoint,
+            summary,
+            chat_history,
+            semantic_vector,
+            response_lang,
+        )
+        response = response_data["response"] if generate_response else summary
+        semantic_vector = {**semantic_vector, "response_candidates": response_data["candidates"], "response_source": response_data["source"]}
         return activated, summary, response, semantic_vector
 
     def _rank_concepts(
@@ -53,13 +74,17 @@ class Interpreter:
         checkpoint: Checkpoint,
         top_concepts: int,
         lang: str,
+        token_focus: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         scores: Counter[str] = Counter()
         sources: dict[str, set[str]] = {}
+        has_content_focus = bool(token_focus)
+        default_focus = 0.4 if has_content_focus else 1.0
         for route in routes:
             route_score = max(route.total_score, 0.01)
             for index, concept in enumerate(route.concepts):
-                scores[concept] += route_score / (index + 1)
+                focus = token_focus.get(concept, default_focus) if token_focus else 1.0
+                scores[concept] += route_score / (index + 1) * focus
                 sources.setdefault(concept, set())
             for step in route.steps:
                 sources.setdefault(step.end, set()).add(step.source)
@@ -79,6 +104,26 @@ class Interpreter:
             )
         return ranked
 
+    def _token_focus(self, input_text: str, checkpoint: Checkpoint, lang: str, chat_history: list[dict[str, Any]] | None) -> dict[str, float]:
+        understanding = understand_text(input_text, lang=lang, checkpoint=checkpoint)
+        focus: dict[str, float] = {}
+        for token in understanding.tokens:
+            if token.is_stop_word or not token.concept_uri:
+                continue
+            focus[token.concept_uri] = max(focus.get(token.concept_uri, 0.0), _token_focus_weight(token))
+        if chat_history and _is_follow_up_text(input_text):
+            decay = 0.75
+            for turn in reversed(chat_history[-6:]):
+                if str(turn.get("role", "")) != "user":
+                    continue
+                for concept in turn.get("concepts", []) or []:
+                    concept_uri = str(concept)
+                    if not concept_uri:
+                        continue
+                    focus[concept_uri] = max(focus.get(concept_uri, 0.0), decay)
+                decay *= 0.7
+        return focus
+
     def _semantic_vector(
         self,
         input_text: str,
@@ -86,7 +131,10 @@ class Interpreter:
         items: list[dict[str, Any]],
         routes: list[AntRoute],
         strength_vector: tuple[int, ...],
-        lang: str,
+        source_lang: str,
+        response_lang: str,
+        context_focus: dict[str, float],
+        chat_history: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:
         layers: dict[str, list[dict[str, Any]]] = {}
         for item in items:
@@ -95,13 +143,17 @@ class Interpreter:
         top_domain = next((item for item in items if int(item.get("layer", 1)) == 0), None)
         return {
             "version": 1,
-            "lang": lang,
+            "lang": source_lang,
+            "source_lang": source_lang,
+            "response_lang": response_lang,
+            "context_focus": context_focus,
             "input_text": input_text,
             "tokens": tokens,
             "strength_vector": list(strength_vector),
             "items": items,
             "layers": layers,
             "top_domain": top_domain,
+            "chat_history": chat_history or [],
             "routes": [
                 {
                     "ant_id": route.ant_id,
@@ -131,14 +183,20 @@ class Interpreter:
         summary: str,
         chat_history: list[dict[str, Any]] | None,
         semantic_vector: dict[str, Any],
-    ) -> str:
-        response = self.vector_interpreter.interpret(
+        response_lang: str | None,
+    ) -> dict[str, Any]:
+        selected = select_vector_response(
             semantic_vector,
             checkpoint,
-            count=1,
-            chat_history=chat_history,
+            count=3,
+            navigator=self.navigator,
+            model_dir=self.model_dir,
         )
-        return response
+        return {
+            "response": selected["response"],
+            "candidates": selected["candidates"],
+            "source": selected["source"],
+        }
 
 
 def _label_for(uri: str, node: Any, checkpoint: Checkpoint, lang: str) -> str:
@@ -168,3 +226,40 @@ def _learned_label(uri: str, checkpoint: Checkpoint) -> str:
     if isinstance(labels, dict) and labels.get(uri):
         return str(labels[uri])
     return ""
+
+
+def _token_focus_weight(token: Any) -> float:
+    match str(getattr(token, "match_status", "")):
+        case "found_as_alias" | "found_as_lemma" | "found_as_raw":
+            return 2.5
+        case "partial_root_match" | "edit_distance_match":
+            return 2.0
+        case _:
+            return 1.8
+
+
+def _is_follow_up_text(value: str) -> bool:
+    tokens = tokenize(value)
+    if not tokens:
+        return False
+    normalized = " ".join(tokens).casefold()
+    if normalized in {
+        "это",
+        "что это",
+        "а это",
+        "подробнее",
+        "расскажи подробнее",
+        "ещё",
+        "еще",
+        "продолжай",
+        "почему",
+        "как именно",
+        "what about it",
+        "tell me more",
+        "more",
+        "continue",
+        "why",
+    }:
+        return True
+    follow_up_terms = {"это", "он", "она", "они", "подробнее", "ещё", "еще", "more", "it", "this", "that"}
+    return len(tokens) <= 3 and all(token.casefold() in follow_up_terms for token in tokens)

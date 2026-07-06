@@ -19,10 +19,12 @@ from semantic_ants.server.schemas import (
     EvalRequest,
     ExportRequest,
     FeedbackRequest,
+    KozievDownloadRequest,
     JsonlJobRequest,
     ResetNetworkRequest,
     SimpleTrainingRequest,
     SpcDownloadRequest,
+    TatoebaDownloadRequest,
     UnderstandRequest,
     VectorInterpretRequest,
     model_payload,
@@ -192,6 +194,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/api/datasets/spc/download")
     def download_spc(payload: SpcDownloadRequest) -> dict[str, Any]:
         return service.submit_download_spc(model_payload(payload)).to_dict()
+
+    @app.post("/api/datasets/koziev/download")
+    def download_koziev(payload: KozievDownloadRequest) -> dict[str, Any]:
+        return service.submit_download_koziev(model_payload(payload)).to_dict()
+
+    @app.post("/api/datasets/tatoeba/download")
+    def download_tatoeba(payload: TatoebaDownloadRequest) -> dict[str, Any]:
+        return service.submit_download_tatoeba(model_payload(payload)).to_dict()
 
     @app.post("/api/system/export")
     def export(payload: ExportRequest) -> dict[str, Any]:

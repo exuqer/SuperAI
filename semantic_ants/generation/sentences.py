@@ -1,36 +1,23 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from semantic_ants.core.normalization import detect_language
+from semantic_ants.core.normalization import detect_language, tokenize
+from semantic_ants.learning.canonical import canonical_concept_uri
 from semantic_ants.learning.checkpoint import Checkpoint
+
+if TYPE_CHECKING:
+    from semantic_ants.generation.torch_dialogue import TorchDialogueNavigator
+
+LANGUAGE_URI_SURFACES = {
+    "/m/language/ru": {"ru": "русский язык", "en": "Russian language"},
+    "/m/language/en": {"ru": "английский язык", "en": "English language"},
+}
 
 
 class SenseSentenceBuilder:
     def build_candidates(self, semantic_vector: dict[str, Any], checkpoint: Checkpoint, count: int = 3) -> list[str]:
-        lang = _vector_lang(semantic_vector)
-        items = [item for item in semantic_vector.get("items", []) if isinstance(item, dict)]
-        if _is_sparse_unknown_vector(items):
-            return []
-        subject = _surface_for_item(_best_item(items, checkpoint, lang), checkpoint, lang)
-        definition = _meaning_for_subject(items, checkpoint, lang)
-        definition_candidate = _variant_definition(lang, subject, definition)
-        items = _ordered_surfaces(items, checkpoint, lang, subject)
-        domain = _surface_for_uri(_domain_uri(semantic_vector), checkpoint, lang)
-        vectors = _nonempty([subject, *items[:5], domain])
-        if not vectors:
-            return []
-
-        candidates = _unique_nonempty(
-            [
-                definition_candidate,
-                _variant_is_a(lang, subject, items, domain),
-                _variant_source(lang, subject, items, domain),
-                _variant_related(lang, subject, items, domain),
-                _variant_image(lang, subject, items, domain),
-            ]
-        )
-        return candidates[: max(count, 1)]
+        return build_vector_candidates(semantic_vector, checkpoint, count=count)
 
     def render_pattern(
         self,
@@ -59,8 +46,79 @@ class SenseSentenceBuilder:
         return candidates[: max(count, 1)]
 
 
-def build_vector_candidates(semantic_vector: dict[str, Any], checkpoint: Checkpoint, count: int = 3) -> list[str]:
-    return SenseSentenceBuilder().build_candidates(semantic_vector, checkpoint, count=count)
+def build_vector_candidates(
+    semantic_vector: dict[str, Any],
+    checkpoint: Checkpoint,
+    count: int = 3,
+    navigator: Any | None = None,
+    model_dir: str | None = None,
+) -> list[str]:
+    return select_vector_response(
+        semantic_vector,
+        checkpoint,
+        count=count,
+        navigator=navigator,
+        model_dir=model_dir,
+    )["candidates"]
+
+
+def select_vector_response(
+    semantic_vector: dict[str, Any],
+    checkpoint: Checkpoint,
+    count: int = 3,
+    navigator: Any | None = None,
+    model_dir: str | None = None,
+) -> dict[str, Any]:
+    lang = _vector_lang(semantic_vector)
+    items = [item for item in semantic_vector.get("items", []) if isinstance(item, dict)]
+    if _is_sparse_unknown_vector(items):
+        return {"response": "", "candidates": [], "source": "semantic_fallback", "lang": lang}
+    subject = _surface_for_item(_best_item(items, checkpoint, lang), checkpoint, lang)
+    definition = _meaning_for_subject(items, checkpoint, lang)
+    definition_candidate = _variant_definition(lang, subject, definition)
+    language_candidate = _variant_language(lang, subject, _language_surface_from_items(items, checkpoint, lang))
+    items = _ordered_surfaces(items, checkpoint, lang, subject)
+    domain = _surface_for_uri(_domain_uri(semantic_vector), checkpoint, lang)
+    vectors = _nonempty([subject, *items[:5], domain]) or _fallback_basis(items, checkpoint, lang)
+
+    exact_memory = _exact_memory_candidates(semantic_vector, checkpoint, lang, count=count)
+    contextual = _contextual_candidates(semantic_vector, lang, count=count)
+    definition_candidates = _unique_nonempty(
+        [
+            definition_candidate,
+            language_candidate,
+            _variant_is_a(lang, subject, items, domain),
+            _variant_source(lang, subject, items, domain),
+            _variant_related(lang, subject, items, domain),
+            _variant_image(lang, subject, items, domain),
+        ]
+    )
+    translation_candidates = _translation_candidates(vectors, checkpoint, lang, count=count)
+    torch_candidates = _torch_candidates(
+        semantic_vector,
+        checkpoint,
+        navigator=navigator,
+        model_dir=model_dir,
+        lang=lang,
+    )
+    fallback_candidates = _fallback_candidates(vectors, lang, count=count)
+    candidates = _unique_nonempty(
+        [
+            *exact_memory,
+            *contextual,
+            *definition_candidates,
+            *translation_candidates,
+            *torch_candidates,
+            *fallback_candidates,
+        ]
+    )
+    response = candidates[0] if candidates else ""
+    return {
+        "response": response,
+        "candidates": candidates[: max(count, 1)],
+        "source": _candidate_source(response, exact_memory, contextual, definition_candidates, translation_candidates, torch_candidates),
+        "lang": lang,
+    }
 
 
 def render_concept_pattern(
@@ -77,6 +135,9 @@ def render_uri(uri: str, checkpoint: Checkpoint, lang: str | None = None) -> str
     if not uri:
         return ""
     selected_lang = lang if lang in {"ru", "en"} else None
+    if uri in LANGUAGE_URI_SURFACES:
+        surfaces = LANGUAGE_URI_SURFACES[uri]
+        return surfaces.get(selected_lang or "", "") or surfaces["en"]
     aliased = _surface_from_aliases(uri, checkpoint, selected_lang)
     if aliased:
         return aliased
@@ -105,7 +166,12 @@ def render_concepts(concepts: list[str], checkpoint: Checkpoint, lang: str | Non
 
 
 def _vector_lang(semantic_vector: dict[str, Any]) -> str:
-    lang = str(semantic_vector.get("lang", "auto"))
+    lang = str(
+        semantic_vector.get("response_lang")
+        or semantic_vector.get("target_lang")
+        or semantic_vector.get("answer_lang")
+        or semantic_vector.get("lang", "auto")
+    )
     if lang in {"ru", "en"}:
         return lang
     text = str(semantic_vector.get("input_text", ""))
@@ -118,6 +184,13 @@ def _best_item(items: list[dict[str, Any]], checkpoint: Checkpoint, lang: str) -
     preferred = [item for item in items if _item_matches_lang(item, lang)]
     ordered = preferred or items
     ordered = [item for item in ordered if _item_score(item) > 0.05]
+    content = [
+        item
+        for item in ordered
+        if _item_layer(item) != 0 and _looks_like_content(_surface_for_item(item, checkpoint, lang), lang)
+    ]
+    if content:
+        return content[0]
     return ordered[0] if ordered else items[0]
 
 
@@ -303,6 +376,14 @@ def _variant_definition(lang: str, subject: str, meaning: str) -> str:
     return f"{subject} is {meaning}."
 
 
+def _variant_language(lang: str, subject: str, language: str) -> str:
+    if not subject or not language:
+        return ""
+    if lang == "ru":
+        return f"Понятие «{subject}» связано с языком: {language}."
+    return f'The concept "{subject}" is linked to language: {language}.'
+
+
 def _phrase_is_a(lang: str, subject: str, rest: list[str], domain: str, seed: int) -> str:
     predicate = _choose_anchor(rest, lang, preferred=("star", "звезда", "light", "свет", "nature", "природа", "object", "предмет"))
     if not predicate:
@@ -407,17 +488,35 @@ def _join_list(values: list[str], lang: str) -> str:
 
 
 def _meaning_for_subject(items: list[dict[str, Any]], checkpoint: Checkpoint, lang: str) -> str:
-    item = _best_item(items, checkpoint, lang)
-    if not item:
+    best = _best_item(items, checkpoint, lang)
+    if not best:
         return ""
-    uri = str(item.get("uri", ""))
+    best_surface = _surface_for_item(best, checkpoint, lang)
+    for item in [best, *items]:
+        if best_surface and _surface_for_item(item, checkpoint, lang) not in {best_surface, ""}:
+            continue
+        meaning = _definition_text(str(item.get("uri", "")), checkpoint)
+        if meaning:
+            return meaning
+    return ""
+
+
+def _definition_text(uri: str, checkpoint: Checkpoint) -> str:
     definitions = checkpoint.metadata.get("concept_definitions", {})
     if not isinstance(definitions, dict):
         return ""
     info = definitions.get(uri)
     if not isinstance(info, dict):
         return ""
-    return " ".join(str(info.get("meaning", "")).split())
+    return " ".join(str(info.get("meaning") or info.get("definition") or "").split())
+
+
+def _language_surface_from_items(items: list[dict[str, Any]], checkpoint: Checkpoint, lang: str) -> str:
+    for item in items:
+        uri = str(item.get("uri", ""))
+        if uri in LANGUAGE_URI_SURFACES:
+            return _surface_for_uri(uri, checkpoint, lang)
+    return ""
 
 
 def _word_lang(word: str) -> str:
@@ -438,7 +537,17 @@ def _item_matches_lang(item: dict[str, Any], lang: str) -> bool:
     item_lang = str(item.get("language", ""))
     if item_lang == lang:
         return True
+    surface = str(item.get("label") or uri.rsplit("/", 1)[-1].replace("_", " "))
+    if item_lang in {"", "concept", "unknown"} and lang in {"ru", "en"} and surface:
+        return _word_lang(surface) == lang
     return False
+
+
+def _item_layer(item: dict[str, Any]) -> int:
+    try:
+        return int(item.get("layer", 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _looks_like_content(surface: str, lang: str) -> bool:
@@ -447,9 +556,16 @@ def _looks_like_content(surface: str, lang: str) -> bool:
         return False
     if clean in {"unknown context", "unknown_context"}:
         return False
-    if lang == "ru" and clean in {"и", "в", "не", "на", "это", "как", "что", "а", "я"}:
+    ru_noise = {"и", "в", "не", "на", "это", "как", "что", "а", "я"}
+    en_noise = {"the", "a", "an", "and", "or", "to", "of", "in", "is", "are", "meaning"}
+    tokens = tokenize(clean)
+    if lang == "ru" and (clean in ru_noise or all(token in ru_noise for token in tokens)):
         return False
-    if lang == "en" and clean in {"the", "a", "an", "and", "or", "to", "of", "in", "is", "are"}:
+    if lang == "ru" and any(token in ru_noise for token in tokens) and any(token in en_noise for token in tokens):
+        return False
+    if lang == "en" and (clean in en_noise or all(token in en_noise for token in tokens)):
+        return False
+    if lang == "en" and any(token in en_noise for token in tokens) and any(_word_lang(token) == "ru" for token in tokens):
         return False
     return True
 
@@ -483,3 +599,236 @@ def _unique_nonempty(values: list[str]) -> list[str]:
 
 def _nonempty(values: list[str]) -> list[str]:
     return [" ".join(str(value).split()) for value in values if " ".join(str(value).split())]
+
+
+def _fallback_basis(items: list[str], checkpoint: Checkpoint, lang: str) -> list[str]:
+    values = [value for value in items if value]
+    if values:
+        return values
+    return _memory_basis(checkpoint, lang)
+
+
+def _memory_basis(checkpoint: Checkpoint, lang: str) -> list[str]:
+    candidates: list[str] = []
+    for item in checkpoint.accepted_answers[:10]:
+        if not isinstance(item, dict):
+            continue
+        answer = " ".join(str(item.get("answer", "")).split())
+        if answer:
+            candidates.append(answer)
+    for item in checkpoint.response_memory.values():
+        if not isinstance(item, dict):
+            continue
+        answer = " ".join(str(item.get("answer", "")).split())
+        if answer:
+            candidates.append(answer)
+    if candidates:
+        return _unique_nonempty(candidates[:10])
+    if lang == "ru":
+        return ["Это связано с известным понятием."]
+    return ["It is related to a known concept."]
+
+
+def _exact_memory_candidates(semantic_vector: dict[str, Any], checkpoint: Checkpoint, lang: str, count: int) -> list[str]:
+    raw_input_text = str(semantic_vector.get("input_text", ""))
+    if _is_follow_up_text(raw_input_text) and not _is_translation_request(raw_input_text):
+        return []
+    input_text = _memory_text_key(raw_input_text)
+    concept_key = _concept_key([item.get("uri") for item in semantic_vector.get("items", []) if isinstance(item, dict)])
+    candidates: list[str] = []
+    for item in checkpoint.accepted_answers:
+        if not isinstance(item, dict):
+            continue
+        stimulus = _memory_text_key(str(item.get("stimulus", "")))
+        answer = " ".join(str(item.get("answer", "")).split())
+        if answer and not _memory_lang_matches(item, lang, raw_input_text):
+            continue
+        if answer and stimulus and stimulus == input_text:
+            candidates.append(answer)
+            continue
+        memory_key = _concept_key(item.get("concepts", []))
+        if answer and concept_key and memory_key == concept_key:
+            candidates.append(answer)
+    for item in checkpoint.response_memory.values():
+        if not isinstance(item, dict):
+            continue
+        answer = " ".join(str(item.get("answer", "")).split())
+        if answer and not _memory_lang_matches(item, lang, raw_input_text):
+            continue
+        memory_key = _concept_key(item.get("concepts", []))
+        if answer and concept_key and memory_key == concept_key:
+            candidates.append(answer)
+    return _unique_nonempty(candidates)[:count]
+
+
+def _contextual_candidates(semantic_vector: dict[str, Any], lang: str, count: int) -> list[str]:
+    if not _is_follow_up_text(str(semantic_vector.get("input_text", ""))):
+        return []
+    history = semantic_vector.get("chat_history", [])
+    if not isinstance(history, list) or not history:
+        return []
+    previous_user = next((turn for turn in reversed(history) if isinstance(turn, dict) and str(turn.get("role", "")) == "user"), None)
+    if not isinstance(previous_user, dict):
+        return []
+    previous_text = " ".join(str(previous_user.get("text", "")).split())
+    if not previous_text:
+        return []
+    if lang == "ru":
+        return [f"Ты спрашивал про {previous_text}. Могу продолжить.", "Могу связать это с предыдущим вопросом."][:count]
+    return [f"You asked about {previous_text}. I can continue.", "I can connect this with the previous question."][:count]
+
+
+def _memory_text_key(value: str) -> str:
+    tokens = tokenize(value)
+    if tokens:
+        return " ".join(tokens).casefold()
+    return " ".join(str(value).split()).casefold()
+
+
+def _memory_lang_matches(item: dict[str, Any], lang: str, input_text: str) -> bool:
+    item_lang = str(item.get("lang") or "")
+    if item_lang not in {"ru", "en"} or item_lang == lang:
+        return True
+    return _is_translation_request(input_text)
+
+
+def _is_translation_request(value: str) -> bool:
+    normalized = " ".join(token.replace("_", " ") for token in tokenize(value)).casefold()
+    return any(
+        cue in normalized
+        for cue in (
+            "переведи",
+            "перевод",
+            "как будет",
+            "как сказать",
+            "по английски",
+            "на английском",
+            "по русски",
+            "на русском",
+            "translate",
+            "translation",
+            "how do you say",
+            "how to say",
+            "in english",
+            "in russian",
+        )
+    )
+
+
+def _is_follow_up_text(value: str) -> bool:
+    tokens = tokenize(value)
+    if not tokens:
+        return False
+    normalized = " ".join(tokens).casefold()
+    if normalized in {
+        "это",
+        "что это",
+        "а это",
+        "а он",
+        "а она",
+        "а они",
+        "подробнее",
+        "расскажи подробнее",
+        "ещё",
+        "еще",
+        "продолжай",
+        "почему",
+        "как именно",
+        "what about it",
+        "tell me more",
+        "more",
+        "continue",
+        "why",
+    }:
+        return True
+    follow_up_terms = {"это", "он", "она", "они", "подробнее", "ещё", "еще", "more", "it", "this", "that"}
+    return len(tokens) <= 3 and all(token.casefold() in follow_up_terms for token in tokens)
+
+
+def _translation_candidates(items: list[str], checkpoint: Checkpoint, lang: str, count: int) -> list[str]:
+    candidates: list[str] = []
+    for uri in items:
+        surface = render_uri(uri, checkpoint, lang)
+        if surface and surface not in candidates:
+            candidates.append(surface)
+    return candidates[:count]
+
+
+def _torch_candidates(
+    semantic_vector: dict[str, Any],
+    checkpoint: Checkpoint,
+    *,
+    navigator: Any | None,
+    model_dir: str | None,
+    lang: str,
+) -> list[str]:
+    if navigator is None:
+        from semantic_ants.generation.torch_dialogue import TorchDialogueNavigator
+
+        navigator = TorchDialogueNavigator()
+    prompt = _semantic_prompt_from_vector(semantic_vector, lang)
+    return navigator.generate(prompt, checkpoint, model_dir=model_dir, fallback="", count=1, lang=lang)
+
+
+def _semantic_prompt_from_vector(semantic_vector: dict[str, Any], lang: str) -> str:
+    items = [item for item in semantic_vector.get("items", []) if isinstance(item, dict)]
+    labels = [str(item.get("label", "")) for item in items[:8] if item.get("label")]
+    history = semantic_vector.get("chat_history", [])
+    history_text = "\n".join(
+        f'{turn.get("role", "user")}: {turn.get("text", "")}' for turn in history[-6:] if isinstance(turn, dict)
+    )
+    return "\n".join(
+        [
+            f"lang: {lang}",
+            f"input_text: {semantic_vector.get('input_text', '')}",
+            f"labels: {', '.join(labels)}",
+            history_text,
+        ]
+    )
+
+
+def _fallback_candidates(items: list[str], lang: str, count: int) -> list[str]:
+    values = [value for value in items if value]
+    if values:
+        return values[:count]
+    if lang == "ru":
+        return ["Это связано с известным понятием."]
+    return ["It is related to a known concept."]
+
+
+def _candidate_source(
+    response: str,
+    exact_memory: list[str],
+    contextual: list[str],
+    definition_candidates: list[str],
+    translation: list[str],
+    torch_candidates: list[str],
+) -> str:
+    if response and response in exact_memory:
+        return "exact_memory"
+    if response and response in contextual:
+        return "contextual_follow_up"
+    if response and response in definition_candidates:
+        return "concept_definition"
+    if response and response in translation:
+        return "translation_evidence"
+    if response and response in torch_candidates:
+        return "torch_candidate"
+    return "semantic_fallback"
+
+
+def _concept_key(values: Any) -> str:
+    if not isinstance(values, (list, tuple)):
+        return ""
+    normalized = []
+    for value in values:
+        if not value:
+            continue
+        text = str(value)
+        if text.startswith("/m/top/") or text.startswith("/m/concept/"):
+            normalized.append(text)
+        elif text.startswith("/c/"):
+            normalized.append(canonical_concept_uri(text.split("/", 3)[-1]))
+        else:
+            normalized.append(canonical_concept_uri(text))
+    return "|".join(sorted(dict.fromkeys(normalized)))

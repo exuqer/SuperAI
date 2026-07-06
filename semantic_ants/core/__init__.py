@@ -6,7 +6,7 @@ from semantic_ants.core.models import (
     SemanticEdge,
     SemanticResult,
 )
-from semantic_ants.core.normalization import detect_language, text_to_concept_uri, tokenize
+from semantic_ants.core.normalization import detect_language, detect_response_language, text_to_concept_uri, tokenize
 
 __all__ = [
     "AntRoute",
@@ -16,6 +16,7 @@ __all__ = [
     "SemanticGraph",
     "SemanticResult",
     "detect_language",
+    "detect_response_language",
     "text_to_concept_uri",
     "tokenize",
 ]

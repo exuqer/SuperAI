@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from semantic_ants.generation.torch_dialogue import TorchDialogueNavigator
-from semantic_ants.core.normalization import detect_language
+from semantic_ants.core.normalization import detect_language, detect_response_language
 from semantic_ants.learning.checkpoint import Checkpoint
 
 
@@ -18,6 +18,7 @@ class DialogueResponder:
         chat_history: list[dict[str, object]] | None = None,
     ) -> str | None:
         lang = detect_language(input_text)
+        response_lang = detect_response_language(input_text, default=lang)
         prompt = self.navigator.build_prompt(
             input_text,
             tokens,
@@ -25,7 +26,9 @@ class DialogueResponder:
             [],
             checkpoint,
             chat_history=chat_history,
-            lang=lang,
+            lang=response_lang or lang,
         )
-        candidates = self.navigator.generate(prompt, checkpoint, count=1, lang=lang)
+        candidates = self.navigator.generate(prompt, checkpoint, count=1, lang=response_lang or lang)
+        if not candidates and response_lang and response_lang != lang:
+            candidates = self.navigator.generate(prompt, checkpoint, count=1, lang=lang)
         return candidates[0] if candidates else None

@@ -5,10 +5,11 @@ import json
 import sys
 from pathlib import Path
 
-from semantic_ants.datasets import download_spc_dataset
+from semantic_ants.datasets import download_koziev_dialogues_dataset, download_spc_dataset, download_tatoeba_translation_dataset
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
 from semantic_ants.learning import ACOTrainer, CheckpointStore, FeedbackTrainer, Trainer, default_checkpoint_path
+from semantic_ants.learning.checkpoint import migrate_checkpoint
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,10 +119,35 @@ def learn_dialogues_command(args: argparse.Namespace) -> int:
 
 
 def download_dataset_command(args: argparse.Namespace) -> int:
-    if args.dataset != "spc":
+    if args.dataset == "spc":
+        count = download_spc_dataset(args.split, args.output, limit=args.limit)
+        payload = {"dataset": args.dataset, "split": args.split, "output": args.output, "examples": count}
+    elif args.dataset == "koziev":
+        count = download_koziev_dialogues_dataset(args.output, source=args.path, limit=args.limit, timeout=args.timeout)
+        payload = {
+            "dataset": args.dataset,
+            "source": args.path,
+            "output": args.output,
+            "examples": count,
+        }
+    elif args.dataset == "tatoeba":
+        count = download_tatoeba_translation_dataset(
+            args.output,
+            source_lang=args.source_lang,
+            target_lang=args.target_lang,
+            limit=args.limit,
+            bidirectional=not args.no_bidirectional,
+            timeout=args.timeout,
+        )
+        payload = {
+            "dataset": args.dataset,
+            "source_lang": args.source_lang,
+            "target_lang": args.target_lang,
+            "output": args.output,
+            "examples": count,
+        }
+    else:
         raise ValueError(f"Неподдерживаемый датасет: {args.dataset}")
-    count = download_spc_dataset(args.split, args.output, limit=args.limit)
-    payload = {"dataset": args.dataset, "split": args.split, "output": args.output, "examples": count}
     print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else f"examples={count} output={args.output}")
     return 0
 
@@ -245,6 +271,22 @@ def export_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def migrate_memory_command(args: argparse.Namespace) -> int:
+    store = CheckpointStore(default_checkpoint_path(args.state_dir))
+    checkpoint = store.load()
+    if args.backup:
+        backup = store.path.with_name(f"{store.path.stem}.backup{store.path.suffix}")
+        store.export(backup)
+    before = checkpoint.to_dict()
+    report = migrate_checkpoint(checkpoint)
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "report": report, "version": before.get("version", 0)}, ensure_ascii=False, indent=2))
+        return 0
+    store.save(checkpoint)
+    print(json.dumps({"dry_run": False, "report": report, "version": checkpoint.version}, ensure_ascii=False, indent=2) if args.json else report)
+    return 0
+
+
 def interpret_vector_command(args: argparse.Namespace) -> int:
     engine = _engine_from_args(args)
     raw = sys.stdin.read() if args.path == "-" else Path(args.path).read_text(encoding="utf-8")
@@ -308,8 +350,13 @@ def _parser() -> argparse.ArgumentParser:
     learn_dialogues.set_defaults(handler=learn_dialogues_command)
 
     download_dataset = subparsers.add_parser("download-dataset")
-    download_dataset.add_argument("dataset", choices=["spc"])
+    download_dataset.add_argument("dataset", choices=["spc", "koziev", "tatoeba"])
     download_dataset.add_argument("--split", choices=["train", "dev", "valid", "test", "synth"], default="train")
+    download_dataset.add_argument("--path")
+    download_dataset.add_argument("--source-lang", default="ru")
+    download_dataset.add_argument("--target-lang", default="en")
+    download_dataset.add_argument("--no-bidirectional", action="store_true")
+    download_dataset.add_argument("--timeout", type=float, default=60.0)
     download_dataset.add_argument("--limit", type=int)
     download_dataset.add_argument("--output", required=True)
     download_dataset.add_argument("--json", action="store_true")
@@ -368,6 +415,13 @@ def _parser() -> argparse.ArgumentParser:
     export = subparsers.add_parser("export")
     export.add_argument("destination")
     export.set_defaults(handler=export_command)
+
+    migrate_memory = subparsers.add_parser("migrate-memory")
+    migrate_memory.add_argument("--dry-run", action="store_true")
+    migrate_memory.add_argument("--apply", action="store_true")
+    migrate_memory.add_argument("--backup", action="store_true")
+    migrate_memory.add_argument("--json", action="store_true")
+    migrate_memory.set_defaults(handler=migrate_memory_command)
     return parser
 
 
@@ -395,6 +449,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "interpret-vector",
         "learn",
         "learn-dialogues",
+        "migrate-memory",
         "train",
     }
     if argv and argv[0] not in commands and not argv[0].startswith("-"):

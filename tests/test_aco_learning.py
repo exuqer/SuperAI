@@ -81,7 +81,7 @@ class ACOLearningTest(unittest.TestCase):
                 )
             )
             self.assertLess(engine.checkpoint.pheromone_for(edge), before)
-            self.assertIn("/c/en/apple_meaning", engine.checkpoint.suppressed_concepts)
+            self.assertIn("/m/concept/apple_meaning", engine.checkpoint.suppressed_concepts)
             self.assertTrue(engine.checkpoint.negative_memory)
 
     def test_feedback_changes_hybrid_answer(self):
@@ -97,9 +97,8 @@ class ACOLearningTest(unittest.TestCase):
             )
             self.assertGreater(len(engine.checkpoint.mini_generator.get("dialogue_patterns", [])), before_patterns)
             hybrid = engine.analyze("apple", lang="en", mode="hybrid")
-            self.assertEqual(hybrid.response, result.response)
+            self.assertEqual(hybrid.response, "Corrected apple answer.")
             self.assertIn("apple", hybrid.response.lower())
-            self.assertNotIn("corrected", hybrid.response.lower())
 
     def test_dream_creates_only_weak_bridges(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,7 +114,7 @@ class ACOLearningTest(unittest.TestCase):
             confirmed = [
                 bridge
                 for bridge in engine.checkpoint.learned_bridges
-                if bridge.get("start") == "/c/en/a" and bridge.get("end") == "/c/en/b"
+                if bridge.get("start") == "/m/concept/a" and bridge.get("end") == "/m/concept/b"
             ][0]
             self.assertTrue(confirmed["confirmed"])
             self.assertEqual(confirmed["weight"], 2.0)
