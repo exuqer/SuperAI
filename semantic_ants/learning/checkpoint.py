@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +10,14 @@ from typing import Any
 
 from semantic_ants.core.models import SemanticEdge, edge_key
 from semantic_ants.core.normalization import detect_language, text_to_concept_uri, tokenize
+
+
+DEFAULT_CHECKPOINT_NAME = "model.bin"
+JSON_SUFFIX = ".json"
+
+
+def default_checkpoint_path(state_dir: Path | str = ".semantic_ants") -> Path:
+    return Path(state_dir) / "checkpoints" / DEFAULT_CHECKPOINT_NAME
 
 
 @dataclass
@@ -415,32 +423,59 @@ class Checkpoint:
 
 
 class CheckpointStore:
-    """Читает и сохраняет checkpoint в JSON."""
+    """Читает и сохраняет checkpoint в JSON или быстром бинарном формате."""
 
-    def __init__(self, path: Path | str = ".semantic_ants/checkpoints/model.json") -> None:
+    def __init__(self, path: Path | str = default_checkpoint_path()) -> None:
         self.path = Path(path)
+        self.loaded_path: Path | None = None
 
     def load(self) -> Checkpoint:
+        self.loaded_path = None
         if not self.path.exists():
             return Checkpoint()
-        with self.path.open("r", encoding="utf-8") as handle:
-            return Checkpoint.from_dict(json.load(handle))
+        self.loaded_path = self.path
+        return self._load_path(self.path)
 
     def save(self, checkpoint: Checkpoint) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-        with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(checkpoint.to_dict(), handle, ensure_ascii=False, indent=2, sort_keys=True)
-        _replace_with_retry(tmp, self.path)
+        self._save_path(self.path, checkpoint)
+        self.loaded_path = self.path
 
     def export(self, destination: Path | str) -> None:
         target = Path(destination)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            shutil.copyfile(self.path, target)
+        checkpoint = self.load()
+        self._save_path(target, checkpoint)
+
+    def _load_path(self, path: Path) -> Checkpoint:
+        if path.suffix.lower() == JSON_SUFFIX:
+            with path.open("r", encoding="utf-8") as handle:
+                return Checkpoint.from_dict(json.load(handle))
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+        if isinstance(payload, Checkpoint):
+            return payload
+        if isinstance(payload, dict):
+            return Checkpoint.from_dict(payload)
+        raise ValueError(f"Некорректный checkpoint: {path}")
+
+    def _save_path(self, path: Path, checkpoint: Checkpoint) -> None:
+        if path.suffix.lower() == JSON_SUFFIX:
+            self._save_json(path, checkpoint)
         else:
-            self.save(Checkpoint())
-            shutil.copyfile(self.path, target)
+            self._save_binary(path, checkpoint)
+
+    def _save_json(self, path: Path, checkpoint: Checkpoint) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(checkpoint.to_dict(), handle, ensure_ascii=False, indent=2, sort_keys=True)
+        _replace_with_retry(tmp, path)
+
+    def _save_binary(self, path: Path, checkpoint: Checkpoint) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        with tmp.open("wb") as handle:
+            pickle.dump(checkpoint.to_dict(), handle, protocol=pickle.HIGHEST_PROTOCOL)
+        _replace_with_retry(tmp, path)
 
 
 def concept_set_key(concepts: list[str]) -> str:

@@ -8,7 +8,7 @@ from pathlib import Path
 from semantic_ants.datasets import download_spc_dataset
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
-from semantic_ants.learning import ACOTrainer, CheckpointStore, FeedbackTrainer, Trainer
+from semantic_ants.learning import ACOTrainer, CheckpointStore, FeedbackTrainer, Trainer, default_checkpoint_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,7 +140,7 @@ def feedback_command(args: argparse.Namespace) -> int:
 
 
 def bootstrap_command(args: argparse.Namespace) -> int:
-    store = CheckpointStore(Path(args.state_dir) / "checkpoints" / "model.json")
+    store = CheckpointStore(default_checkpoint_path(args.state_dir))
     checkpoint = store.load()
     report = bootstrap_builtin_knowledge(checkpoint, force=args.force)
     store.save(checkpoint)
@@ -236,7 +236,7 @@ def inspect_memory_command(args: argparse.Namespace) -> int:
 
 
 def export_command(args: argparse.Namespace) -> int:
-    store = CheckpointStore(Path(args.state_dir) / "checkpoints" / "model.json")
+    store = CheckpointStore(default_checkpoint_path(args.state_dir))
     store.export(args.destination)
     print(args.destination)
     return 0

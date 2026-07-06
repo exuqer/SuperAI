@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: semantic-ants
+Version: 0.1.0
+Summary: Исследовательский прототип графовой языковой модели с муравьиным поиском и базовым обучением
+Author: SuperAI Research
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pymorphy3<3,>=2
+Provides-Extra: web
+Requires-Dist: fastapi>=0.115; extra == "web"
+Requires-Dist: python-multipart>=0.0.9; extra == "web"
+Requires-Dist: uvicorn[standard]>=0.30; extra == "web"
+
 # semantic_ants
 
 `semantic_ants` — исследовательский прототип языковой модели, где фраза проходит путь:

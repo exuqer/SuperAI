@@ -5,6 +5,8 @@ import time
 import unittest
 from pathlib import Path
 
+from semantic_ants.learning import default_checkpoint_path
+
 
 WEB_DEPS = all(importlib.util.find_spec(name) for name in ["fastapi", "httpx", "pydantic"])
 
@@ -38,8 +40,8 @@ class ServerApiTest(unittest.TestCase):
     def test_understand_api_returns_tokens_without_writing_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = self.make_client(tmp)
-            checkpoint_path = Path(tmp) / "checkpoints" / "model.json"
-            before = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            checkpoint_path = default_checkpoint_path(tmp)
+            before = checkpoint_path.read_bytes() if checkpoint_path.exists() else b""
 
             response = client.post(
                 "/api/understand",
@@ -60,7 +62,7 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(payload["tokens"][0]["match_status"], "candidate")
             self.assertEqual(payload["tokens"][1]["match_status"], "candidate")
 
-            after = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            after = checkpoint_path.read_bytes() if checkpoint_path.exists() else b""
             self.assertEqual(before, after)
             self.assertEqual(client.get("/api/memory/results").json(), [])
             self.assertEqual(client.get("/api/chat/sessions").json(), [])
@@ -68,8 +70,8 @@ class ServerApiTest(unittest.TestCase):
     def test_decode_api_returns_sentence_without_writing_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = self.make_client(tmp)
-            checkpoint_path = Path(tmp) / "checkpoints" / "model.json"
-            before = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            checkpoint_path = default_checkpoint_path(tmp)
+            before = checkpoint_path.read_bytes() if checkpoint_path.exists() else b""
 
             response = client.post(
                 "/api/decode",
@@ -94,7 +96,7 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(payload["summary"]["objects"], 2)
             self.assertEqual(payload["summary"]["fallbacks"], 0)
 
-            after = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            after = checkpoint_path.read_bytes() if checkpoint_path.exists() else b""
             self.assertEqual(before, after)
             self.assertEqual(client.get("/api/memory/results").json(), [])
             self.assertEqual(client.get("/api/chat/sessions").json(), [])
@@ -107,8 +109,8 @@ class ServerApiTest(unittest.TestCase):
             service.engine.checkpoint.add_custom_edge("/c/ru/писать", "/c/ru/код", relation="TakesObject", weight=2.8)
             service.engine.checkpoint.add_custom_edge("/c/ru/писать", "/c/ru/компьютер", relation="UsesInstrument", weight=2.4)
             service.engine.store.save(service.engine.checkpoint)
-            checkpoint_path = Path(tmp) / "checkpoints" / "model.json"
-            before = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            checkpoint_path = default_checkpoint_path(tmp)
+            before = checkpoint_path.read_bytes() if checkpoint_path.exists() else b""
 
             response = client.post(
                 "/api/decode",
@@ -126,7 +128,7 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual([token["role"] for token in payload["tokens"]], ["subject", "verb", "object", "instrument"])
             self.assertEqual(payload["tokens"][3]["surface"], "на компьютере")
 
-            after = checkpoint_path.read_text(encoding="utf-8") if checkpoint_path.exists() else ""
+            after = checkpoint_path.read_bytes() if checkpoint_path.exists() else b""
             self.assertEqual(before, after)
             self.assertEqual(client.get("/api/memory/results").json(), [])
             self.assertEqual(client.get("/api/chat/sessions").json(), [])

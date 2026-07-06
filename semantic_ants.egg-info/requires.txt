@@ -1,0 +1,6 @@
+pymorphy3<3,>=2
+
+[web]
+fastapi>=0.115
+python-multipart>=0.0.9
+uvicorn[standard]>=0.30

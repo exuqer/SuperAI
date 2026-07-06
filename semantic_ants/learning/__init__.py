@@ -1,4 +1,4 @@
-from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore
+from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore, default_checkpoint_path
 from semantic_ants.learning.trainer import FeedbackTrainer, Trainer, TrainingReport
 
 __all__ = [
@@ -6,6 +6,7 @@ __all__ = [
     "ACOTrainingReport",
     "Checkpoint",
     "CheckpointStore",
+    "default_checkpoint_path",
     "Experience",
     "FeedbackTrainer",
     "Judge",

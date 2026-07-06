@@ -1,0 +1,3 @@
+[console_scripts]
+semantic-ants = semantic_ants.cli:main
+semantic-ants-web = semantic_ants.server.cli:main

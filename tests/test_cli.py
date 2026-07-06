@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from semantic_ants.learning import CheckpointStore, default_checkpoint_path
+
 
 class CliTest(unittest.TestCase):
     def test_analyze_json_without_network(self):
@@ -161,7 +163,7 @@ class CliTest(unittest.TestCase):
                 text=True,
             )
             self.assertIn("examples=1", completed.stdout)
-            checkpoint = json.loads((Path(tmp) / "checkpoints" / "model.json").read_text(encoding="utf-8"))
+            checkpoint = CheckpointStore(default_checkpoint_path(tmp)).load().to_dict()
             self.assertTrue(checkpoint["accepted_answers"])
 
 

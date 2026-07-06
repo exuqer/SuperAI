@@ -11,8 +11,8 @@ from semantic_ants.learning.checkpoint import Checkpoint
 
 try:
     import pymorphy3
-except ModuleNotFoundError as exc:  # pragma: no cover - dependency is declared in pyproject
-    raise RuntimeError("Install pymorphy3 with the project dependencies") from exc
+except ModuleNotFoundError:  # pragma: no cover - optional fallback for web startup
+    pymorphy3 = None
 
 
 TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+(?:[-'][0-9A-Za-zА-Яа-яЁё]+)?")
@@ -522,7 +522,14 @@ def _build_concept_uri(token: str, lang: str) -> str | None:
 
 @lru_cache(maxsize=1)
 def _morph() -> "pymorphy3.MorphAnalyzer":
+    if pymorphy3 is None:
+        return _FallbackMorphAnalyzer()
     return pymorphy3.MorphAnalyzer()
+
+
+class _FallbackMorphAnalyzer:
+    def parse(self, token: str) -> list[Any]:
+        return []
 
 
 def _parse_ru(token: str):

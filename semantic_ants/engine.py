@@ -12,7 +12,7 @@ from semantic_ants.core.normalization import detect_language, text_to_concept_ur
 from semantic_ants.generation import Interpreter, SemanticVectorInterpreter, TorchDialogueNavigator
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
 from semantic_ants.learning.aco import Judge, SemanticThought
-from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore
+from semantic_ants.learning.checkpoint import Checkpoint, CheckpointStore, default_checkpoint_path
 from semantic_ants.providers import ConceptNetClient, ConceptNetError, JsonCache
 
 
@@ -43,7 +43,7 @@ class SemanticEngine:
         self.config = config or EngineConfig()
         cache = JsonCache(self.config.state_dir / "cache")
         self.client = client or ConceptNetClient(cache=cache, allow_network=self.config.allow_network)
-        self.store = store or CheckpointStore(self.config.state_dir / "checkpoints" / "model.json")
+        self.store = store or CheckpointStore(default_checkpoint_path(self.config.state_dir))
         self.checkpoint = checkpoint or self.store.load()
         if self.config.autoload_builtin:
             report = bootstrap_builtin_knowledge(self.checkpoint)
