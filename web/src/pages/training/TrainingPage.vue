@@ -7,7 +7,7 @@
             <p class="eyebrow">Конструктор примера</p>
             <h2>Вопрос → ожидаемый ответ</h2>
             <p class="muted">
-              Простой режим сам строит связи по токенам; расширенный оставляет ручной JSONL-конструктор.
+              Простой режим сам строит связи по токенам; расширенный оставляет ручной JSONL-конструктор контекстных плоскостей.
             </p>
           </div>
           <div class="row">
@@ -138,19 +138,22 @@
 
         <details v-if="mode === 'advanced'" class="layers-block" open>
           <summary>
-            <span>Слои</span>
-            <span class="muted">JSON layers 0, 1, 2</span>
+            <span>Контекстные плоскости</span>
+            <span class="muted">JSON layers 0..N</span>
           </summary>
           <div class="layers-grid">
             <article v-for="(layer, index) in draft.layers" :key="layer.level" class="layer-card">
               <div class="layer-card-head">
                 <div>
-                  <strong>Уровень {{ layer.level }}</strong>
-                  <p class="muted">JSON layer {{ layer.level - 1 }}</p>
+                  <strong>Плоскость {{ layer.level }}</strong>
+                  <p class="muted">JSON layer {{ layer.level }}</p>
                 </div>
-                <span class="badge">{{ resolvedLayers[index].uri }}</span>
+                <div class="row">
+                  <span class="badge">{{ resolvedLayers[index].uri }}</span>
+                  <button v-if="draft.layers.length > 1" type="button" @click="removeLayer(index)">Удалить</button>
+                </div>
               </div>
-              <label v-if="layer.level === 1">
+              <label v-if="layer.level === 0">
                 Builtin top domain
                 <select v-model="layer.builtinTopDomain">
                   <option v-for="option in topDomainOptions" :key="option.key" :value="option.key">
@@ -162,14 +165,17 @@
                 Label
                 <input
                   v-model="layer.label"
-                  :placeholder="layer.level === 2 ? 'Вопрос' : 'дела'"
+                  :placeholder="layer.level === 1 ? 'Вопрос' : 'дела'"
                 />
               </label>
               <div class="layer-footnote">
                 <span class="badge">{{ resolvedLayers[index].label }}</span>
-                <span class="muted">{{ layer.level === 1 ? 'builtin top domain' : resolvedLayers[index].uri }}</span>
+                <span class="muted">{{ layer.level === 0 ? 'builtin top domain' : resolvedLayers[index].uri }}</span>
               </div>
             </article>
+          </div>
+          <div class="row layer-actions">
+            <button type="button" @click="addLayer">Добавить плоскость</button>
           </div>
         </details>
 
@@ -311,6 +317,21 @@ function addMeaning() {
 
 function removeMeaning(index: number) {
   simpleDraft.conceptMeanings.splice(index, 1);
+}
+
+function addLayer() {
+  const nextLevel = draft.layers.reduce((max, layer) => Math.max(max, layer.level), -1) + 1;
+  draft.layers.push({ level: nextLevel, label: `Плоскость ${nextLevel}` });
+}
+
+function removeLayer(index: number) {
+  draft.layers.splice(index, 1);
+  draft.layers.forEach((layer, level) => {
+    layer.level = level;
+    if (level === 0 && !layer.builtinTopDomain) {
+      layer.builtinTopDomain = 'dialogue';
+    }
+  });
 }
 
 async function syncMeaningsFromQuestion() {

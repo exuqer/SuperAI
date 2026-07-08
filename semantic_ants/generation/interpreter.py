@@ -92,12 +92,16 @@ class Interpreter:
         for uri, score in scores.most_common(top_concepts):
             node = graph.nodes.get(uri)
             label = _label_for(uri, node, checkpoint, lang)
+            layers = list(getattr(node, "layers", []) or ([node.layer] if node else [1]))
+            active_layers = list(getattr(node, "active_layers", []) or layers)
             ranked.append(
                 {
                     "uri": uri,
                     "label": label,
                     "language": node.language if node else "unknown",
-                    "layer": node.layer if node else 1,
+                    "layer": layers[0] if layers else 1,
+                    "layers": layers,
+                    "active_layers": active_layers,
                     "score": round(float(score), 4),
                     "sources": sorted(sources.get(uri, set())),
                 }
@@ -138,9 +142,19 @@ class Interpreter:
     ) -> dict[str, Any]:
         layers: dict[str, list[dict[str, Any]]] = {}
         for item in items:
-            layer = str(item.get("layer", 1))
-            layers.setdefault(layer, []).append(item)
-        top_domain = next((item for item in items if int(item.get("layer", 1)) == 0), None)
+            item_layers = item.get("active_layers") or item.get("layers") or [item.get("layer", 1)]
+            if not isinstance(item_layers, list):
+                item_layers = [item_layers]
+            for layer in item_layers:
+                layers.setdefault(str(layer), []).append(item)
+        top_domain = next(
+            (
+                item
+                for item in items
+                if 0 in _item_layers(item)
+            ),
+            None,
+        )
         return {
             "version": 1,
             "lang": source_lang,
@@ -197,6 +211,21 @@ class Interpreter:
             "candidates": selected["candidates"],
             "source": selected["source"],
         }
+
+
+def _item_layers(item: dict[str, Any]) -> list[int]:
+    layers = item.get("active_layers") or item.get("layers") or [item.get("layer", 1)]
+    if not isinstance(layers, list):
+        layers = [layers]
+    values: list[int] = []
+    for layer in layers:
+        try:
+            numeric = int(layer)
+        except (TypeError, ValueError):
+            continue
+        if numeric not in values:
+            values.append(numeric)
+    return values
 
 
 def _label_for(uri: str, node: Any, checkpoint: Checkpoint, lang: str) -> str:

@@ -80,7 +80,7 @@ describe('TrainingPage', () => {
     const wrapper = shallowMount(TrainingPage);
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="simple-mode"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="simple-mode"]').exists()).toBe(true);
     expect(wrapper.text()).toContain('question tokens');
     expect(wrapper.text()).toContain('answer tokens');
     expect(wrapper.text()).toContain('программист');

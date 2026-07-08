@@ -84,6 +84,8 @@ test('chat bubbles and training preview smoke', async ({ page }) => {
               label: 'Общение',
               language: 'ru',
               layer: 0,
+              layers: [0],
+              active_layers: [0],
               score: 1.2,
               sources: ['input'],
             },
@@ -95,7 +97,7 @@ test('chat bubbles and training preview smoke', async ({ page }) => {
           session_id: 'default',
           context_turns: [],
           semantic_vector: {
-            items: [{ uri: '/m/top/dialogue', label: 'Общение', layer: 0, score: 1.2 }],
+            items: [{ uri: '/m/top/dialogue', label: 'Общение', layer: 0, layers: [0], active_layers: [0], score: 1.2 }],
             strength_vector: [3],
           },
           signal_trace: [],

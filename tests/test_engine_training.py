@@ -47,14 +47,12 @@ class EngineTrainingTest(unittest.TestCase):
                 any(item["uri"] == "/m/top/object" for item in result.semantic_vector.get("items", []))
             )
 
-    def test_strength_vector_falls_back_when_no_configured_layer_edge_exists(self):
+    def test_strength_vector_does_not_fallback_when_no_configured_layer_edge_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)
             result = engine.analyze("кот", lang="ru", strength_vector=(3,))
 
-            self.assertTrue(result.routes)
-            self.assertTrue(any(route.steps for route in result.routes))
-            self.assertTrue(result.signal_trace)
+            self.assertTrue(all(step["layer"] == 0 for step in result.signal_trace))
 
     def test_training_reinforces_target(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,6 +162,44 @@ class EngineTrainingTest(unittest.TestCase):
             self.assertEqual(report.errors, [])
             self.assertGreater(engine.checkpoint.concept_pheromone_for("/m/top/object"), before)
 
+    def test_layer_targets_accumulate_contextual_projections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.make_engine(tmp)
+            path = Path(tmp) / "projections.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "text": "apple",
+                                "lang": "en",
+                                "strength_vector": [3],
+                                "layer_targets": {"0": ["/m/top/object"]},
+                                "target_concepts": ["/m/top/object"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "text": "apple in detail",
+                                "lang": "en",
+                                "strength_vector": [3, 0, 0, 5],
+                                "layer_targets": {"3": ["/m/top/object"]},
+                                "target_concepts": ["/m/top/object"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            report = Trainer(engine, engine.store).train_file(path, epochs=1)
+            self.assertEqual(report.errors, [])
+            projection_keys = list(engine.checkpoint.concept_layer_pheromones.keys())
+            self.assertTrue(any('"layer":0' in key and '/m/top/object' in key for key in projection_keys))
+            self.assertTrue(any('"layer":3' in key and '/m/top/object' in key for key in projection_keys))
+
     def test_layered_qa_example_tracks_layer_targets_and_strength_vector(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)
@@ -209,6 +245,7 @@ class EngineTrainingTest(unittest.TestCase):
             self.assertEqual(layer_targets, {"0", "1", "2"})
             result = engine.analyze("как дела?", lang="ru", strength_vector=(3, 8, 8))
             self.assertEqual(result.semantic_vector["strength_vector"], [3, 8, 8])
+            self.assertTrue(any(len(item.get("active_layers", [])) > 1 for item in result.semantic_vector.get("items", [])))
 
     def test_layer_target_creates_top_edge_for_new_word(self):
         with tempfile.TemporaryDirectory() as tmp:

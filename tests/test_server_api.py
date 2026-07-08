@@ -141,7 +141,7 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             graph = response.json()
             self.assertTrue(graph["edges"])
-            self.assertTrue(all(edge["layer"] == 0 for edge in graph["edges"]))
+            self.assertTrue(all(0 in {edge["layer"], edge.get("from_layer"), edge.get("to_layer")} for edge in graph["edges"]))
 
             detail = client.get("/api/concepts/detail", params={"uri": "/m/top/object"})
             self.assertEqual(detail.status_code, 200)

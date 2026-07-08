@@ -65,7 +65,13 @@ def graph_snapshot(
         for uri in sorted(node_ids)
         if uri in graph.nodes or _label_for_uri(uri, None, checkpoint)
     ]
-    nodes.sort(key=lambda item: (int(item.get("layer", 1)), -float(item.get("concept_pheromone", 1.0)), item["label"]))
+    nodes.sort(
+        key=lambda item: (
+            int(item.get("layer", 1)),
+            -float(item.get("concept_pheromone", 1.0)),
+            item["label"],
+        )
+    )
 
     return {
         "nodes": nodes,
@@ -204,12 +210,23 @@ def trace_interpretation(result: SemanticResult | dict[str, Any]) -> dict[str, A
 
 def signal_index(result: SemanticResult | dict[str, Any] | None) -> dict[str, Any]:
     if result is None:
-        return {"nodes": set(), "edges": set(), "edge_scores": {}, "node_counts": Counter()}
+        return {"nodes": set(), "edges": set(), "edge_scores": {}, "node_counts": Counter(), "node_layers": {}}
     raw = result.to_dict() if isinstance(result, SemanticResult) else result
     nodes: set[str] = set()
     edges: set[str] = set()
     edge_scores: dict[str, float] = {}
     node_counts: Counter[str] = Counter()
+    node_layers: dict[str, set[int]] = {}
+
+    def _record_node_layer(uri: str, *layers: Any) -> None:
+        bucket = node_layers.setdefault(uri, set())
+        for layer in layers:
+            if layer is None:
+                continue
+            try:
+                bucket.add(int(layer))
+            except (TypeError, ValueError):
+                continue
 
     for route in raw.get("routes", []) or []:
         if not isinstance(route, dict):
@@ -232,6 +249,8 @@ def signal_index(result: SemanticResult | dict[str, Any] | None) -> dict[str, An
             node_counts[start] += 1
             node_counts[end] += 1
             edge_scores[key] = max(edge_scores.get(key, 0.0), float(step.get("score", 0.0) or 0.0))
+            _record_node_layer(start, step.get("from_layer"), step.get("layer"))
+            _record_node_layer(end, step.get("to_layer"), step.get("layer"))
 
     for step in raw.get("signal_trace", []) or []:
         if not isinstance(step, dict):
@@ -247,8 +266,10 @@ def signal_index(result: SemanticResult | dict[str, Any] | None) -> dict[str, An
         node_counts[start] += 1
         node_counts[end] += 1
         edge_scores[key] = max(edge_scores.get(key, 0.0), float(step.get("score", 0.0) or 0.0))
+        _record_node_layer(start, step.get("from_layer"), step.get("layer"))
+        _record_node_layer(end, step.get("to_layer"), step.get("layer"))
 
-    return {"nodes": nodes, "edges": edges, "edge_scores": edge_scores, "node_counts": node_counts}
+    return {"nodes": nodes, "edges": edges, "edge_scores": edge_scores, "node_counts": node_counts, "node_layers": node_layers}
 
 
 def _edge_payload(edge: SemanticEdge, checkpoint: Checkpoint, signal: dict[str, Any]) -> dict[str, Any]:
@@ -262,10 +283,19 @@ def _edge_payload(edge: SemanticEdge, checkpoint: Checkpoint, signal: dict[str, 
         "source": edge.source,
         "surface_text": edge.surface_text,
         "layer": edge.layer,
+        "from_layer": edge.from_layer,
+        "to_layer": edge.to_layer,
+        "context_plane": edge.context_plane,
         "distance": edge.distance,
         "edge_type": edge.edge_type,
         "metadata": edge.metadata,
         "pheromone": checkpoint.pheromone_for(edge),
+        "layer_pheromone": checkpoint.edge_layer_pheromone_for(
+            edge,
+            from_layer=edge.from_layer,
+            to_layer=edge.to_layer,
+            context_plane=edge.context_plane,
+        ),
         "route_stats": checkpoint.route_stats.get(edge.key, {}),
         "signal": {
             "active": active,
@@ -281,7 +311,18 @@ def _node_payload(
     degree: Counter[str],
     signal: dict[str, Any],
 ) -> dict[str, Any]:
-    layer = node.layer if node else (0 if uri.startswith("/m/top/") else 1)
+    node_layers = _unique_layers(
+        (node.layers if node else []),
+        (node.active_layers if node else []),
+        [node.layer if node else (0 if uri.startswith("/m/top/") else 1)],
+        signal.get("node_layers", {}).get(uri, set()),
+    )
+    active_layers = _unique_layers(
+        signal.get("node_layers", {}).get(uri, set()),
+        node.active_layers if node else [],
+        node_layers,
+    )
+    layer = node_layers[0] if node_layers else (0 if uri.startswith("/m/top/") else 1)
     return {
         "id": uri,
         "uri": uri,
@@ -290,6 +331,8 @@ def _node_payload(
         "language": node.language if node else _language_from_uri(uri),
         "source": node.source if node else "checkpoint",
         "layer": layer,
+        "layers": node_layers,
+        "active_layers": active_layers,
         "metadata": _metadata_for_uri(uri, node, checkpoint),
         "concept_pheromone": checkpoint.concept_pheromone_for(uri),
         "suppression": float(checkpoint.suppressed_concepts.get(uri, 0.0)),
@@ -313,7 +356,7 @@ def _edge_matches(
     min_pheromone: float | None,
     only_signal: bool,
 ) -> bool:
-    if layer is not None and int(edge.get("layer", 1)) != layer:
+    if layer is not None and layer not in _edge_layers(edge):
         return False
     if source and edge.get("source") != source:
         return False
@@ -333,7 +376,7 @@ def _edge_matches(
 
 
 def _node_matches(node: dict[str, Any], layer: int | None, source: str | None, query: str) -> bool:
-    if layer is not None and int(node.get("layer", 1)) != layer:
+    if layer is not None and layer not in _node_layers(node):
         return False
     if source and node.get("source") != source:
         return False
@@ -390,7 +433,7 @@ def _focus_edge_rank(edge: dict[str, Any], active_node_ids: set[str], active_edg
         0 if touches_active_node else 1,
         0 if edge.get("signal", {}).get("active") else 1,
         -float(edge.get("pheromone", 0.0) or 0.0),
-        int(edge.get("layer", 1) or 1),
+        _first_edge_layer(edge),
         float(edge.get("distance", 0.0) or 0.0),
         str(edge.get("relation", "")),
         str(edge.get("id", "")),
@@ -419,3 +462,38 @@ def _coverage_edge_ids(
 
 def edge_id_parts(edge_id: str) -> tuple[str, str, str]:
     return split_edge_key(edge_id)
+
+
+def _unique_layers(*values: Any) -> list[int]:
+    layers: list[int] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, int):
+            candidates = [value]
+        elif isinstance(value, set):
+            candidates = list(value)
+        else:
+            candidates = list(value) if isinstance(value, (list, tuple)) else [value]
+        for candidate in candidates:
+            try:
+                layer = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if layer not in layers:
+                layers.append(layer)
+    layers.sort()
+    return layers
+
+
+def _node_layers(node: dict[str, Any]) -> list[int]:
+    return _unique_layers(node.get("layers", []), node.get("active_layers", []), node.get("layer"))
+
+
+def _edge_layers(edge: dict[str, Any]) -> list[int]:
+    return _unique_layers(edge.get("layer"), edge.get("from_layer"), edge.get("to_layer"))
+
+
+def _first_edge_layer(edge: dict[str, Any]) -> int:
+    layers = _edge_layers(edge)
+    return layers[0] if layers else 1

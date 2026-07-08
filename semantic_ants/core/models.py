@@ -13,6 +13,8 @@ class ConceptNode:
     language: str
     source: str = "local"
     layer: int = 1
+    layers: list[int] = field(default_factory=list)
+    active_layers: list[int] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -22,6 +24,8 @@ class ConceptNode:
             "language": self.language,
             "source": self.source,
             "layer": self.layer,
+            "layers": self.layers,
+            "active_layers": self.active_layers,
             "metadata": self.metadata,
         }
 
@@ -37,6 +41,9 @@ class SemanticEdge:
     source: str = "local"
     surface_text: str | None = None
     layer: int = 1
+    from_layer: int | None = None
+    to_layer: int | None = None
+    context_plane: str | None = None
     distance: float = 1.0
     edge_type: str = "semantic"
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -54,6 +61,9 @@ class SemanticEdge:
             source=self.source,
             surface_text=self.surface_text,
             layer=self.layer,
+            from_layer=self.to_layer,
+            to_layer=self.from_layer,
+            context_plane=self.context_plane,
             distance=self.distance,
             edge_type=self.edge_type,
             metadata={**self.metadata, "reversed": True},
@@ -68,6 +78,9 @@ class SemanticEdge:
             "source": self.source,
             "surface_text": self.surface_text,
             "layer": self.layer,
+            "from_layer": self.from_layer,
+            "to_layer": self.to_layer,
+            "context_plane": self.context_plane,
             "distance": self.distance,
             "edge_type": self.edge_type,
             "metadata": self.metadata,
@@ -86,6 +99,11 @@ class AntStep:
     score: float
     source: str = "local"
     layer: int = 1
+    from_layer: int | None = None
+    to_layer: int | None = None
+    context_plane: str | None = None
+    layer_pheromone: float = 1.0
+    projection_shift: float = 0.0
     distance: float = 1.0
     remaining_strength: int | None = None
     edge_type: str = "semantic"
@@ -100,6 +118,11 @@ class AntStep:
             "score": self.score,
             "source": self.source,
             "layer": self.layer,
+            "from_layer": self.from_layer,
+            "to_layer": self.to_layer,
+            "context_plane": self.context_plane,
+            "layer_pheromone": self.layer_pheromone,
+            "projection_shift": self.projection_shift,
             "distance": self.distance,
             "remaining_strength": self.remaining_strength,
             "edge_type": self.edge_type,

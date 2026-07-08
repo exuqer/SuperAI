@@ -204,6 +204,8 @@ class SemanticEngine:
                         language=node.language,
                         source=node.source,
                         layer=node.layer,
+                        layers=list(node.layers),
+                        active_layers=list(node.active_layers),
                         metadata={**node.metadata, "source_uri": node.uri},
                     )
                 )
@@ -220,6 +222,9 @@ class SemanticEngine:
             source=edge.source,
             surface_text=edge.surface_text,
             layer=edge.layer,
+            from_layer=edge.from_layer,
+            to_layer=edge.to_layer,
+            context_plane=edge.context_plane,
             distance=edge.distance,
             edge_type=edge.edge_type,
             metadata={**edge.metadata, "source_start": edge.start, "source_end": edge.end},
@@ -277,18 +282,13 @@ class SemanticEngine:
         trace: list[dict[str, object]] = []
         for route in routes[:8]:
             for index, step in enumerate(route.steps):
-                trace.append(
+                payload = step.to_dict()
+                payload.update(
                     {
                         "ant_id": route.ant_id,
                         "step_index": index,
-                        "start": step.start,
-                        "end": step.end,
-                        "relation": step.relation,
-                        "layer": step.layer,
-                        "distance": step.distance,
-                        "remaining_strength": step.remaining_strength,
-                        "edge_type": step.edge_type,
                         "score": round(float(step.score), 4),
                     }
                 )
+                trace.append(payload)
         return trace

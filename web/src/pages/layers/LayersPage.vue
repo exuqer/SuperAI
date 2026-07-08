@@ -2,7 +2,7 @@
   <section class="page">
     <div class="split">
       <section class="panel">
-        <h2>Слои</h2>
+        <h2>Контекстные плоскости</h2>
         <div class="toolbar">
           <label>
             Stimulus
@@ -30,7 +30,7 @@
           </label>
           <button class="primary" type="button" @click="analyze">Analyze</button>
         </div>
-        <h3>JSONL для обучения слоя</h3>
+        <h3>JSONL для обучения плоскости</h3>
         <pre>{{ example }}</pre>
       </section>
       <section class="panel">

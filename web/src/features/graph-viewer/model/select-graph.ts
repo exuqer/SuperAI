@@ -105,7 +105,7 @@ function rankFocusedEdge(edge: GraphEdge, activeNodeIds: Set<string>, activeEdge
     touchesActiveNode ? 0 : 1,
     edge.signal.active ? 0 : 1,
     -edge.pheromone,
-    edge.layer,
+    edge.to_layer ?? edge.from_layer ?? edge.layer,
     edge.distance,
     edge.relation,
     edge.id,
@@ -119,7 +119,7 @@ function compareFallbackNodes(left: GraphNode, right: GraphNode) {
 function rankFallbackNode(node: GraphNode) {
   return [
     node.signal.active ? 0 : 1,
-    node.layer,
+    node.active_layers[0] ?? node.layers[0] ?? node.layer,
     -node.degree,
     -node.concept_pheromone,
     node.label,
@@ -160,7 +160,7 @@ function rankFallbackEdge(edge: GraphEdge) {
   return [
     edge.signal.active ? 0 : 1,
     -edge.pheromone,
-    edge.layer,
+    edge.to_layer ?? edge.from_layer ?? edge.layer,
     edge.distance,
     edge.relation,
     edge.id,

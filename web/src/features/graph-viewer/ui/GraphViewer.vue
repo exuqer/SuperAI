@@ -58,11 +58,13 @@ function renderGraph() {
       data: {
         id: node.id,
         label: node.label || node.uri,
-        layer: node.layer,
+        layer: node.active_layers[0] ?? node.layers[0] ?? node.layer,
+        layers: node.layers.join(','),
+        activeLayers: node.active_layers.join(','),
         signal: node.signal.active,
         pheromone: node.concept_pheromone,
       },
-      classes: [node.signal.active ? 'signal' : '', `layer-${node.layer}`].filter(Boolean).join(' '),
+      classes: [node.signal.active ? 'signal' : '', ...node.layers.map((layer) => `layer-${layer}`)].filter(Boolean).join(' '),
     })),
     ...viewport.edges.map((edge) => ({
       group: 'edges' as const,
@@ -90,8 +92,8 @@ function renderGraph() {
       {
         selector: 'node',
         style: {
-          width: 'mapData(layer, 0, 3, 70, 22)',
-          height: 'mapData(layer, 0, 3, 70, 22)',
+          width: 'mapData(layer, 0, 5, 74, 24)',
+          height: 'mapData(layer, 0, 5, 74, 24)',
           'background-color': '#d8dadd',
           'border-color': '#9ea4ad',
           'border-width': '1',

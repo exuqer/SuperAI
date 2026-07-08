@@ -533,6 +533,7 @@ class ACOTrainer:
     ) -> None:
         checkpoint: Checkpoint = self.engine.checkpoint
         learning_targets = experience.learning_targets
+        context_signature = _learning_context_signature(experience, thought, semantic_prompt)
         target = set(learning_targets)
         selected_routes = [route for route in routes if target & set(route.concepts)] if target else []
         if not selected_routes:
@@ -543,7 +544,21 @@ class ACOTrainer:
                 step_amount = amount
                 if target and step.start not in target and step.end not in target:
                     step_amount *= 0.5
-                checkpoint.reinforce_edge(step.start, step.relation, step.end, amount=step_amount)
+                checkpoint.reinforce_edge(
+                    step.start,
+                    step.relation,
+                    step.end,
+                    amount=step_amount,
+                    from_layer=step.from_layer,
+                    to_layer=step.to_layer,
+                    context_plane=context_signature,
+                )
+                checkpoint.reinforce_concept_layer(
+                    step.end,
+                    int(step.to_layer if step.to_layer is not None else step.layer),
+                    amount=max(step_amount * 0.3, 0.05),
+                    context_plane=context_signature,
+                )
                 if report:
                     report.reinforced_edges += 1
         for concept in [*learning_targets, *thought.active_concepts]:
@@ -555,6 +570,9 @@ class ACOTrainer:
                 edge_end = str(edge_value["end"])
                 edge_weight = max(float(edge_value.get("weight", 1.0)), amount)
                 edge_layer = int(edge_value.get("layer", 1))
+                edge_from_layer = int(edge_value["from_layer"]) if edge_value.get("from_layer") is not None else None
+                edge_to_layer = int(edge_value["to_layer"]) if edge_value.get("to_layer") is not None else None
+                edge_context_plane = str(edge_value.get("context_plane")) if edge_value.get("context_plane") is not None else context_signature
                 edge_distance = float(edge_value.get("distance", 1.0))
                 edge_type = str(edge_value.get("edge_type", "semantic"))
                 raw_metadata = edge_value.get("metadata", {})
@@ -565,6 +583,9 @@ class ACOTrainer:
                     relation=edge_relation,
                     weight=edge_weight,
                     layer=edge_layer,
+                    from_layer=edge_from_layer,
+                    to_layer=edge_to_layer,
+                    context_plane=edge_context_plane,
                     distance=edge_distance,
                     edge_type=edge_type,
                     metadata=edge_metadata,
@@ -578,24 +599,47 @@ class ACOTrainer:
                     metadata={
                         **edge_metadata,
                         "layer": edge_layer,
+                        "from_layer": edge_from_layer,
+                        "to_layer": edge_to_layer,
+                        "context_plane": edge_context_plane,
                         "distance": edge_distance,
                         "edge_type": edge_type,
                     },
                 ):
                     if report:
                         report.learned_bridges += 1
-                checkpoint.reinforce_edge(edge_start, edge_relation, edge_end, amount=edge_weight + 0.3)
+                checkpoint.reinforce_edge(
+                    edge_start,
+                    edge_relation,
+                    edge_end,
+                    amount=edge_weight + 0.3,
+                    from_layer=edge_from_layer,
+                    to_layer=edge_to_layer,
+                    context_plane=edge_context_plane,
+                )
                 if report:
                     report.reinforced_edges += 1
                 continue
             start, relation, end = edge_value
             start = checkpoint.canonical_uri(start)
             end = checkpoint.canonical_uri(end)
-            checkpoint.add_custom_edge(start, end, relation=relation, weight=max(1.0, amount))
+            checkpoint.add_custom_edge(
+                start,
+                end,
+                relation=relation,
+                weight=max(1.0, amount),
+                context_plane=context_signature,
+            )
             if checkpoint.add_learned_bridge(start, relation, end, weight=max(1.0, amount), confirmed=True):
                 if report:
                     report.learned_bridges += 1
-            checkpoint.reinforce_edge(start, relation, end, amount=amount + 0.3)
+            checkpoint.reinforce_edge(
+                start,
+                relation,
+                end,
+                amount=amount + 0.3,
+                context_plane=context_signature,
+            )
             if report:
                 report.reinforced_edges += 1
         route_starts = list(dict.fromkeys(route.start for route in routes))
@@ -613,11 +657,26 @@ class ACOTrainer:
                         relation=relation,
                         weight=max(1.0, amount),
                         layer=layer,
+                        to_layer=layer,
+                        context_plane=context_signature,
                         distance=1.0,
                         edge_type=edge_type,
                         metadata={"layer_target": layer_key},
                     )
-                    checkpoint.reinforce_edge(start, relation, concept, amount=amount + 0.2)
+                    checkpoint.reinforce_edge(
+                        start,
+                        relation,
+                        concept,
+                        amount=amount + 0.2,
+                        to_layer=layer,
+                        context_plane=context_signature,
+                    )
+                    checkpoint.reinforce_concept_layer(
+                        concept,
+                        layer,
+                        amount=amount,
+                        context_plane=context_signature,
+                    )
                     if report:
                         report.reinforced_edges += 1
         if not experience.positive_edges and len(learning_targets) >= 2:
@@ -672,7 +731,15 @@ class ACOTrainer:
             selected_routes = routes[:3]
         for route in selected_routes[:3]:
             for step in route.steps:
-                checkpoint.penalize_edge(step.start, step.relation, step.end, amount=amount)
+                checkpoint.penalize_edge(
+                    step.start,
+                    step.relation,
+                    step.end,
+                    amount=amount,
+                    from_layer=step.from_layer,
+                    to_layer=step.to_layer,
+                    context_plane=step.context_plane,
+                )
                 if report:
                     report.evaporated_edges += 1
         route_starts = list(dict.fromkeys(route.start for route in routes))
@@ -757,6 +824,12 @@ def _parse_positive_edge_dict(value: dict[str, Any]) -> dict[str, Any]:
         edge["weight"] = float(value["weight"])
     if "layer" in value and value["layer"] is not None:
         edge["layer"] = int(value["layer"])
+    if "from_layer" in value and value["from_layer"] is not None:
+        edge["from_layer"] = int(value["from_layer"])
+    if "to_layer" in value and value["to_layer"] is not None:
+        edge["to_layer"] = int(value["to_layer"])
+    if "context_plane" in value and value["context_plane"] is not None:
+        edge["context_plane"] = str(value["context_plane"])
     if "distance" in value and value["distance"] is not None:
         edge["distance"] = float(value["distance"])
     if "edge_type" in value and value["edge_type"] is not None:
@@ -805,6 +878,19 @@ def _parse_concept_labels(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"Некорректный concept_labels: {value!r}")
     return {str(concept): str(label) for concept, label in value.items() if str(label).strip()}
+
+
+def _learning_context_signature(experience: Experience, thought: SemanticThought, semantic_prompt: str | None) -> str:
+    return " | ".join(
+        part
+        for part in (
+            f"stimulus={experience.stimulus.strip()}",
+            f"prompt={(semantic_prompt or thought.to_prompt()).strip()}",
+            f"lang={experience.lang or 'auto'}",
+            f"answer_lang={experience.answer_lang or experience.lang or 'auto'}",
+        )
+        if part
+    )
 
 
 def _looks_causal(relation: str) -> bool:

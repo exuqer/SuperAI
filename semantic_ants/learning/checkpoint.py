@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import time
@@ -23,9 +24,11 @@ def default_checkpoint_path(state_dir: Path | str = ".semantic_ants") -> Path:
 class Checkpoint:
     """Обучаемый слой поверх внешнего графа знаний."""
 
-    version: int = 5
+    version: int = 6
     pheromones: dict[str, float] = field(default_factory=dict)
     concept_pheromones: dict[str, float] = field(default_factory=dict)
+    concept_layer_pheromones: dict[str, float] = field(default_factory=dict)
+    edge_layer_pheromones: dict[str, float] = field(default_factory=dict)
     suppressed_concepts: dict[str, float] = field(default_factory=dict)
     aliases: dict[str, str] = field(default_factory=dict)
     canonical_concepts: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -83,12 +86,64 @@ class Checkpoint:
         concept_uri = self.canonical_uri(concept_uri)
         return max(float(self.concept_pheromones.get(concept_uri, 1.0)), 0.01)
 
+    def concept_layer_pheromone_for(self, concept_uri: str, layer: int, context_plane: str | None = None) -> float:
+        concept_uri = self.canonical_uri(concept_uri)
+        exact = self.concept_layer_pheromones.get(_concept_layer_key(context_plane, concept_uri, layer))
+        if exact is not None:
+            return max(float(exact), 0.01)
+        generic = self.concept_layer_pheromones.get(_concept_layer_key("", concept_uri, layer))
+        if generic is not None:
+            return max(float(generic), 0.01)
+        return 1.0
+
+    def edge_layer_pheromone_for(
+        self,
+        edge: SemanticEdge,
+        *,
+        from_layer: int | None = None,
+        to_layer: int | None = None,
+        context_plane: str | None = None,
+    ) -> float:
+        start = self.canonical_uri(edge.start)
+        end = self.canonical_uri(edge.end)
+        exact = self.edge_layer_pheromones.get(
+            _edge_layer_key(context_plane, start, edge.relation, end, from_layer, to_layer, edge.layer)
+        )
+        if exact is not None:
+            return max(float(exact), 0.01)
+        if edge.layer is not None:
+            relaxed = self.edge_layer_pheromones.get(
+                _edge_layer_key(context_plane, start, edge.relation, end, from_layer, to_layer, None)
+            )
+            if relaxed is not None:
+                return max(float(relaxed), 0.01)
+        generic = self.edge_layer_pheromones.get(_edge_layer_key("", start, edge.relation, end, from_layer, to_layer, edge.layer))
+        if generic is not None:
+            return max(float(generic), 0.01)
+        if edge.layer is not None:
+            relaxed_generic = self.edge_layer_pheromones.get(
+                _edge_layer_key("", start, edge.relation, end, from_layer, to_layer, None)
+            )
+            if relaxed_generic is not None:
+                return max(float(relaxed_generic), 0.01)
+        return 1.0
+
     def penalty_for(self, concept_uri: str) -> float:
         concept_uri = self.canonical_uri(concept_uri)
         penalty = max(float(self.suppressed_concepts.get(concept_uri, 0.0)), 0.0)
         return 1.0 / (1.0 + penalty)
 
-    def reinforce_edge(self, start: str, relation: str, end: str, amount: float = 0.2) -> None:
+    def reinforce_edge(
+        self,
+        start: str,
+        relation: str,
+        end: str,
+        amount: float = 0.2,
+        *,
+        from_layer: int | None = None,
+        to_layer: int | None = None,
+        context_plane: str | None = None,
+    ) -> None:
         start = self.canonical_uri(start)
         end = self.canonical_uri(end)
         key = edge_key(start, relation, end)
@@ -97,8 +152,28 @@ class Checkpoint:
         stat["positive"] = int(stat.get("positive", 0)) + 1
         self.reinforce_concept(start, amount=amount * 0.25)
         self.reinforce_concept(end, amount=amount * 0.5)
+        if from_layer is not None or to_layer is not None or context_plane is not None:
+            self.reinforce_edge_projection(
+                start,
+                relation,
+                end,
+                amount=amount,
+                from_layer=from_layer,
+                to_layer=to_layer,
+                context_plane=context_plane,
+            )
 
-    def penalize_edge(self, start: str, relation: str, end: str, amount: float = 0.2) -> None:
+    def penalize_edge(
+        self,
+        start: str,
+        relation: str,
+        end: str,
+        amount: float = 0.2,
+        *,
+        from_layer: int | None = None,
+        to_layer: int | None = None,
+        context_plane: str | None = None,
+    ) -> None:
         start = self.canonical_uri(start)
         end = self.canonical_uri(end)
         key = edge_key(start, relation, end)
@@ -106,6 +181,16 @@ class Checkpoint:
         stat = self.route_stats.setdefault(key, {"positive": 0, "negative": 0})
         stat["negative"] = int(stat.get("negative", 0)) + 1
         self.penalize_concept(end, amount=amount * 0.5)
+        if from_layer is not None or to_layer is not None or context_plane is not None:
+            self.penalize_edge_projection(
+                start,
+                relation,
+                end,
+                amount=amount,
+                from_layer=from_layer,
+                to_layer=to_layer,
+                context_plane=context_plane,
+            )
 
     def reinforce_concept(self, concept_uri: str, amount: float = 0.2) -> None:
         if not concept_uri:
@@ -129,6 +214,68 @@ class Checkpoint:
             float(self.concept_pheromones.get(concept_uri, 1.0)) - amount,
             0.05,
         )
+
+    def reinforce_concept_layer(
+        self,
+        concept_uri: str,
+        layer: int,
+        amount: float = 0.2,
+        *,
+        context_plane: str | None = None,
+    ) -> None:
+        if not concept_uri:
+            return
+        concept_uri = self.canonical_uri(concept_uri)
+        key = _concept_layer_key(context_plane, concept_uri, layer)
+        self.concept_layer_pheromones[key] = min(float(self.concept_layer_pheromones.get(key, 1.0)) + amount, 25.0)
+
+    def penalize_concept_layer(
+        self,
+        concept_uri: str,
+        layer: int,
+        amount: float = 0.2,
+        *,
+        context_plane: str | None = None,
+    ) -> None:
+        if not concept_uri:
+            return
+        concept_uri = self.canonical_uri(concept_uri)
+        key = _concept_layer_key(context_plane, concept_uri, layer)
+        self.concept_layer_pheromones[key] = max(float(self.concept_layer_pheromones.get(key, 1.0)) - amount, 0.05)
+
+    def reinforce_edge_projection(
+        self,
+        start: str,
+        relation: str,
+        end: str,
+        amount: float = 0.2,
+        *,
+        from_layer: int | None = None,
+        to_layer: int | None = None,
+        context_plane: str | None = None,
+        layer: int | None = None,
+    ) -> None:
+        start = self.canonical_uri(start)
+        end = self.canonical_uri(end)
+        key = _edge_layer_key(context_plane, start, relation, end, from_layer, to_layer, layer)
+        self.edge_layer_pheromones[key] = min(float(self.edge_layer_pheromones.get(key, 1.0)) + amount, 25.0)
+
+    def penalize_edge_projection(
+        self,
+        start: str,
+        relation: str,
+        end: str,
+        amount: float = 0.2,
+        *,
+        from_layer: int | None = None,
+        to_layer: int | None = None,
+        context_plane: str | None = None,
+        layer: int | None = None,
+    ) -> None:
+        start = self.canonical_uri(start)
+        end = self.canonical_uri(end)
+        key = _edge_layer_key(context_plane, start, relation, end, from_layer, to_layer, layer)
+        self.edge_layer_pheromones[key] = max(float(self.edge_layer_pheromones.get(key, 1.0)) - amount, 0.05)
 
     def suppress_concept(self, concept_uri: str, amount: float = 0.5) -> None:
         concept_uri = self.canonical_uri(concept_uri)
@@ -356,6 +503,9 @@ class Checkpoint:
                     source="learned",
                     surface_text=raw.get("surface_text"),
                     layer=int(raw.get("layer", 1)),
+                    from_layer=_optional_int(raw.get("from_layer")),
+                    to_layer=_optional_int(raw.get("to_layer")),
+                    context_plane=str(raw.get("context_plane")) if raw.get("context_plane") is not None else None,
                     distance=float(raw.get("distance", 1.0)),
                     edge_type=str(raw.get("edge_type", "semantic")),
                     metadata=dict(raw.get("metadata", {})),
@@ -375,6 +525,9 @@ class Checkpoint:
         relation: str = "LearnedRelatedTo",
         weight: float = 1.0,
         layer: int = 1,
+        from_layer: int | None = None,
+        to_layer: int | None = None,
+        context_plane: str | None = None,
         distance: float = 1.0,
         edge_type: str = "semantic",
         metadata: dict[str, Any] | None = None,
@@ -389,6 +542,9 @@ class Checkpoint:
             "relation": relation,
             "weight": weight,
             "layer": layer,
+            "from_layer": from_layer,
+            "to_layer": to_layer,
+            "context_plane": context_plane,
             "distance": distance,
             "edge_type": edge_type,
         }
@@ -402,6 +558,12 @@ class Checkpoint:
             ):
                 existing["weight"] = max(float(existing.get("weight", 1.0)), weight)
                 existing.setdefault("layer", layer)
+                if existing.get("from_layer") is None and from_layer is not None:
+                    existing["from_layer"] = from_layer
+                if existing.get("to_layer") is None and to_layer is not None:
+                    existing["to_layer"] = to_layer
+                if existing.get("context_plane") is None and context_plane is not None:
+                    existing["context_plane"] = context_plane
                 existing.setdefault("distance", distance)
                 existing.setdefault("edge_type", edge_type)
                 if metadata:
@@ -429,6 +591,9 @@ class Checkpoint:
             "weight": weight,
             "confirmed": confirmed,
             "layer": int((metadata or {}).get("layer", 1)),
+            "from_layer": _optional_int((metadata or {}).get("from_layer")),
+            "to_layer": _optional_int((metadata or {}).get("to_layer")),
+            "context_plane": str((metadata or {}).get("context_plane")) if (metadata or {}).get("context_plane") is not None else None,
             "distance": float((metadata or {}).get("distance", 1.0)),
             "edge_type": str((metadata or {}).get("edge_type", "semantic")),
             "metadata": dict(metadata or {}),
@@ -452,6 +617,9 @@ class Checkpoint:
             relation=relation,
             weight=weight,
             layer=int(bridge.get("layer", 1)),
+            from_layer=_optional_int(bridge.get("from_layer")),
+            to_layer=_optional_int(bridge.get("to_layer")),
+            context_plane=str(bridge.get("context_plane")) if bridge.get("context_plane") is not None else None,
             distance=float(bridge.get("distance", 1.0)),
             edge_type=str(bridge.get("edge_type", "semantic")),
             metadata=dict(metadata or {}),
@@ -463,6 +631,8 @@ class Checkpoint:
             "version": self.version,
             "pheromones": self.pheromones,
             "concept_pheromones": self.concept_pheromones,
+            "concept_layer_pheromones": self.concept_layer_pheromones,
+            "edge_layer_pheromones": self.edge_layer_pheromones,
             "suppressed_concepts": self.suppressed_concepts,
             "aliases": self.aliases,
             "canonical_concepts": self.canonical_concepts,
@@ -495,9 +665,11 @@ class Checkpoint:
         response_memory = _normalize_response_memory(data.get("response_memory", {}), checkpoint_data=data)
         negative_memory = _normalize_negative_memory(data.get("negative_memory", []), checkpoint_data=data)
         checkpoint = cls(
-            version=max(int(data.get("version", 1)), 5),
+            version=max(int(data.get("version", 1)), 6),
             pheromones=dict(data.get("pheromones", {})),
             concept_pheromones=dict(data.get("concept_pheromones", {})),
+            concept_layer_pheromones=dict(data.get("concept_layer_pheromones", {})),
+            edge_layer_pheromones=dict(data.get("edge_layer_pheromones", {})),
             suppressed_concepts=dict(data.get("suppressed_concepts", {})),
             aliases=dict(data.get("aliases", {})),
             canonical_concepts=dict(data.get("canonical_concepts", {})),
@@ -522,7 +694,7 @@ class Checkpoint:
             examples_seen=int(data.get("examples_seen", 0)),
             seed=int(data.get("seed", 42)),
         )
-        if int(data.get("version", 1)) < 5 or not checkpoint.canonical_concepts:
+        if int(data.get("version", 1)) < 6 or not checkpoint.canonical_concepts:
             migrate_checkpoint(checkpoint)
         return checkpoint
 
@@ -765,9 +937,11 @@ def _normalize_negative_memory(values: Any, checkpoint_data: dict[str, Any]) -> 
 
 def _checkpoint_from_data(data: dict[str, Any]) -> Checkpoint:
     return Checkpoint(
-        version=max(int(data.get("version", 1)), 5),
+        version=max(int(data.get("version", 1)), 6),
         pheromones=dict(data.get("pheromones", {})),
         concept_pheromones=dict(data.get("concept_pheromones", {})),
+        concept_layer_pheromones=dict(data.get("concept_layer_pheromones", {})),
+        edge_layer_pheromones=dict(data.get("edge_layer_pheromones", {})),
         suppressed_concepts=dict(data.get("suppressed_concepts", {})),
         aliases=dict(data.get("aliases", {})),
         canonical_concepts=dict(data.get("canonical_concepts", {})),
@@ -815,11 +989,13 @@ def _upgrade_checkpoint_object(checkpoint: Checkpoint) -> Checkpoint:
         "canonical_concepts": {},
         "concept_redirects": {},
         "surface_forms": {},
+        "concept_layer_pheromones": {},
+        "edge_layer_pheromones": {},
     }
     for key, value in defaults.items():
         if not hasattr(checkpoint, key):
             setattr(checkpoint, key, value)
-    if int(getattr(checkpoint, "version", 1)) < 5 or not getattr(checkpoint, "canonical_concepts", {}):
+    if int(getattr(checkpoint, "version", 1)) < 6 or not getattr(checkpoint, "canonical_concepts", {}):
         migrate_checkpoint(checkpoint)
     return checkpoint
 
@@ -848,6 +1024,9 @@ def migrate_checkpoint(checkpoint: Checkpoint) -> dict[str, Any]:
         if canonical != uri:
             checkpoint.concept_redirects[uri] = canonical
     checkpoint.concept_pheromones = merged_concept_pheromones
+
+    checkpoint.concept_layer_pheromones = _normalize_concept_layer_pheromones(checkpoint.concept_layer_pheromones, resolver)
+    checkpoint.edge_layer_pheromones = _normalize_edge_layer_pheromones(checkpoint.edge_layer_pheromones, resolver)
 
     merged_suppressed: dict[str, float] = {}
     for uri, value in checkpoint.suppressed_concepts.items():
@@ -915,7 +1094,7 @@ def migrate_checkpoint(checkpoint: Checkpoint) -> dict[str, Any]:
     checkpoint.negative_memory = _normalize_negative_memory(checkpoint.negative_memory, checkpoint.to_dict())
     checkpoint.custom_edges = _canonicalize_edges(checkpoint.custom_edges, resolver)
     checkpoint.learned_bridges = _canonicalize_edges(checkpoint.learned_bridges, resolver)
-    checkpoint.version = 5
+    checkpoint.version = 6
 
     return {
         "version": checkpoint.version,
@@ -945,5 +1124,107 @@ def _canonicalize_edges(values: list[dict[str, Any]], resolver: CanonicalResolve
     return canonicalized
 
 
+def _normalize_concept_layer_pheromones(
+    values: dict[str, float],
+    resolver: CanonicalResolver,
+) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, value in values.items():
+        context_plane, concept_uri, layer = _parse_concept_layer_key(key)
+        canonical = resolver.canonical_uri(concept_uri)
+        normalized[_concept_layer_key(context_plane, canonical, layer)] = normalized.get(
+            _concept_layer_key(context_plane, canonical, layer),
+            0.0,
+        ) + float(value)
+    return normalized
+
+
+def _normalize_edge_layer_pheromones(
+    values: dict[str, float],
+    resolver: CanonicalResolver,
+) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, value in values.items():
+        context_plane, start, relation, end, from_layer, to_layer, layer = _parse_edge_layer_key(key)
+        canonical_start = resolver.canonical_uri(start)
+        canonical_end = resolver.canonical_uri(end)
+        normalized[
+            _edge_layer_key(context_plane, canonical_start, relation, canonical_end, from_layer, to_layer, layer)
+        ] = normalized.get(
+            _edge_layer_key(context_plane, canonical_start, relation, canonical_end, from_layer, to_layer, layer),
+            0.0,
+        ) + float(value)
+    return normalized
+
+
 def _split_edge_key(value: str) -> tuple[str, str, str]:
     return split_edge_key(value)
+
+
+def _concept_layer_key(context_plane: str | None, concept_uri: str, layer: int) -> str:
+    return json.dumps(
+        {"context_plane": context_plane or "", "concept": concept_uri, "layer": int(layer)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _parse_concept_layer_key(value: str) -> tuple[str, str, int]:
+    try:
+        payload = json.loads(value)
+        if isinstance(payload, dict):
+            return str(payload.get("context_plane", "")), str(payload.get("concept", "")), int(payload.get("layer", 0))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return "", value, 0
+
+
+def _edge_layer_key(
+    context_plane: str | None,
+    start: str,
+    relation: str,
+    end: str,
+    from_layer: int | None,
+    to_layer: int | None,
+    layer: int | None,
+) -> str:
+    return json.dumps(
+        {
+            "context_plane": context_plane or "",
+            "start": start,
+            "relation": relation,
+            "end": end,
+            "from_layer": from_layer,
+            "to_layer": to_layer,
+            "layer": layer,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _parse_edge_layer_key(value: str) -> tuple[str, str, str, str, int | None, int | None, int | None]:
+    try:
+        payload = json.loads(value)
+        if isinstance(payload, dict):
+            return (
+                str(payload.get("context_plane", "")),
+                str(payload.get("start", "")),
+                str(payload.get("relation", "")),
+                str(payload.get("end", "")),
+                _optional_int(payload.get("from_layer")),
+                _optional_int(payload.get("to_layer")),
+                _optional_int(payload.get("layer")),
+            )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    start, relation, end = split_edge_key(value)
+    return "", start, relation, end, None, None, None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)

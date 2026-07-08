@@ -95,7 +95,7 @@ class ServerGraphTest(unittest.TestCase):
             graph = graph_from_checkpoint(engine.checkpoint)
             snapshot = graph_snapshot(graph, engine.checkpoint, layer=0, limit=50)
             self.assertTrue(snapshot["edges"])
-            self.assertTrue(all(edge["layer"] == 0 for edge in snapshot["edges"]))
+            self.assertTrue(all(0 in {edge["layer"], edge.get("from_layer"), edge.get("to_layer")} for edge in snapshot["edges"]))
 
     def test_concept_detail_contains_edges_and_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -70,6 +70,7 @@ class Trainer:
             strength_vector=_parse_strength_vector(example.get("strength_vector")) or None,
         )
         checkpoint = self.engine.checkpoint
+        context_signature = _layer_context_signature(text, result.summary, lang, source_lang)
         target_concepts = [str(value) for value in example.get("target_concepts", [])]
         for concepts in _parse_layer_targets(example.get("layer_targets")).values():
             target_concepts.extend(concepts)
@@ -93,7 +94,21 @@ class Trainer:
             concepts = route.concepts
             for step in route.steps:
                 if step.end in target_concepts or step.start in target_concepts:
-                    checkpoint.reinforce_edge(step.start, step.relation, step.end, amount=0.35)
+                    checkpoint.reinforce_edge(
+                        step.start,
+                        step.relation,
+                        step.end,
+                        amount=0.35,
+                        from_layer=step.from_layer,
+                        to_layer=step.to_layer,
+                        context_plane=context_signature,
+                    )
+                    checkpoint.reinforce_concept_layer(
+                        step.end,
+                        int(step.to_layer if step.to_layer is not None else step.layer),
+                        amount=0.12,
+                        context_plane=context_signature,
+                    )
                     reinforced_any = True
                     if report:
                         report.reinforced_edges += 1
@@ -122,6 +137,9 @@ class Trainer:
                 end = str(edge_value["end"])
                 weight = float(edge_value.get("weight", 1.0))
                 layer = int(edge_value.get("layer", 1))
+                from_layer = int(edge_value["from_layer"]) if edge_value.get("from_layer") is not None else None
+                to_layer = int(edge_value["to_layer"]) if edge_value.get("to_layer") is not None else None
+                context_plane = str(edge_value.get("context_plane")) if edge_value.get("context_plane") is not None else context_signature
                 distance = float(edge_value.get("distance", 1.0))
                 edge_type = str(edge_value.get("edge_type", "semantic"))
                 metadata = dict(edge_value.get("metadata", {})) if isinstance(edge_value.get("metadata"), dict) else {}
@@ -131,17 +149,34 @@ class Trainer:
                     relation=relation,
                     weight=weight,
                     layer=layer,
+                    from_layer=from_layer,
+                    to_layer=to_layer,
+                    context_plane=context_plane,
                     distance=distance,
                     edge_type=edge_type,
                     metadata=metadata,
                 )
-                checkpoint.reinforce_edge(start, relation, end, amount=max(weight, 0.5))
+                checkpoint.reinforce_edge(
+                    start,
+                    relation,
+                    end,
+                    amount=max(weight, 0.5),
+                    from_layer=from_layer,
+                    to_layer=to_layer,
+                    context_plane=context_plane,
+                )
                 if report:
                     report.reinforced_edges += 1
                 continue
             start, relation, end = edge_value
-            checkpoint.add_custom_edge(checkpoint.canonical_uri(start), checkpoint.canonical_uri(end), relation=relation, weight=1.0)
-            checkpoint.reinforce_edge(start, relation, end, amount=0.5)
+            checkpoint.add_custom_edge(
+                checkpoint.canonical_uri(start),
+                checkpoint.canonical_uri(end),
+                relation=relation,
+                weight=1.0,
+                context_plane=context_signature,
+            )
+            checkpoint.reinforce_edge(start, relation, end, amount=0.5, context_plane=context_signature)
             if report:
                 report.reinforced_edges += 1
 
@@ -161,11 +196,27 @@ class Trainer:
                         relation=relation,
                         weight=1.0,
                         layer=layer,
+                        from_layer=None,
+                        to_layer=layer,
+                        context_plane=context_signature,
                         distance=1.0,
                         edge_type=edge_type,
                         metadata={"layer_target": layer_key},
                     )
-                    checkpoint.reinforce_edge(start, relation, concept, amount=0.4)
+                    checkpoint.reinforce_edge(
+                        start,
+                        relation,
+                        concept,
+                        amount=0.4,
+                        to_layer=layer,
+                        context_plane=context_signature,
+                    )
+                    checkpoint.reinforce_concept_layer(
+                        concept,
+                        layer,
+                        amount=0.5,
+                        context_plane=context_signature,
+                    )
                     if report:
                         report.reinforced_edges += 1
 
@@ -245,10 +296,26 @@ class FeedbackTrainer:
         for route in result.get("routes", []):
             for step in route.get("steps", []):
                 if positive:
-                    checkpoint.reinforce_edge(step["start"], step["relation"], step["end"], amount=0.25)
+                    checkpoint.reinforce_edge(
+                        step["start"],
+                        step["relation"],
+                        step["end"],
+                        amount=0.25,
+                        from_layer=step.get("from_layer"),
+                        to_layer=step.get("to_layer"),
+                        context_plane=step.get("context_plane"),
+                    )
                     changed_edges += 1
                 elif negative:
-                    checkpoint.penalize_edge(step["start"], step["relation"], step["end"], amount=0.25)
+                    checkpoint.penalize_edge(
+                        step["start"],
+                        step["relation"],
+                        step["end"],
+                        amount=0.25,
+                        from_layer=step.get("from_layer"),
+                        to_layer=step.get("to_layer"),
+                        context_plane=step.get("context_plane"),
+                    )
                     checkpoint.suppress_concept(step["end"], amount=0.25)
                     changed_edges += 1
         if corrected_concepts:
@@ -349,6 +416,12 @@ def _parse_positive_edge_dict(value: dict[str, Any]) -> dict[str, Any]:
         edge["weight"] = float(value["weight"])
     if "layer" in value and value["layer"] is not None:
         edge["layer"] = int(value["layer"])
+    if "from_layer" in value and value["from_layer"] is not None:
+        edge["from_layer"] = int(value["from_layer"])
+    if "to_layer" in value and value["to_layer"] is not None:
+        edge["to_layer"] = int(value["to_layer"])
+    if "context_plane" in value and value["context_plane"] is not None:
+        edge["context_plane"] = str(value["context_plane"])
     if "distance" in value and value["distance"] is not None:
         edge["distance"] = float(value["distance"])
     if "edge_type" in value and value["edge_type"] is not None:
@@ -396,3 +469,16 @@ def _parse_concept_labels(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"Некорректный concept_labels: {value!r}")
     return {str(concept): str(label) for concept, label in value.items() if str(label).strip()}
+
+
+def _layer_context_signature(text: str, semantic_prompt: str, lang: str, source_lang: str | None) -> str:
+    return " | ".join(
+        part
+        for part in (
+            f"lang={lang or 'auto'}",
+            f"source={source_lang or 'auto'}",
+            f"text={text.strip()}",
+            f"prompt={semantic_prompt.strip()}",
+        )
+        if part
+    )

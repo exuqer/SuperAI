@@ -156,6 +156,8 @@ class EngineService:
                 "concept_redirects": len(checkpoint.concept_redirects),
                 "pheromones": len(checkpoint.pheromones),
                 "concept_pheromones": len(checkpoint.concept_pheromones),
+                "concept_layer_pheromones": len(checkpoint.concept_layer_pheromones),
+                "edge_layer_pheromones": len(checkpoint.edge_layer_pheromones),
                 "suppressed_concepts": len(checkpoint.suppressed_concepts),
                 "custom_edges": len(checkpoint.custom_edges),
                 "learned_bridges": len(checkpoint.learned_bridges),
@@ -214,6 +216,8 @@ class EngineService:
                 "concept_redirects": checkpoint.concept_redirects,
                 "surface_forms": checkpoint.surface_forms,
                 "suppressed_concepts": checkpoint.suppressed_concepts,
+                "concept_layer_pheromones": checkpoint.concept_layer_pheromones,
+                "edge_layer_pheromones": checkpoint.edge_layer_pheromones,
             }
 
     def submit_train(self, payload: dict[str, Any]) -> Job:

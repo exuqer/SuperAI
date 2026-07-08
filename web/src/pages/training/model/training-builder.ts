@@ -18,7 +18,7 @@ export const TRAINING_TOP_DOMAINS = [
 export type TrainingTopDomainKey = (typeof TRAINING_TOP_DOMAINS)[number]['key'];
 
 export type TrainingLayerDraft = {
-  level: 1 | 2 | 3;
+  level: number;
   label: string;
   builtinTopDomain?: TrainingTopDomainKey;
 };
@@ -27,8 +27,8 @@ export type TrainingExampleDraft = {
   question: string;
   expectedAnswer: string;
   lang: string;
-  strengthVector: [number, number, number];
-  layers: [TrainingLayerDraft, TrainingLayerDraft, TrainingLayerDraft];
+  strengthVector: number[];
+  layers: TrainingLayerDraft[];
 };
 
 export function createDefaultTrainingDraft(): TrainingExampleDraft {
@@ -38,14 +38,14 @@ export function createDefaultTrainingDraft(): TrainingExampleDraft {
     lang: 'ru',
     strengthVector: [3, 8, 8],
     layers: [
-      { level: 1, label: 'Общение', builtinTopDomain: 'dialogue' },
-      { level: 2, label: 'Вопрос' },
-      { level: 3, label: 'дела' },
+      { level: 0, label: 'Общение', builtinTopDomain: 'dialogue' },
+      { level: 1, label: 'Вопрос' },
+      { level: 2, label: 'дела' },
     ],
   };
 }
 
-export function parseTrainingStrengthVector(value: string, fallback: [number, number, number] = [3, 8, 8]): [number, number, number] {
+export function parseTrainingStrengthVector(value: string, fallback: number[] = [3, 8, 8]): number[] {
   return normalizeStrengthVector(parseStrengthVector(value), fallback);
 }
 
@@ -54,11 +54,7 @@ export function buildTrainingExampleJsonl(draft: TrainingExampleDraft): string {
 }
 
 export function buildTrainingExamplePayload(draft: TrainingExampleDraft): Record<string, unknown> {
-  const layers = draft.layers.map((layer) => resolveLayerTarget(draft.lang, layer)) as [
-    { level: 1 | 2 | 3; label: string; uri: string },
-    { level: 1 | 2 | 3; label: string; uri: string },
-    { level: 1 | 2 | 3; label: string; uri: string },
-  ];
+  const layers = draft.layers.map((layer) => resolveLayerTarget(draft.lang, layer));
   const strengthVector = normalizeStrengthVector(draft.strengthVector);
   const layerTargets: Record<string, string[]> = {};
   const targetConcepts: string[] = [];
@@ -66,7 +62,9 @@ export function buildTrainingExamplePayload(draft: TrainingExampleDraft): Record
 
   layers.forEach((layer, index) => {
     layerTargets[String(index)] = [layer.uri];
-    targetConcepts.push(layer.uri);
+    if (!targetConcepts.includes(layer.uri)) {
+      targetConcepts.push(layer.uri);
+    }
     conceptLabels[layer.uri] = layer.label;
   });
 
@@ -88,16 +86,16 @@ export function buildTrainingExamplePayload(draft: TrainingExampleDraft): Record
 export function resolveLayerTarget(
   lang: string,
   layer: TrainingLayerDraft,
-): { level: 1 | 2 | 3; label: string; uri: string } {
-  if (layer.level === 1) {
+): { level: number; label: string; uri: string } {
+  if (layer.level === 0) {
     const domain = TRAINING_TOP_DOMAINS.find((item) => item.key === layer.builtinTopDomain) ?? TRAINING_TOP_DOMAINS[0];
     return {
-      level: 1,
+      level: 0,
       label: domain.label,
       uri: domain.uri,
     };
   }
-  const label = normalizeText(layer.label) || `Слой ${layer.level}`;
+  const label = normalizeText(layer.label) || `Плоскость ${layer.level}`;
   return {
     level: layer.level,
     label,
@@ -111,14 +109,14 @@ function normalizeText(value: string): string {
 
 function normalizeStrengthVector(
   value: readonly number[],
-  fallback: [number, number, number] = [3, 8, 8],
-): [number, number, number] {
-  const result = [...fallback] as [number, number, number];
-  value.slice(0, 3).forEach((item, index) => {
+  fallback: number[] = [3, 8, 8],
+): number[] {
+  const source = value.length ? value : fallback;
+  return source.map((item, index) => {
     const numeric = Number(item);
-    result[index] = Number.isFinite(numeric) ? Math.max(Math.trunc(numeric), 0) : fallback[index];
+    const fallbackValue = Number.isFinite(Number(fallback[index])) ? Math.trunc(Number(fallback[index])) : 0;
+    return Number.isFinite(numeric) ? Math.max(Math.trunc(numeric), 0) : fallbackValue;
   });
-  return result;
 }
 
 function slugSegment(value: string): string {

@@ -19,6 +19,8 @@ export type ConceptSummary = {
   label: string;
   language: string;
   layer: number;
+  layers?: number[];
+  active_layers?: number[];
   score: number;
   sources: string[];
 };
@@ -38,6 +40,11 @@ export type SignalStep = {
   end: string;
   relation: string;
   layer: number;
+  from_layer?: number | null;
+  to_layer?: number | null;
+  context_plane?: string | null;
+  layer_pheromone?: number;
+  projection_shift?: number;
   distance: number;
   remaining_strength?: number | null;
   edge_type: string;
@@ -66,6 +73,8 @@ export type GraphNode = {
   language: string;
   source: string;
   layer: number;
+  layers: number[];
+  active_layers: number[];
   metadata: Record<string, unknown>;
   concept_pheromone: number;
   suppression: number;
@@ -82,10 +91,14 @@ export type GraphEdge = {
   source: string;
   surface_text?: string | null;
   layer: number;
+  from_layer?: number | null;
+  to_layer?: number | null;
+  context_plane?: string | null;
   distance: number;
   edge_type: string;
   metadata: Record<string, unknown>;
   pheromone: number;
+  layer_pheromone?: number;
   route_stats: Record<string, unknown>;
   signal: { active: boolean; score: number };
 };

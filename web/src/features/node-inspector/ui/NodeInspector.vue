@@ -4,6 +4,8 @@
       <div class="row">
         <h3>{{ node.label }}</h3>
         <span class="badge">layer {{ node.layer }}</span>
+        <span v-for="layer in node.layers" :key="`layer-${layer}`" class="badge">plane {{ layer }}</span>
+        <span v-for="layer in node.active_layers" :key="`active-${layer}`" class="badge signal">active {{ layer }}</span>
         <span v-if="node.signal.active" class="badge signal">signal {{ node.signal.count }}</span>
       </div>
       <p class="uri">{{ node.uri }}</p>
@@ -35,14 +37,18 @@
       <div class="row">
         <h3>{{ edge.relation }}</h3>
         <span class="badge">layer {{ edge.layer }}</span>
+        <span v-if="edge.from_layer !== undefined && edge.from_layer !== null" class="badge">from {{ edge.from_layer }}</span>
+        <span v-if="edge.to_layer !== undefined && edge.to_layer !== null" class="badge">to {{ edge.to_layer }}</span>
         <span v-if="edge.signal.active" class="badge signal">signal {{ edge.signal.score.toFixed(3) }}</span>
       </div>
       <p class="uri">{{ edge.start }} → {{ edge.end }}</p>
       <div class="metrics">
         <span>weight: {{ edge.weight.toFixed(3) }}</span>
         <span>pheromone: {{ edge.pheromone.toFixed(3) }}</span>
+        <span>layer pheromone: {{ (edge.layer_pheromone ?? 1).toFixed(3) }}</span>
         <span>distance: {{ edge.distance.toFixed(3) }}</span>
         <span>{{ edge.edge_type }}</span>
+        <span v-if="edge.context_plane">context: {{ edge.context_plane }}</span>
       </div>
       <h4>Route stats</h4>
       <pre>{{ compactJson(edge.route_stats) }}</pre>
