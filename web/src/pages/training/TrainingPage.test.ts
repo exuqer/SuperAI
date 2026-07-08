@@ -2,17 +2,20 @@ import { flushPromises, shallowMount } from '@vue/test-utils';
 import { reactive } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import TrainingPage from './TrainingPage.vue';
+import jokeSamples from './fixtures/jokes.json';
 
 const { runtimeState, apiMock } = vi.hoisted(() => {
   const runtimeState = {
     loading: false,
+    graph: null as any,
+    lastAnalysis: null as any,
+    lastResult: null as any,
     trackJob: vi.fn(async () => undefined),
   };
   const apiMock = {
-    simpleTrain: vi.fn(),
-    learn: vi.fn(),
-    understand: vi.fn(),
-    getConceptDetail: vi.fn(),
+    resetNetwork: vi.fn(),
+    resonanceSeed: vi.fn(),
+    resonanceTrainQa: vi.fn(),
   };
   return { runtimeState, apiMock };
 });
@@ -30,84 +33,48 @@ vi.mock('@/shared/api/client', () => ({
 describe('TrainingPage', () => {
   beforeEach(() => {
     runtimeState.loading = false;
+    runtimeState.graph = null;
+    runtimeState.lastAnalysis = null;
+    runtimeState.lastResult = null;
     runtimeState.trackJob.mockReset();
-    apiMock.simpleTrain.mockReset();
-    apiMock.learn.mockReset();
-    apiMock.understand.mockReset();
-    apiMock.getConceptDetail.mockReset();
-    apiMock.simpleTrain.mockResolvedValue({ job_id: 'job-1', name: 'simple-train', status: 'queued', created_at: 1 });
-    apiMock.learn.mockResolvedValue({ job_id: 'job-2', name: 'learn', status: 'queued', created_at: 1 });
-    apiMock.understand.mockResolvedValue({
-      input_text: 'что делает программист?',
-      lang: 'ru',
-      tokens: [
-        {
-          raw_token: 'что',
-          lemma: 'что',
-          search_token: '',
-          concept_uri: null,
-          match_status: 'ignored_stop_word',
-          is_stop_word: true,
-          morphology: {},
-        },
-        {
-          raw_token: 'программист',
-          lemma: 'программист',
-          search_token: 'программист',
-          concept_uri: '/c/ru/программист',
-          match_status: 'candidate',
-          is_stop_word: false,
-          morphology: {},
-        },
-      ],
-      summary: { search_tokens: ['программист'] },
-    });
-    apiMock.getConceptDetail.mockResolvedValue({
-      node: {
-        uri: '/c/ru/программист',
-        metadata: {
-          label: 'программист',
-          meaning: 'человек, который пишет код',
-        },
-      },
-      incoming: [],
-      outgoing: [],
-      aliases: [],
-    });
+    apiMock.resetNetwork.mockReset();
+    apiMock.resonanceSeed.mockReset();
+    apiMock.resonanceTrainQa.mockReset();
+    apiMock.resetNetwork.mockResolvedValue({ job_id: 'job-r', name: 'reset-network', status: 'queued', created_at: 1 });
+    apiMock.resonanceSeed.mockResolvedValue({ job_id: 'job-s', name: 'resonance-seed', status: 'queued', created_at: 1 });
+    apiMock.resonanceTrainQa.mockResolvedValue({ job_id: 'job-qa', name: 'resonance-train-qa', status: 'queued', created_at: 1 });
   });
 
-  it('renders simple mode preview and submits to simple training endpoint', async () => {
+  it('renders question-answer training, submits auto qa payload, and supports full reset', async () => {
     const wrapper = shallowMount(TrainingPage);
     await flushPromises();
 
-    expect(wrapper.find('[data-testid="simple-mode"]').exists()).toBe(true);
-    expect(wrapper.text()).toContain('question tokens');
-    expect(wrapper.text()).toContain('answer tokens');
-    expect(wrapper.text()).toContain('программист');
-    expect((wrapper.findAll('textarea')[2].element as HTMLTextAreaElement).value).toBe(
-      'человек, который пишет код',
-    );
+    expect(wrapper.text()).toContain('Вопрос → ответ');
+    expect(wrapper.findAll('[data-testid="qa-annotation"]')).toHaveLength(0);
+    expect(wrapper.text()).toContain('lemmas');
+    expect(wrapper.text()).toContain('roles');
+    expect(wrapper.get('[data-testid="sample-select"]').element).toBeTruthy();
 
-    await wrapper.findAll('textarea')[0].setValue('что делает программист?');
-    await wrapper.findAll('textarea')[1].setValue('Программист пишет код на компьютере.');
-    await flushPromises();
-    await wrapper.get('.run-row button').trigger('click');
+    await wrapper.get('[data-testid="qa-train-button"]').trigger('click');
     await flushPromises();
 
-    expect(apiMock.simpleTrain).toHaveBeenCalledWith(
+    expect(apiMock.resonanceTrainQa).toHaveBeenCalledWith(
       expect.objectContaining({
-        question: 'что делает программист?',
-        expected_answer: 'Программист пишет код на компьютере.',
-        lang: 'ru',
-        concept_meanings: [
-          expect.objectContaining({
-            concept: '/c/ru/программист',
-            label: 'программист',
-            meaning: 'человек, который пишет код',
-          }),
-        ],
+        question: jokeSamples[0].question,
+        expected_answer: jokeSamples[0].expected_answer,
+        lang: jokeSamples[0].lang,
+        annotations: [],
       }),
     );
-    expect(runtimeState.trackJob).toHaveBeenCalledWith(expect.objectContaining({ job_id: 'job-1' }));
+    expect(runtimeState.trackJob).toHaveBeenCalledWith(expect.objectContaining({ job_id: 'job-qa' }));
+
+    await wrapper.get('[data-testid="full-reset-button"]').trigger('click');
+    await flushPromises();
+
+    expect(apiMock.resetNetwork).toHaveBeenCalledWith({ keep_builtin: false });
+    expect(runtimeState.graph).toBeNull();
+    expect(runtimeState.lastAnalysis).toBeNull();
+    expect(runtimeState.lastResult).toBeNull();
+    expect(runtimeState.trackJob).toHaveBeenCalledWith(expect.objectContaining({ job_id: 'job-r' }));
   });
 });

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import Any
 
@@ -25,6 +26,8 @@ def graph_snapshot(
     edge_type: str | None = None,
     relation: str | None = None,
     query: str | None = None,
+    plane_id: str | None = None,
+    area_id: str | None = None,
     min_pheromone: float | None = None,
     only_signal: bool = False,
     limit: int | None = None,
@@ -32,21 +35,23 @@ def graph_snapshot(
     ensure_query_language_edge(graph, query)
     signal = signal_index(result)
     query_value = query.casefold().strip() if query else ""
-    has_signal = bool(signal["nodes"] or signal["edges"])
+    unlimited = limit is not None and limit <= 0
+    effective_limit = None if unlimited else limit
+    has_signal = bool(signal["nodes"] or signal["edges"]) and not unlimited
     edges = []
     degree: Counter[str] = Counter()
 
     for edge in graph.edges():
         payload = _edge_payload(edge, checkpoint, signal)
-        if not _edge_matches(payload, layer, source, edge_type, relation, query_value, min_pheromone, only_signal):
+        if not _edge_matches(payload, layer, source, edge_type, relation, query_value, plane_id, area_id, min_pheromone, only_signal):
             continue
         edges.append(payload)
         degree[edge.start] += 1
         degree[edge.end] += 1
-        if not has_signal and limit is not None and len(edges) >= limit:
+        if not has_signal and effective_limit is not None and len(edges) >= effective_limit:
             break
 
-    focused = _focused_signal_graph(edges, signal, limit, only_signal) if has_signal else None
+    focused = _focused_signal_graph(edges, signal, effective_limit, only_signal) if has_signal else None
     if focused is not None:
         edges = focused["edges"]
         node_ids = focused["node_ids"]
@@ -55,9 +60,9 @@ def graph_snapshot(
         if not only_signal:
             for uri, node in graph.nodes.items():
                 payload = _node_payload(uri, node, checkpoint, degree, signal)
-                if _node_matches(payload, layer, source, query_value):
+                if _node_matches(payload, layer, source, query_value, plane_id, area_id):
                     node_ids.add(uri)
-                    if limit is not None and len(node_ids) >= limit and not edges:
+                    if effective_limit is not None and len(node_ids) >= effective_limit and not edges:
                         break
 
     nodes = [
@@ -353,6 +358,8 @@ def _edge_matches(
     edge_type: str | None,
     relation: str | None,
     query: str,
+    plane_id: str | None,
+    area_id: str | None,
     min_pheromone: float | None,
     only_signal: bool,
 ) -> bool:
@@ -363,6 +370,11 @@ def _edge_matches(
     if edge_type and edge.get("edge_type") != edge_type:
         return False
     if relation and edge.get("relation") != relation:
+        return False
+    metadata = edge.get("metadata", {})
+    if plane_id and edge.get("context_plane") != plane_id and (not isinstance(metadata, dict) or metadata.get("plane_id") != plane_id):
+        return False
+    if area_id and (not isinstance(metadata, dict) or metadata.get("area_id") != area_id):
         return False
     if min_pheromone is not None and float(edge.get("pheromone", 0.0)) < min_pheromone:
         return False
@@ -375,10 +387,22 @@ def _edge_matches(
     return True
 
 
-def _node_matches(node: dict[str, Any], layer: int | None, source: str | None, query: str) -> bool:
+def _node_matches(
+    node: dict[str, Any],
+    layer: int | None,
+    source: str | None,
+    query: str,
+    plane_id: str | None,
+    area_id: str | None,
+) -> bool:
     if layer is not None and layer not in _node_layers(node):
         return False
     if source and node.get("source") != source:
+        return False
+    metadata = node.get("metadata", {})
+    if plane_id and isinstance(metadata, dict) and metadata.get("plane_id") not in {plane_id, None}:
+        return False
+    if area_id and isinstance(metadata, dict) and metadata.get("area_id") not in {area_id, None}:
         return False
     if query and query not in f"{node.get('uri', '')} {node.get('label', '')}".casefold():
         return False
@@ -390,6 +414,31 @@ def _metadata_for_uri(uri: str, node: ConceptNode | None, checkpoint: Checkpoint
     definitions = checkpoint.metadata.get("concept_definitions", {})
     if isinstance(definitions, dict) and isinstance(definitions.get(uri), dict):
         metadata = {**dict(definitions[uri]), **metadata}
+    area_ids: list[str] = []
+    area_labels: list[str] = []
+    plane_ids: list[str] = []
+    canonical = checkpoint.canonical_uri(uri)
+    for key, value in getattr(checkpoint, "area_memberships", {}).items():
+        try:
+            payload = json.loads(str(key))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        node_uri = checkpoint.canonical_uri(str(payload.get("node_uri", "")))
+        if node_uri != canonical:
+            continue
+        area_id = str(payload.get("area_id", ""))
+        plane_id = str(payload.get("plane_id", ""))
+        if area_id and area_id not in area_ids:
+            area_ids.append(area_id)
+            raw_area = getattr(checkpoint, "areas", {}).get(area_id, {})
+            area_labels.append(str(raw_area.get("label") if isinstance(raw_area, dict) else area_id))
+        if plane_id and plane_id not in plane_ids:
+            plane_ids.append(plane_id)
+    if area_ids:
+        metadata["area_ids"] = area_ids
+        metadata["area_labels"] = area_labels
+    if plane_ids:
+        metadata["plane_ids"] = plane_ids
     return metadata
 
 

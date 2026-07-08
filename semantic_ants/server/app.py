@@ -22,6 +22,13 @@ from semantic_ants.server.schemas import (
     KozievDownloadRequest,
     JsonlJobRequest,
     ResetNetworkRequest,
+    ResonanceFeedbackRequest,
+    ResonanceGenerateRequest,
+    ResonanceResetRequest,
+    ResonanceSeedRequest,
+    ResonanceTrainFormRequest,
+    ResonanceTrainQaRequest,
+    ResonanceTrainSentenceRequest,
     SimpleTrainingRequest,
     SpcDownloadRequest,
     TatoebaDownloadRequest,
@@ -129,10 +136,12 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         edge_type: Optional[str] = None,
         relation: Optional[str] = None,
         query: Optional[str] = None,
+        plane_id: Optional[str] = None,
+        area_id: Optional[str] = None,
         min_pheromone: Optional[float] = None,
         only_signal: bool = False,
         result_id: Optional[str] = None,
-        limit: Optional[int] = Query(default=800, ge=1, le=5000),
+        limit: Optional[int] = Query(default=500, ge=0, le=5000),
     ) -> dict[str, Any]:
         return service.graph(
             {
@@ -141,6 +150,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 "edge_type": edge_type,
                 "relation": relation,
                 "query": query,
+                "plane_id": plane_id,
+                "area_id": area_id,
                 "min_pheromone": min_pheromone,
                 "only_signal": only_signal,
                 "result_id": result_id,
@@ -206,6 +217,50 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @app.post("/api/system/export")
     def export(payload: ExportRequest) -> dict[str, Any]:
         return service.submit_export(model_payload(payload)).to_dict()
+
+    @app.post("/api/resonance/reset-experiment")
+    def resonance_reset(payload: ResonanceResetRequest) -> dict[str, Any]:
+        return service.submit_resonance_reset(model_payload(payload)).to_dict()
+
+    @app.post("/api/resonance/seed")
+    def resonance_seed(payload: ResonanceSeedRequest) -> dict[str, Any]:
+        return service.submit_resonance_seed(model_payload(payload)).to_dict()
+
+    @app.post("/api/resonance/train-form")
+    def resonance_train_form(payload: ResonanceTrainFormRequest) -> dict[str, Any]:
+        return service.submit_resonance_train_form(model_payload(payload)).to_dict()
+
+    @app.post("/api/resonance/train-sentence")
+    def resonance_train_sentence(payload: ResonanceTrainSentenceRequest) -> dict[str, Any]:
+        return service.submit_resonance_train_sentence(model_payload(payload)).to_dict()
+
+    @app.post("/api/resonance/train-qa")
+    def resonance_train_qa(payload: ResonanceTrainQaRequest) -> dict[str, Any]:
+        return service.submit_resonance_train_qa(model_payload(payload)).to_dict()
+
+    @app.post("/api/resonance/generate")
+    def resonance_generate(payload: ResonanceGenerateRequest) -> dict[str, Any]:
+        return service.resonance_generate(model_payload(payload))
+
+    @app.post("/api/resonance/feedback")
+    def resonance_feedback(payload: ResonanceFeedbackRequest) -> dict[str, Any]:
+        return service.resonance_feedback(model_payload(payload))
+
+    @app.get("/api/resonance/memory")
+    def resonance_memory() -> dict[str, Any]:
+        return service.resonance_memory()
+
+    @app.get("/api/resonance/planes")
+    def resonance_planes() -> list[dict[str, Any]]:
+        return service.resonance_planes()
+
+    @app.get("/api/resonance/areas")
+    def resonance_areas() -> list[dict[str, Any]]:
+        return service.resonance_areas()
+
+    @app.get("/api/resonance/session-context")
+    def resonance_session_context(session_id: str = "default") -> dict[str, Any]:
+        return service.resonance_session_context(session_id)
 
     static_dir = _static_dir(runtime.static_dir)
     if static_dir is not None:

@@ -205,6 +205,7 @@ class Interpreter:
             count=3,
             navigator=self.navigator,
             model_dir=self.model_dir,
+            creativity=float(semantic_vector.get("creativity", 0.35) or 0.35),
         )
         return {
             "response": selected["response"],

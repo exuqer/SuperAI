@@ -50,6 +50,23 @@ export const useRuntimeStore = defineStore('runtime', () => {
     }
   }
 
+  async function resonanceChat(payload: Record<string, unknown>) {
+    loading.value = true;
+    error.value = null;
+    try {
+      const response = await api.resonanceGenerate(payload);
+      lastAnalysis.value = response;
+      lastResult.value = response.result;
+      graph.value = response.graph;
+      return response;
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      loading.value = false;
+    }
+  }
+
   async function loadGraph(params: Record<string, unknown> = {}) {
     graph.value = await api.getGraph(params);
     return graph.value;
@@ -81,6 +98,7 @@ export const useRuntimeStore = defineStore('runtime', () => {
     loadConfig,
     analyze,
     chat,
+    resonanceChat,
     loadGraph,
     refreshJobs,
     trackJob,

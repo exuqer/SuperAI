@@ -22,7 +22,7 @@ describe('AppShell', () => {
     runtimeState.loadConfig.mockReset();
   });
 
-  it('shows the understand page in the sidebar menu', () => {
+  it('shows only the experiment pages in the sidebar menu', () => {
     const wrapper = shallowMount(AppShell, {
       global: {
         stubs: {
@@ -31,9 +31,10 @@ describe('AppShell', () => {
       },
     });
 
-    expect(wrapper.text()).toContain('Пониматель');
+    expect(wrapper.text()).toContain('Диалог');
+    expect(wrapper.text()).toContain('Обучение');
+    expect(wrapper.text()).toContain('Граф');
     const links = wrapper.findAllComponents(RouterLinkStub);
-    expect(links.some((link) => link.props('to') === '/understand')).toBe(true);
-    expect(links.some((link) => link.props('to') === '/decode')).toBe(true);
+    expect(links.map((link) => link.props('to'))).toEqual(['/chat', '/training', '/graph']);
   });
 });

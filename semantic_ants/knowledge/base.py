@@ -858,6 +858,7 @@ def _load_edges(checkpoint: Checkpoint) -> int:
 
 
 def _load_responses(checkpoint: Checkpoint) -> int:
+    total = 0
     for concept_uri, label in DIALOGUE_CONCEPTS.items():
         checkpoint.register_canonical_concept(concept_uri, label=label, source_uri=concept_uri)
         checkpoint.remember_concept_label(concept_uri, label)
@@ -871,7 +872,36 @@ def _load_responses(checkpoint: Checkpoint) -> int:
             edge_type="domain",
             metadata={"top_domain": "dialogue", "builtin_dialogue": True},
         )
-    return 0
+    for stimulus, concepts, answer in [
+        (
+            "привет",
+            ["/c/ru/привет", "/m/dialogue/greeting", "/m/top/dialogue"],
+            "Привет! Чем могу помочь?",
+        ),
+        (
+            "как дела?",
+            ["/m/dialogue/wellbeing_question", "/m/top/dialogue"],
+            "Нормально, спасибо. А у тебя?",
+        ),
+        (
+            "что такое солнце",
+            ["/c/ru/солнце", "/m/basic/sun", "/m/top/nature"],
+            "Солнце — это звезда: дает свет и тепло.",
+        ),
+    ]:
+        before = len(checkpoint.accepted_answers)
+        checkpoint.remember_accepted_answer(
+            stimulus=stimulus,
+            semantic_prompt="builtin exact response",
+            concepts=concepts,
+            answer=answer,
+            reward=3.0,
+            lang="ru",
+            source_lang="ru",
+        )
+        if len(checkpoint.accepted_answers) != before:
+            total += 1
+    return total
 
 
 def _load_alphabets(checkpoint: Checkpoint) -> int:

@@ -507,6 +507,12 @@ def _contains_term_sequence(haystack: list[str], clean_sequence: str) -> bool:
 
 def _item_answers(item: dict[str, Any]) -> list[str]:
     values: list[str] = []
+    responses = item.get("responses")
+    if isinstance(responses, list):
+        for value in responses:
+            clean = " ".join(str(value).split())
+            if clean:
+                values.append(clean)
     for key in ("answer", "response"):
         value = " ".join(str(item.get(key, "")).split())
         if value:

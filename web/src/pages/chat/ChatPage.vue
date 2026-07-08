@@ -7,7 +7,7 @@
             <p class="eyebrow">Диалог</p>
             <h2>session_id=default</h2>
             <p class="muted">
-              История загружается из `chat_sessions`, а ответы пишутся в persistent session.
+              Режим resonance хранит контекст сессии, активные плоскости и tentative-формы.
             </p>
           </div>
           <div class="row">
@@ -32,6 +32,24 @@
               <p>{{ turn.text }}</p>
               <div v-if="turn.concepts?.length" class="concept-tags">
                 <span v-for="concept in turn.concepts" :key="concept" class="badge">{{ concept }}</span>
+              </div>
+              <div v-if="turn.role === 'assistant'" class="bubble-actions">
+                <button
+                  type="button"
+                  :data-feedback-result-id="turn.result_id"
+                  data-feedback-score="5"
+                  @click="feedback(turn.result_id, 5)"
+                >
+                  Хорошо
+                </button>
+                <button
+                  type="button"
+                  :data-feedback-result-id="turn.result_id"
+                  data-feedback-score="1"
+                  @click="feedback(turn.result_id, 1)"
+                >
+                  Плохо
+                </button>
               </div>
             </article>
           </template>
@@ -78,9 +96,14 @@
             <label>
               Mode
               <select v-model="mode">
+                <option value="resonance">resonance</option>
                 <option value="hybrid">hybrid</option>
                 <option value="graph">graph</option>
               </select>
+            </label>
+            <label>
+              Creativity
+              <input v-model.number="creativity" type="number" min="0" max="1" step="0.05" />
             </label>
             <label>
               Strength vector
@@ -108,8 +131,8 @@
               <p class="answer">{{ runtime.lastAnalysis.result.response }}</p>
               <p class="muted">{{ runtime.lastAnalysis.result.summary }}</p>
               <div class="row">
-                <button type="button" @click="feedback(5)">+ feedback</button>
-                <button type="button" @click="feedback(1)">- feedback</button>
+                <span class="badge">plane {{ activePlane }}</span>
+                <span class="badge signal" v-if="tentativeForms.length">tentative {{ tentativeForms.length }}</span>
               </div>
             </section>
 
@@ -158,10 +181,11 @@ const runtime = useRuntimeStore();
 const text = ref('');
 const sessionId = 'default';
 const lang = ref('auto');
-const mode = ref<'graph' | 'hybrid'>('hybrid');
+const mode = ref<'resonance' | 'graph' | 'hybrid'>('resonance');
 const strengthVector = ref('3');
 const ants = ref(32);
 const depth = ref(4);
+const creativity = ref(0.35);
 const sessions = ref<ChatSession[]>([]);
 const selectedNode = ref<GraphNode | null>(null);
 const selectedEdge = ref<GraphEdge | null>(null);
@@ -170,6 +194,11 @@ const historyRef = ref<HTMLElement | null>(null);
 
 const activeSession = computed(() => sessions.value.find((item) => item.session_id === sessionId) ?? null);
 const turns = computed(() => activeSession.value?.turns ?? []);
+const activePlane = computed(() => String(runtime.lastAnalysis?.result.semantic_vector?.active_plane ?? ''));
+const tentativeForms = computed(() => {
+  const values = runtime.lastAnalysis?.result.semantic_vector?.tentative_forms;
+  return Array.isArray(values) ? values : [];
+});
 
 async function refreshSessions() {
   sessions.value = await api.getSessions();
@@ -185,15 +214,25 @@ function scrollHistory() {
 
 async function send() {
   if (!text.value.trim()) return;
-  await runtime.chat({
-    text: text.value,
-    session_id: sessionId,
-    lang: lang.value,
-    mode: mode.value,
-    ants: ants.value,
-    depth: depth.value,
-    strength_vector: parseStrengthVector(strengthVector.value),
-  });
+  if (mode.value === 'resonance') {
+    await runtime.resonanceChat({
+      text: text.value,
+      session_id: sessionId,
+      lang: lang.value === 'auto' ? 'ru' : lang.value,
+      ants: ants.value,
+      creativity: creativity.value,
+    });
+  } else {
+    await runtime.chat({
+      text: text.value,
+      session_id: sessionId,
+      lang: lang.value,
+      mode: mode.value,
+      ants: ants.value,
+      depth: depth.value,
+      strength_vector: parseStrengthVector(strengthVector.value),
+    });
+  }
   text.value = '';
   await refreshSessions();
 }
@@ -203,9 +242,15 @@ async function resetSession() {
   await refreshSessions();
 }
 
-async function feedback(score: number) {
-  const resultId = runtime.lastAnalysis?.result.result_id;
+async function feedback(resultId: string, score: number) {
   if (!resultId) return;
+  if (
+    runtime.lastAnalysis?.result.result_id === resultId &&
+    runtime.lastAnalysis?.result.semantic_vector?.mode === 'resonance'
+  ) {
+    await api.resonanceFeedback({ result_id: resultId, score, session_id: sessionId });
+    return;
+  }
   await api.sendFeedback({ result_id: resultId, score });
 }
 
@@ -312,6 +357,13 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.bubble-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .empty-state {

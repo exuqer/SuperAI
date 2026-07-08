@@ -44,6 +44,18 @@ class Checkpoint:
     chat_sessions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     mini_generator: dict[str, Any] = field(default_factory=dict)
+    planes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    plane_distance_overrides: dict[str, float] = field(default_factory=dict)
+    plane_pheromones: dict[str, float] = field(default_factory=dict)
+    context_plane_pheromones: dict[str, float] = field(default_factory=dict)
+    areas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    area_memberships: dict[str, float] = field(default_factory=dict)
+    area_bridges: list[dict[str, Any]] = field(default_factory=list)
+    morph_forms: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    morph_patterns: dict[str, dict[str, Any]] = field(default_factory=dict)
+    syntax_skeletons: dict[str, dict[str, Any]] = field(default_factory=dict)
+    session_contexts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    resonance_feedback: list[dict[str, Any]] = field(default_factory=list)
     last_result_id: str | None = None
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     examples_seen: int = 0
@@ -310,6 +322,7 @@ class Checkpoint:
                 "source_lang": source_lang or _detect_lang_from_concepts(concepts) or detect_language(clean_response),
                 "answer": "",
                 "response": "",
+                "responses": [],
                 "weight": 0.0,
             },
         )
@@ -319,6 +332,11 @@ class Checkpoint:
         item["source_lang"] = source_lang or _detect_lang_from_concepts(concepts) or detect_language(clean_response)
         item["answer"] = clean_response
         item["response"] = clean_response
+        responses = item.setdefault("responses", [])
+        if isinstance(responses, list) and clean_response not in responses:
+            responses.append(clean_response)
+        elif not isinstance(responses, list):
+            item["responses"] = [clean_response]
         item["weight"] = float(item.get("weight", 0.0)) + amount
         for concept in concepts:
             self.register_canonical_concept(concept, aliases=[concept.split("/")[-1]], lang=response_lang, source_uri=concept)
@@ -556,7 +574,7 @@ class Checkpoint:
                 and existing.get("end") == end
                 and existing.get("relation") == relation
             ):
-                existing["weight"] = max(float(existing.get("weight", 1.0)), weight)
+                existing["weight"] = min(max(float(existing.get("weight", 1.0)), weight) + max(weight, 0.1) * 0.05, 25.0)
                 existing.setdefault("layer", layer)
                 if existing.get("from_layer") is None and from_layer is not None:
                     existing["from_layer"] = from_layer
@@ -564,7 +582,7 @@ class Checkpoint:
                     existing["to_layer"] = to_layer
                 if existing.get("context_plane") is None and context_plane is not None:
                     existing["context_plane"] = context_plane
-                existing.setdefault("distance", distance)
+                existing["distance"] = min(float(existing.get("distance", distance)), distance)
                 existing.setdefault("edge_type", edge_type)
                 if metadata:
                     existing["metadata"] = {**dict(existing.get("metadata", {})), **dict(metadata)}
@@ -649,6 +667,18 @@ class Checkpoint:
             "chat_sessions": self.chat_sessions,
             "metadata": self.metadata,
             "mini_generator": self.mini_generator,
+            "planes": self.planes,
+            "plane_distance_overrides": self.plane_distance_overrides,
+            "plane_pheromones": self.plane_pheromones,
+            "context_plane_pheromones": self.context_plane_pheromones,
+            "areas": self.areas,
+            "area_memberships": self.area_memberships,
+            "area_bridges": self.area_bridges,
+            "morph_forms": self.morph_forms,
+            "morph_patterns": self.morph_patterns,
+            "syntax_skeletons": self.syntax_skeletons,
+            "session_contexts": self.session_contexts,
+            "resonance_feedback": self.resonance_feedback,
             "last_result_id": self.last_result_id,
             "results": self.results,
             "examples_seen": self.examples_seen,
@@ -689,6 +719,26 @@ class Checkpoint:
             },
             metadata=dict(data.get("metadata", {})),
             mini_generator=dict(data.get("mini_generator", {})),
+            planes=dict(data.get("planes", {})),
+            plane_distance_overrides=dict(data.get("plane_distance_overrides", {})),
+            plane_pheromones=dict(data.get("plane_pheromones", {})),
+            context_plane_pheromones=dict(data.get("context_plane_pheromones", {})),
+            areas=dict(data.get("areas", {})),
+            area_memberships=dict(data.get("area_memberships", {})),
+            area_bridges=list(data.get("area_bridges", [])),
+            morph_forms={
+                str(key): list(value)
+                for key, value in dict(data.get("morph_forms", {})).items()
+                if isinstance(value, list)
+            },
+            morph_patterns=dict(data.get("morph_patterns", {})),
+            syntax_skeletons=dict(data.get("syntax_skeletons", {})),
+            session_contexts={
+                str(key): dict(value)
+                for key, value in dict(data.get("session_contexts", {})).items()
+                if isinstance(value, dict)
+            },
+            resonance_feedback=list(data.get("resonance_feedback", [])),
             last_result_id=data.get("last_result_id"),
             results=dict(data.get("results", {})),
             examples_seen=int(data.get("examples_seen", 0)),
@@ -821,6 +871,11 @@ def _normalize_patterns(
         concepts = [str(value) for value in item.get("concepts", []) if value]
         lang_hint = str(item.get("lang") or fallback_lang)
         raw_answer = _clean_answer(item)
+        response_values = item.get("responses")
+        if isinstance(response_values, list) and response_values:
+            responses = _unique_text_values(response_values)
+        else:
+            responses = _unique_text_values([str(item.get("answer", "")), str(item.get("response", "")), raw_answer])
         answer_concepts = item.get("answer_concepts")
         if not isinstance(answer_concepts, list) or not answer_concepts:
             answer_concepts = _text_to_concepts(raw_answer, lang=lang_hint, checkpoint=_checkpoint_from_data(checkpoint_data))
@@ -843,6 +898,7 @@ def _normalize_patterns(
             "concepts": list(dict.fromkeys(CanonicalResolver(None).canonical_uri(value) for value in concepts if value)),
             "answer_concepts": list(dict.fromkeys(CanonicalResolver(None).canonical_uri(value) for value in answer_concept_values if value)),
             "answer": raw_answer,
+            "responses": responses,
             "lang": lang,
             "source_lang": source_lang,
             "reward": float(item.get("reward", 0.0)),
@@ -880,11 +936,17 @@ def _normalize_response_memory(values: Any, checkpoint_data: dict[str, Any]) -> 
             text_values=(str(item.get("stimulus", "")), str(item.get("semantic_prompt", "")), raw_answer),
             fallback="auto",
         )
+        response_values = item.get("responses")
+        if isinstance(response_values, list) and response_values:
+            responses = _unique_text_values(response_values)
+        else:
+            responses = _unique_text_values([str(item.get("answer", "")), str(item.get("response", "")), raw_answer])
         normalized[str(key)] = {
             "concepts": list(dict.fromkeys(checkpoint.canonical_uri(value) for value in concepts if value)),
             "answer_concepts": list(dict.fromkeys(checkpoint.canonical_uri(value) for value in answer_concept_values if value)),
             "answer": raw_answer,
             "response": raw_answer,
+            "responses": responses,
             "lang": lang,
             "source_lang": source_lang,
             "weight": float(item.get("weight", 0.0)),
@@ -957,6 +1019,26 @@ def _checkpoint_from_data(data: dict[str, Any]) -> Checkpoint:
         chat_sessions={},
         metadata=dict(data.get("metadata", {})),
         mini_generator=dict(data.get("mini_generator", {})),
+        planes=dict(data.get("planes", {})),
+        plane_distance_overrides=dict(data.get("plane_distance_overrides", {})),
+        plane_pheromones=dict(data.get("plane_pheromones", {})),
+        context_plane_pheromones=dict(data.get("context_plane_pheromones", {})),
+        areas=dict(data.get("areas", {})),
+        area_memberships=dict(data.get("area_memberships", {})),
+        area_bridges=list(data.get("area_bridges", [])),
+        morph_forms={
+            str(key): list(value)
+            for key, value in dict(data.get("morph_forms", {})).items()
+            if isinstance(value, list)
+        },
+        morph_patterns=dict(data.get("morph_patterns", {})),
+        syntax_skeletons=dict(data.get("syntax_skeletons", {})),
+        session_contexts={
+            str(key): dict(value)
+            for key, value in dict(data.get("session_contexts", {})).items()
+            if isinstance(value, dict)
+        },
+        resonance_feedback=list(data.get("resonance_feedback", [])),
         last_result_id=data.get("last_result_id"),
         results={},
         examples_seen=int(data.get("examples_seen", 0)),
@@ -971,6 +1053,18 @@ def _clean_answer(item: dict[str, Any]) -> str:
         if clean:
             return clean
     return ""
+
+
+def _unique_text_values(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        clean = " ".join(str(value).split())
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+    return result
 
 
 def _replace_with_retry(tmp: Path, target: Path, attempts: int = 20) -> None:
@@ -991,12 +1085,25 @@ def _upgrade_checkpoint_object(checkpoint: Checkpoint) -> Checkpoint:
         "surface_forms": {},
         "concept_layer_pheromones": {},
         "edge_layer_pheromones": {},
+        "planes": {},
+        "plane_distance_overrides": {},
+        "plane_pheromones": {},
+        "context_plane_pheromones": {},
+        "areas": {},
+        "area_memberships": {},
+        "area_bridges": [],
+        "morph_forms": {},
+        "morph_patterns": {},
+        "syntax_skeletons": {},
+        "session_contexts": {},
+        "resonance_feedback": [],
     }
     for key, value in defaults.items():
         if not hasattr(checkpoint, key):
             setattr(checkpoint, key, value)
     if int(getattr(checkpoint, "version", 1)) < 6 or not getattr(checkpoint, "canonical_concepts", {}):
         migrate_checkpoint(checkpoint)
+    checkpoint.version = max(int(getattr(checkpoint, "version", 1)), 6)
     return checkpoint
 
 

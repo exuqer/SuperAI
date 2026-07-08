@@ -26,14 +26,8 @@ import { useRuntimeStore } from '@/app/stores/runtime';
 const runtime = useRuntimeStore();
 const nav = [
   { path: '/chat', title: 'Диалог' },
-  { path: '/understand', title: 'Пониматель' },
-  { path: '/decode', title: 'Декодер' },
   { path: '/training', title: 'Обучение' },
-  { path: '/layers', title: 'Слои' },
-  { path: '/concepts', title: 'Понятия' },
   { path: '/graph', title: 'Граф' },
-  { path: '/memory', title: 'Память' },
-  { path: '/system', title: 'Система' },
 ];
 
 onMounted(() => {

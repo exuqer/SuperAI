@@ -4,194 +4,173 @@
       <section class="panel training-panel">
         <div class="training-header">
           <div>
-            <p class="eyebrow">Конструктор примера</p>
-            <h2>Вопрос → ожидаемый ответ</h2>
+            <p class="eyebrow">Resonance training</p>
+            <h2>Вопрос → ответ</h2>
             <p class="muted">
-              Простой режим сам строит связи по токенам; расширенный оставляет ручной JSONL-конструктор контекстных плоскостей.
+              Основной сценарий теперь автоматический: вводите вопрос и ожидаемый ответ, а разнесение по ролям и плоскостям
+              делает backend. Ручная разметка спрятана в advanced.
             </p>
           </div>
-          <div class="row">
-            <button
-              type="button"
-              :class="{ primary: mode === 'simple' }"
-              data-testid="simple-mode"
-              @click="mode = 'simple'"
-            >
-              Простой
+          <div class="row header-actions">
+            <button class="danger" type="button" data-testid="full-reset-button" @click="resetNetwork">
+              Полный сброс
             </button>
-            <button
-              type="button"
-              :class="{ primary: mode === 'advanced' }"
-              @click="mode = 'advanced'"
-            >
-              Расширенный
-            </button>
+            <button class="primary" type="button" @click="seedResonance">Seed grammar</button>
           </div>
         </div>
 
-        <div v-if="mode === 'simple'" class="toolbar training-toolbar">
+        <div class="toolbar training-toolbar">
+          <label>
+            Sample
+            <select v-model.number="selectedSample" data-testid="sample-select" @change="loadSample">
+              <option v-for="(sample, index) in jokeSamples" :key="sample.id ?? index" :value="index">
+                {{ sample.id ?? `sample-${index + 1}` }}
+              </option>
+            </select>
+          </label>
           <label>
             Lang
-            <select v-model="simpleDraft.lang">
-              <option value="auto">auto</option>
+            <select v-model="qaDraft.lang">
               <option value="ru">ru</option>
               <option value="en">en</option>
             </select>
           </label>
           <label>
+            Session
+            <input v-model="qaDraft.sessionId" placeholder="default" />
+          </label>
+          <label>
+            Plane
+            <input v-model="qaDraft.planeId" placeholder="auto" />
+          </label>
+          <label>
             Epochs
-            <input v-model.number="simpleDraft.epochs" type="number" min="1" />
+            <input v-model.number="qaDraft.epochs" type="number" min="1" />
           </label>
           <label>
             Reward
-            <input v-model.number="simpleDraft.reward" type="number" min="0.1" step="0.1" />
+            <input v-model.number="qaDraft.reward" type="number" min="0.1" step="0.1" />
           </label>
           <label class="wide">
             Вопрос
-            <textarea v-model="simpleDraft.question" rows="3" placeholder="что делает программист?"></textarea>
+            <textarea v-model="qaDraft.question" rows="3" placeholder="расскажи анекдот"></textarea>
           </label>
           <label class="wide">
             Ожидаемый ответ
             <textarea
-              v-model="simpleDraft.expectedAnswer"
+              v-model="qaDraft.expectedAnswer"
               rows="4"
-              placeholder="Программист пишет код на компьютере."
+              placeholder="Короткий анекдот для обучения."
             ></textarea>
           </label>
         </div>
 
-        <section v-if="mode === 'simple'" class="meanings-block">
+        <div class="row advanced-toggle">
+          <button type="button" @click="showAdvanced = !showAdvanced">
+            {{ showAdvanced ? 'Скрыть advanced' : 'Показать advanced' }}
+          </button>
+          <span class="muted">Нужен только если хотите вручную переопределить слоты, роли или плоскости.</span>
+        </div>
+
+        <section v-if="showAdvanced" class="annotation-block">
           <div class="row preview-head">
-            <h3>Смыслы понятий</h3>
-            <button type="button" @click="addMeaning">+</button>
+            <div>
+              <h3>Разметка ответа</h3>
+              <p class="muted">Плоскостей может быть несколько: `language:ru, dev:filesystem`.</p>
+            </div>
+            <div class="row">
+              <button type="button" @click="syncAnnotations(true)">Пересобрать</button>
+              <button type="button" @click="addAnnotation">+</button>
+            </div>
           </div>
-          <p class="muted">
-            Строки строятся из токенов вопроса. Если смысл уже сохранен в памяти, поле заполнится автоматически.
-          </p>
-          <article v-for="(meaning, index) in simpleDraft.conceptMeanings" :key="meaning.key" class="meaning-row">
+
+          <article
+            v-for="(annotation, index) in qaDraft.annotations"
+            :key="annotation.key"
+            class="annotation-row"
+            data-testid="qa-annotation"
+          >
             <label>
-              Токен
-              <input v-model="meaning.token" placeholder="осень" />
+              Token
+              <input v-model="annotation.token" />
+            </label>
+            <label>
+              Lemma
+              <input v-model="annotation.lemma" />
+            </label>
+            <label>
+              Role
+              <select v-model="annotation.role">
+                <option value="subject">subject</option>
+                <option value="predicate">predicate</option>
+                <option value="object">object</option>
+                <option value="instrument">instrument</option>
+                <option value="location">location</option>
+                <option value="modifier">modifier</option>
+              </select>
+            </label>
+            <label>
+              POS
+              <select v-model="annotation.pos">
+                <option value="NOUN">NOUN</option>
+                <option value="VERB">VERB</option>
+                <option value="ADJ">ADJ</option>
+              </select>
             </label>
             <label>
               Concept URI
-              <input v-model="meaning.concept" placeholder="/c/ru/программист" />
+              <input v-model="annotation.concept" placeholder="/c/ru/дерево" />
             </label>
             <label>
-              Label
-              <input v-model="meaning.label" placeholder="программист" />
+              Planes
+              <input v-model="annotation.planes" placeholder="language:ru, dev:filesystem" />
             </label>
-            <label class="wide">
-              Meaning
-              <textarea v-model="meaning.meaning" rows="2" placeholder="человек, который пишет код"></textarea>
+            <label>
+              Gram JSON
+              <input v-model="annotation.gramJson" placeholder='{"case":"nomn","number":"sing"}' />
             </label>
-            <button type="button" @click="removeMeaning(index)">Удалить</button>
+            <label>
+              Prep
+              <input v-model="annotation.preposition" placeholder="на" />
+            </label>
+            <button type="button" @click="removeAnnotation(index)">Удалить</button>
           </article>
         </section>
 
-        <section v-if="mode === 'simple'" class="preview-card">
+        <section class="preview-card">
           <div class="row preview-head">
             <h3>Preview</h3>
-            <span class="badge">simple summary</span>
+            <span class="badge">resonance QA</span>
           </div>
-          <dl class="simple-preview">
-            <dt>question tokens</dt>
-            <dd>{{ simplePreview.questionTokens.join(', ') || '—' }}</dd>
+          <dl class="qa-preview">
+            <dt>sample</dt>
+            <dd>{{ currentSampleLabel }}</dd>
+            <dt>question</dt>
+            <dd>{{ qaDraft.question || '—' }}</dd>
+            <dt>expected answer</dt>
+            <dd>{{ qaDraft.expectedAnswer || '—' }}</dd>
             <dt>answer tokens</dt>
-            <dd>{{ simplePreview.answerTokens.join(', ') || '—' }}</dd>
-            <dt>meaning tokens</dt>
-            <dd>{{ simplePreview.meaningTokens.join(', ') || '—' }}</dd>
-            <dt>estimated edges</dt>
-            <dd>{{ simplePreview.estimatedEdges }}</dd>
+            <dd>{{ preview.answerTokens.join(', ') || '—' }}</dd>
+            <dt>lemmas</dt>
+            <dd>{{ preview.lemmas.join(', ') || '—' }}</dd>
+            <dt>roles</dt>
+            <dd>{{ preview.roles.join(', ') || '—' }}</dd>
+            <dt>planes</dt>
+            <dd>{{ preview.planes.join(', ') || 'auto' }}</dd>
           </dl>
         </section>
 
-        <div v-if="mode === 'advanced'" class="toolbar training-toolbar">
-          <label>
-            Lang
-            <select v-model="draft.lang">
-              <option value="ru">ru</option>
-              <option value="en">en</option>
-            </select>
-          </label>
-          <label class="wide">
-            Вопрос
-            <textarea v-model="draft.question" rows="3" placeholder="как дела?"></textarea>
-          </label>
-          <label class="wide">
-            Ожидаемый ответ
-            <textarea
-              v-model="draft.expectedAnswer"
-              rows="4"
-              placeholder="Нормально, спасибо. А у тебя?"
-            ></textarea>
-          </label>
-          <label>
-            strength_vector
-            <input v-model="strengthVectorInput" placeholder="3, 8, 8" />
-          </label>
-          <label>
-            Epochs
-            <input v-model.number="epochs" type="number" min="1" />
-          </label>
-        </div>
-
-        <details v-if="mode === 'advanced'" class="layers-block" open>
-          <summary>
-            <span>Контекстные плоскости</span>
-            <span class="muted">JSON layers 0..N</span>
-          </summary>
-          <div class="layers-grid">
-            <article v-for="(layer, index) in draft.layers" :key="layer.level" class="layer-card">
-              <div class="layer-card-head">
-                <div>
-                  <strong>Плоскость {{ layer.level }}</strong>
-                  <p class="muted">JSON layer {{ layer.level }}</p>
-                </div>
-                <div class="row">
-                  <span class="badge">{{ resolvedLayers[index].uri }}</span>
-                  <button v-if="draft.layers.length > 1" type="button" @click="removeLayer(index)">Удалить</button>
-                </div>
-              </div>
-              <label v-if="layer.level === 0">
-                Builtin top domain
-                <select v-model="layer.builtinTopDomain">
-                  <option v-for="option in topDomainOptions" :key="option.key" :value="option.key">
-                    {{ option.label }}
-                  </option>
-                </select>
-              </label>
-              <label v-else>
-                Label
-                <input
-                  v-model="layer.label"
-                  :placeholder="layer.level === 1 ? 'Вопрос' : 'дела'"
-                />
-              </label>
-              <div class="layer-footnote">
-                <span class="badge">{{ resolvedLayers[index].label }}</span>
-                <span class="muted">{{ layer.level === 0 ? 'builtin top domain' : resolvedLayers[index].uri }}</span>
-              </div>
-            </article>
-          </div>
-          <div class="row layer-actions">
-            <button type="button" @click="addLayer">Добавить плоскость</button>
-          </div>
-        </details>
-
-        <section v-if="mode === 'advanced'" class="preview-card">
-          <div class="row preview-head">
-            <h3>Preview</h3>
-            <span class="badge">JSONL</span>
-          </div>
-          <pre>{{ previewJsonl }}</pre>
-        </section>
-
         <div class="row run-row">
-          <button class="primary" type="button" :disabled="runtime.loading" @click="submit">
-            Запустить
+          <button
+            class="primary"
+            type="button"
+            data-testid="qa-train-button"
+            :disabled="runtime.loading"
+            @click="submit"
+          >
+            Train question-answer
           </button>
-          <span class="muted">{{ submitHint }}</span>
+          <span class="muted">Отправляет пример через `/api/resonance/train-qa` без обязательной ручной разметки.</span>
         </div>
       </section>
 
@@ -205,245 +184,301 @@ import { computed, reactive, ref, watch } from 'vue';
 import { useRuntimeStore } from '@/app/stores/runtime';
 import JobPanel from '@/features/job-panel/ui/JobPanel.vue';
 import { api } from '@/shared/api/client';
-import type { Job, UnderstandingToken } from '@/shared/api/types';
-import {
-  buildTrainingExampleJsonl,
-  createDefaultTrainingDraft,
-  parseTrainingStrengthVector,
-  resolveLayerTarget,
-  TRAINING_TOP_DOMAINS,
-  type TrainingExampleDraft,
-} from './model/training-builder';
 
-const runtime = useRuntimeStore();
-const mode = ref<'simple' | 'advanced'>('simple');
-const draft = reactive<TrainingExampleDraft>(createDefaultTrainingDraft());
-const simpleDraft = reactive({
-  question: 'что делает программист?',
-  expectedAnswer: 'Программист пишет код на компьютере.',
-  lang: 'ru',
-  epochs: 1,
-  reward: 1,
-  conceptMeanings: [] as SimpleMeaningDraft[],
-});
-const strengthVectorInput = ref('3, 8, 8');
-const epochs = ref(1);
-const topDomainOptions = TRAINING_TOP_DOMAINS;
-let meaningSyncVersion = 0;
+import jokeSamples from './fixtures/jokes.json';
 
-type SimpleMeaningDraft = {
-  key: string;
-  token: string;
-  concept: string;
-  label: string;
-  meaning: string;
-  auto: boolean;
+type JokeSample = {
+  id?: string;
+  question: string;
+  expected_answer: string;
+  lang?: string;
 };
 
-watch(
-  strengthVectorInput,
-  (value) => {
-    draft.strengthVector = parseTrainingStrengthVector(value, draft.strengthVector);
-  },
-  { immediate: true },
-);
+type AnnotationDraft = {
+  key: string;
+  index: number;
+  token: string;
+  surface: string;
+  lemma: string;
+  role: string;
+  pos: string;
+  concept: string;
+  planes: string;
+  gramJson: string;
+  preposition: string;
+};
 
-watch(
-  () => [simpleDraft.question, simpleDraft.lang] as const,
-  () => {
-    void syncMeaningsFromQuestion();
-  },
-  { immediate: true },
-);
+const runtime = useRuntimeStore();
+const jokeList = jokeSamples as JokeSample[];
+const firstSample = jokeList[0] ?? {
+  question: 'расскажи анекдот',
+  expected_answer: 'Короткий анекдот для проверки.',
+  lang: 'ru',
+};
 
-const resolvedLayers = computed(() => draft.layers.map((layer) => resolveLayerTarget(draft.lang, layer)));
-const previewJsonl = computed(() => buildTrainingExampleJsonl(draft));
-const simplePreview = computed(() => {
-  const questionTokens = simpleDraft.conceptMeanings.map((item) => item.token).filter(Boolean);
-  const answerTokens = simpleTokenize(simpleDraft.expectedAnswer);
-  const meaningTokens = simpleDraft.conceptMeanings.flatMap((item) => simpleTokenize(item.meaning));
-  const estimatedEdges =
-    questionTokens.length * answerTokens.length +
-    Math.max(answerTokens.length - 1, 0) +
-    questionTokens.length * meaningTokens.length +
-    simpleDraft.conceptMeanings.filter((item) => item.concept || item.label).length * meaningTokens.length;
+const qaDraft = reactive({
+  question: firstSample.question,
+  expectedAnswer: firstSample.expected_answer,
+  lang: firstSample.lang ?? 'ru',
+  sessionId: 'default',
+  planeId: '',
+  epochs: 1,
+  reward: 1,
+  annotations: [] as AnnotationDraft[],
+});
+const selectedSample = ref(0);
+const showAdvanced = ref(false);
+const RU_PREPOSITIONS = new Set(['в', 'во', 'на', 'с', 'со', 'к', 'ко', 'по', 'о', 'об', 'при', 'из', 'за']);
+const VERB_SURFACES = new Set(['пишет', 'растет', 'растёт', 'растут', 'делает']);
+const VERB_LEMMAS = new Set(['писать', 'расти', 'делать']);
+const LEMMA_OVERRIDES: Record<string, string> = {
+  деревья: 'дерево',
+  деревом: 'дерево',
+  деревьями: 'дерево',
+  столы: 'стол',
+  столом: 'стол',
+  столами: 'стол',
+  машины: 'машина',
+  машиной: 'машина',
+  машинами: 'машина',
+  пишет: 'писать',
+  растет: 'расти',
+  растёт: 'расти',
+  растут: 'расти',
+  делает: 'делать',
+  компьютере: 'компьютер',
+};
+const GRAM_OVERRIDES: Record<string, Record<string, string>> = {
+  деревья: { case: 'nomn', number: 'plur', gender: 'neut' },
+  деревом: { case: 'ablt', number: 'sing', gender: 'neut' },
+  деревьями: { case: 'ablt', number: 'plur', gender: 'neut' },
+  пишет: { tense: 'pres', person: '3', number: 'sing' },
+  растет: { tense: 'pres', person: '3', number: 'sing' },
+  растёт: { tense: 'pres', person: '3', number: 'sing' },
+  растут: { tense: 'pres', person: '3', number: 'plur' },
+  делает: { tense: 'pres', person: '3', number: 'sing' },
+  компьютере: { case: 'loct', number: 'sing', gender: 'masc' },
+};
+
+const preview = computed(() => {
+  const planes = qaDraft.annotations.flatMap((item) => splitPlanes(item.planes));
   return {
-    questionTokens,
-    answerTokens,
-    meaningTokens: Array.from(new Set(meaningTokens)),
-    estimatedEdges,
+    answerTokens: tokenizeText(qaDraft.expectedAnswer),
+    lemmas: qaDraft.annotations.map((item) => item.lemma).filter(Boolean),
+    roles: qaDraft.annotations.map((item) => item.role).filter(Boolean),
+    planes: Array.from(new Set(planes)),
   };
 });
-const submitHint = computed(() =>
-  mode.value === 'simple'
-    ? 'Отправляет форму через `/api/training/simple`.'
-    : 'Отправляет preview через `/api/training/learn`.',
+const currentSampleLabel = computed(() => {
+  const sample = jokeList[selectedSample.value];
+  if (!sample) {
+    return 'manual';
+  }
+  return sample.id ?? `sample-${selectedSample.value + 1}`;
+});
+
+watch(
+  () => qaDraft.expectedAnswer,
+  () => {
+    if (showAdvanced.value) {
+      syncAnnotations(false);
+    }
+  },
 );
 
+watch(showAdvanced, (value) => {
+  if (value) {
+    syncAnnotations(false);
+  }
+});
+
+syncAnnotations(false);
+
 async function submit() {
-  const job: Job =
-    mode.value === 'simple'
-      ? await api.simpleTrain({
-          question: simpleDraft.question,
-          expected_answer: simpleDraft.expectedAnswer,
-          lang: simpleDraft.lang,
-          reward: simpleDraft.reward,
-          epochs: simpleDraft.epochs,
-          concept_meanings: simpleDraft.conceptMeanings
-            .map((item) => ({
-              concept: item.concept.trim() || undefined,
-              label: item.label.trim() || undefined,
-              meaning: item.meaning.trim(),
-            }))
-            .filter((item) => item.meaning),
-        })
-      : await api.learn({
-          jsonl: previewJsonl.value,
-          epochs: epochs.value,
-        });
+  const job = await api.resonanceTrainQa({
+    question: qaDraft.question,
+    expected_answer: qaDraft.expectedAnswer,
+    lang: qaDraft.lang,
+    session_id: qaDraft.sessionId || 'default',
+    plane_id: qaDraft.planeId.trim() || undefined,
+    reward: qaDraft.reward,
+    epochs: qaDraft.epochs,
+    annotations: showAdvanced.value
+      ? qaDraft.annotations.map((item) => ({
+          index: item.index,
+          token: item.token,
+          surface: item.surface || item.token,
+          lemma: item.lemma,
+          role: item.role,
+          pos: item.pos,
+          concept: item.concept.trim() || undefined,
+          planes: splitPlanes(item.planes),
+          gram: parseJsonObject(item.gramJson),
+          preposition: item.preposition.trim() || undefined,
+        }))
+      : [],
+  });
   await runtime.trackJob(job);
 }
 
-function addMeaning() {
-  simpleDraft.conceptMeanings.push({
-    key: `manual-${Date.now()}-${simpleDraft.conceptMeanings.length}`,
-    token: '',
-    concept: '',
-    label: '',
-    meaning: '',
-    auto: false,
-  });
+async function resetNetwork() {
+  clearRuntimeView();
+  const job = await api.resetNetwork({ keep_builtin: false });
+  await runtime.trackJob(job);
+  clearRuntimeView();
 }
 
-function removeMeaning(index: number) {
-  simpleDraft.conceptMeanings.splice(index, 1);
+async function seedResonance() {
+  const job = await api.resonanceSeed({ force: true, session_id: qaDraft.sessionId || 'default' });
+  await runtime.trackJob(job);
 }
 
-function addLayer() {
-  const nextLevel = draft.layers.reduce((max, layer) => Math.max(max, layer.level), -1) + 1;
-  draft.layers.push({ level: nextLevel, label: `Плоскость ${nextLevel}` });
-}
-
-function removeLayer(index: number) {
-  draft.layers.splice(index, 1);
-  draft.layers.forEach((layer, level) => {
-    layer.level = level;
-    if (level === 0 && !layer.builtinTopDomain) {
-      layer.builtinTopDomain = 'dialogue';
-    }
-  });
-}
-
-async function syncMeaningsFromQuestion() {
-  const version = ++meaningSyncVersion;
-  const question = simpleDraft.question.trim();
-  if (!question) {
-    simpleDraft.conceptMeanings = simpleDraft.conceptMeanings.filter((item) => !item.auto);
+function loadSample() {
+  const sample = jokeList[selectedSample.value];
+  if (!sample) {
     return;
   }
-  try {
-    const understood = await api.understand({ text: question, lang: simpleDraft.lang });
-    if (version !== meaningSyncVersion) {
-      return;
-    }
-    const currentByKey = new Map(simpleDraft.conceptMeanings.map((item) => [item.key, item]));
-    const tokenRows = understood.tokens
-      .filter((token) => !token.is_stop_word && token.search_token)
-      .map((token) => meaningDraftFromToken(token, understood.lang));
-    const enriched = await Promise.all(
-      tokenRows.map(async (row) => {
-        const existing = currentByKey.get(row.key);
-        const merged = existing ? { ...row, meaning: existing.meaning, label: existing.label || row.label } : row;
-        if (merged.meaning || !merged.concept) {
-          return merged;
-        }
-        try {
-          const detail = await api.getConceptDetail(merged.concept);
-          const metadata = detail.node.metadata ?? {};
-          return {
-            ...merged,
-            label: String(metadata.label || merged.label),
-            meaning: String(metadata.meaning || metadata.description || ''),
-          };
-        } catch {
-          return merged;
-        }
-      }),
-    );
-    if (version !== meaningSyncVersion) {
-      return;
-    }
-    const manual = simpleDraft.conceptMeanings.filter((item) => !item.auto);
-    simpleDraft.conceptMeanings = [...enriched, ...manual];
-  } catch {
-    const fallbackRows = simpleTokenize(question).map((token) => ({
-      key: `fallback:${token}`,
-      token,
-      concept: conceptUriForToken(token, simpleDraft.lang === 'auto' ? 'ru' : simpleDraft.lang),
-      label: token,
-      meaning: '',
-      auto: true,
-    }));
-    simpleDraft.conceptMeanings = [...fallbackRows, ...simpleDraft.conceptMeanings.filter((item) => !item.auto)];
-  }
+  qaDraft.question = sample.question;
+  qaDraft.expectedAnswer = sample.expected_answer;
+  qaDraft.lang = sample.lang ?? qaDraft.lang;
+  qaDraft.annotations = [];
+  showAdvanced.value = false;
 }
 
-function meaningDraftFromToken(token: UnderstandingToken, lang: string): SimpleMeaningDraft {
-  const canonicalToken = token.match_status === 'partial_root_match' && token.lemma ? token.lemma : token.search_token;
-  const concept = conceptUriForToken(canonicalToken, lang) || token.concept_uri || '';
+function clearRuntimeView() {
+  runtime.graph = null;
+  runtime.lastAnalysis = null;
+  runtime.lastResult = null;
+}
+
+function syncAnnotations(force: boolean) {
+  const existing = new Map(qaDraft.annotations.map((item) => [`${item.index}:${item.token}`, item]));
+  const tokens = tokenizeText(qaDraft.expectedAnswer);
+  const predicateIndex = tokens.findIndex((token) => VERB_SURFACES.has(token));
+  const nextRows: AnnotationDraft[] = [];
+  let pendingPreposition = '';
+  tokens.forEach((token, index) => {
+    if (RU_PREPOSITIONS.has(token)) {
+      pendingPreposition = token;
+      return;
+    }
+    const previous = force ? undefined : existing.get(`${index}:${token}`);
+    const fallback = defaultAnnotation(token, index, predicateIndex, pendingPreposition);
+    nextRows.push(previous ? { ...fallback, ...previous, index, token } : fallback);
+    pendingPreposition = '';
+  });
+  qaDraft.annotations = nextRows;
+}
+
+function addAnnotation() {
+  const index = qaDraft.annotations.length;
+  qaDraft.annotations.push({
+    key: `manual-${Date.now()}-${index}`,
+    index,
+    token: '',
+    surface: '',
+    lemma: '',
+    role: 'modifier',
+    pos: 'NOUN',
+    concept: '',
+    planes: '',
+    gramJson: '{}',
+    preposition: '',
+  });
+}
+
+function removeAnnotation(index: number) {
+  qaDraft.annotations.splice(index, 1);
+}
+
+function defaultAnnotation(token: string, index: number, predicateIndex: number, preposition: string): AnnotationDraft {
+  const lemma = LEMMA_OVERRIDES[token] ?? token;
+  const pos = VERB_SURFACES.has(token) || VERB_LEMMAS.has(lemma) ? 'VERB' : 'NOUN';
+  const role = inferRole(index, predicateIndex, pos, preposition);
   return {
-    key: `token:${concept || canonicalToken}`,
-    token: canonicalToken,
-    concept,
-    label: canonicalToken,
-    meaning: '',
-    auto: true,
+    key: `token-${index}-${token}`,
+    index,
+    token,
+    surface: token,
+    lemma,
+    role,
+    pos,
+    concept: conceptUriForLemma(lemma, qaDraft.lang),
+    planes: '',
+    gramJson: JSON.stringify(defaultGram(token, role)),
+    preposition,
   };
 }
 
-function conceptUriForToken(token: string, lang: string): string {
-  const clean = token
-    .toLowerCase()
-    .normalize('NFKC')
-    .replace(/['"`’]/g, '')
-    .replace(/[^\p{Letter}\p{Number}]+/gu, '_')
-    .replace(/^_+|_+$/g, '')
-    .replace(/_+/g, '_');
-  if (!clean) {
-    return '';
+function inferRole(index: number, predicateIndex: number, pos: string, preposition: string): string {
+  if (pos === 'VERB') {
+    return 'predicate';
   }
-  return `/c/${lang === 'en' ? 'en' : 'ru'}/${clean}`;
+  if (['на', 'в', 'о', 'об', 'при'].includes(preposition)) {
+    return 'instrument';
+  }
+  if (predicateIndex >= 0 && index < predicateIndex) {
+    return 'subject';
+  }
+  if (predicateIndex >= 0 && index > predicateIndex) {
+    return 'object';
+  }
+  return 'subject';
 }
 
-function simpleTokenize(value: string): string[] {
+function defaultGram(token: string, role: string): Record<string, string> {
+  const seeded = GRAM_OVERRIDES[token] ?? {};
+  if (role === 'subject') {
+    return { ...seeded, case: 'nomn' };
+  }
+  if (role === 'object') {
+    return { ...seeded, case: 'accs' };
+  }
+  if (role === 'instrument' || role === 'location') {
+    return { ...seeded, case: 'loct' };
+  }
+  if (role === 'predicate') {
+    return { tense: 'pres', person: '3', ...seeded };
+  }
+  return seeded;
+}
+
+function conceptUriForLemma(lemma: string, lang: string): string {
+  const cleaned = normalizeText(lemma);
+  const slug = cleaned.toLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu, '_').replace(/^_+|_+$/g, '');
+  return `/c/${lang}/${slug || 'concept'}`;
+}
+
+function splitPlanes(value: string): string[] {
   return value
-    .toLowerCase()
-    .match(/[0-9a-zа-яё]+(?:[-'][0-9a-zа-яё]+)?/giu)
-    ?.filter((token) => !SIMPLE_STOP_WORDS.has(token)) ?? [];
+    .replace(/;/g, ',')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
-const SIMPLE_STOP_WORDS = new Set([
-  'а',
-  'в',
-  'и',
-  'на',
-  'с',
-  'что',
-  'который',
-  'the',
-  'a',
-  'an',
-  'and',
-  'to',
-  'of',
-]);
+function parseJsonObject(value: string): Record<string, string> {
+  if (!value.trim()) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function tokenizeText(value: string): string[] {
+  return normalizeText(value).match(/[0-9A-Za-zА-Яа-яЁё]+/gu) ?? [];
+}
 </script>
 
 <style scoped lang="scss">
-.training-page {
-  align-content: start;
-}
-
 .training-layout {
   align-items: start;
 }
@@ -455,144 +490,79 @@ const SIMPLE_STOP_WORDS = new Set([
 
 .training-header {
   display: flex;
-  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
+  align-items: start;
 }
 
-.training-header h2,
-.preview-head h3 {
-  margin: 0;
+.header-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
-.eyebrow {
-  margin: 0 0 4px;
-  color: var(--accent-2);
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+.advanced-toggle {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.training-toolbar {
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+h2,
+h3 {
+  margin-top: 0;
 }
 
-.training-toolbar .wide {
-  grid-column: 1 / -1;
-}
-
-.layers-block {
+.annotation-block {
+  display: grid;
+  gap: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, rgba(23, 107, 87, 0.04), rgba(23, 107, 87, 0.01));
   padding: 14px;
 }
 
-.meanings-block {
-  display: grid;
-  gap: 12px;
-}
-
-.meaning-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
-  align-items: end;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 12px;
-}
-
-.meaning-row .wide {
-  grid-column: span 2;
-}
-
-.layers-block > summary {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  cursor: pointer;
-  list-style: none;
-  font-weight: 600;
-}
-
-.layers-block > summary::-webkit-details-marker {
-  display: none;
-}
-
-.layers-grid {
-  display: grid;
-  gap: 12px;
-  margin-top: 14px;
-}
-
-.layer-card {
+.annotation-row {
   display: grid;
   gap: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  padding: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
 }
 
-.layer-card-head,
-.layer-footnote {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: center;
-}
-
-.layer-card-head p,
-.layer-footnote p {
-  margin: 0;
-}
-
-.layer-card strong,
-.preview-card h3 {
-  font-size: 16px;
-}
-
-.preview-card {
+.qa-preview {
   display: grid;
-  gap: 8px;
-}
-
-.preview-head {
-  justify-content: space-between;
-}
-
-.preview-card pre {
-  min-height: 180px;
+  grid-template-columns: minmax(120px, 180px) minmax(0, 1fr);
+  gap: 10px 14px;
   margin: 0;
 }
 
-.simple-preview {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 8px 14px;
-  margin: 0;
-}
-
-.simple-preview dt {
+.qa-preview dt {
   color: var(--muted);
-  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
-.simple-preview dd {
+.qa-preview dd {
   margin: 0;
-  overflow-wrap: anywhere;
+  min-width: 0;
+  word-break: break-word;
 }
 
-.run-row {
-  justify-content: space-between;
+.danger {
+  border-color: rgba(185, 28, 28, 0.35);
+  color: #8f1d1d;
 }
 
-@media (max-width: 980px) {
-  .training-toolbar .wide {
-    grid-column: auto;
+@media (max-width: 920px) {
+  .training-header,
+  .advanced-toggle {
+    flex-direction: column;
+  }
+
+  .header-actions {
+    justify-content: flex-start;
+  }
+
+  .qa-preview {
+    grid-template-columns: 1fr;
   }
 }
 </style>

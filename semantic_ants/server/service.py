@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,19 @@ from semantic_ants.decoding import decode_words
 from semantic_ants.engine import EngineConfig, SemanticEngine
 from semantic_ants.knowledge import bootstrap_builtin_knowledge
 from semantic_ants.learning import ACOTrainer, Checkpoint, FeedbackTrainer, SimpleQATrainer, Trainer
+from semantic_ants.resonance import (
+    apply_resonance_feedback,
+    clean_resonance_checkpoint,
+    generate_resonance,
+    resonance_areas,
+    resonance_memory,
+    resonance_planes,
+    resonance_session_context,
+    seed_resonance,
+    train_resonance_form,
+    train_resonance_qa,
+    train_resonance_sentence,
+)
 from semantic_ants.server.graph import (
     concept_detail,
     concept_list,
@@ -45,6 +59,7 @@ class EngineService:
         )
         self.jobs = JobRegistry()
         self._lock = RLock()
+        self._ensure_resonance_checkpoint()
 
     def health(self) -> dict[str, Any]:
         return {"ok": True, "service": "semantic_ants", "time": time.time()}
@@ -56,6 +71,8 @@ class EngineService:
             "allow_network": self.config.allow_network,
             "autoload_builtin": self.config.autoload_builtin,
             "checkpoint_version": checkpoint.version,
+            "resonance_experiment": bool(checkpoint.metadata.get("resonance_experiment")),
+            "resonance_seeded": bool(checkpoint.metadata.get("resonance_seeded")),
             "examples_seen": checkpoint.examples_seen,
             "last_result_id": checkpoint.last_result_id,
         }
@@ -198,6 +215,8 @@ class EngineService:
                 edge_type=filters.get("edge_type"),
                 relation=filters.get("relation"),
                 query=filters.get("query"),
+                plane_id=filters.get("plane_id"),
+                area_id=filters.get("area_id"),
                 min_pheromone=_optional_float(filters.get("min_pheromone")),
                 only_signal=bool(filters.get("only_signal", False)),
                 limit=_optional_int(filters.get("limit")),
@@ -255,6 +274,54 @@ class EngineService:
 
     def submit_export(self, payload: dict[str, Any]) -> Job:
         return self._submit("export", self._export, payload)
+
+    def submit_resonance_reset(self, payload: dict[str, Any]) -> Job:
+        return self._submit("resonance-reset", self._resonance_reset, payload)
+
+    def submit_resonance_seed(self, payload: dict[str, Any]) -> Job:
+        return self._submit("resonance-seed", self._resonance_seed, payload)
+
+    def submit_resonance_train_form(self, payload: dict[str, Any]) -> Job:
+        return self._submit("resonance-train-form", self._resonance_train_form, payload)
+
+    def submit_resonance_train_sentence(self, payload: dict[str, Any]) -> Job:
+        return self._submit("resonance-train-sentence", self._resonance_train_sentence, payload)
+
+    def submit_resonance_train_qa(self, payload: dict[str, Any]) -> Job:
+        return self._submit("resonance-train-qa", self._resonance_train_qa, payload)
+
+    def resonance_generate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            result = generate_resonance(self.engine.checkpoint, payload)
+            self.engine.store.save(self.engine.checkpoint)
+            graph = graph_from_checkpoint(self.engine.checkpoint)
+            return {
+                "result": result,
+                "graph": graph_snapshot(graph, self.engine.checkpoint, result),
+                "trace_interpretation": trace_interpretation(result),
+            }
+
+    def resonance_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            result = apply_resonance_feedback(self.engine.checkpoint, payload)
+            self.engine.store.save(self.engine.checkpoint)
+            return result
+
+    def resonance_memory(self) -> dict[str, Any]:
+        with self._lock:
+            return resonance_memory(self.engine.checkpoint)
+
+    def resonance_planes(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return resonance_planes(self.engine.checkpoint)
+
+    def resonance_areas(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return resonance_areas(self.engine.checkpoint)
+
+    def resonance_session_context(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            return resonance_session_context(self.engine.checkpoint, session_id)
 
     def job(self, job_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
@@ -399,6 +466,58 @@ class EngineService:
             raise ValueError("destination is required")
         self.engine.store.export(Path(str(destination)))
         return {"destination": str(destination)}
+
+    def _ensure_resonance_checkpoint(self) -> None:
+        checkpoint = self.engine.checkpoint
+        if checkpoint.version == 7 and checkpoint.metadata.get("resonance_experiment"):
+            return
+        self.engine.checkpoint = clean_resonance_checkpoint(seed=getattr(checkpoint, "seed", 42))
+        self.engine.store.save(self.engine.checkpoint)
+
+    def _resonance_reset(self, payload: dict[str, Any]) -> dict[str, Any]:
+        seed = getattr(self.engine.checkpoint, "seed", 42)
+        self.engine.checkpoint = clean_resonance_checkpoint(seed=seed)
+        self._remove_experiment_state_dirs()
+        if bool(payload.get("seed", False)):
+            seed_resonance(self.engine.checkpoint, force=True, session_id=str(payload.get("session_id") or "default"))
+        self.engine.store.save(self.engine.checkpoint)
+        return resonance_memory(self.engine.checkpoint)
+
+    def _resonance_seed(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = seed_resonance(
+            self.engine.checkpoint,
+            force=bool(payload.get("force", False)),
+            session_id=str(payload.get("session_id") or "default"),
+        )
+        self.engine.store.save(self.engine.checkpoint)
+        return result
+
+    def _resonance_train_form(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = train_resonance_form(self.engine.checkpoint, payload)
+        self.engine.store.save(self.engine.checkpoint)
+        return result
+
+    def _resonance_train_sentence(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = train_resonance_sentence(self.engine.checkpoint, payload)
+        self.engine.store.save(self.engine.checkpoint)
+        return result
+
+    def _resonance_train_qa(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = train_resonance_qa(self.engine.checkpoint, payload)
+        self.engine.store.save(self.engine.checkpoint)
+        return result
+
+    def _remove_experiment_state_dirs(self) -> None:
+        for folder in (self.engine.model_dir, self.config.state_dir / "web_inputs"):
+            try:
+                resolved = folder.resolve()
+                state_root = self.config.state_dir.resolve()
+            except OSError:
+                continue
+            if resolved == state_root or state_root not in resolved.parents:
+                continue
+            if resolved.exists():
+                shutil.rmtree(resolved)
 
     def _payload_jsonl_path(self, payload: dict[str, Any], prefix: str) -> Path:
         path = payload.get("path")

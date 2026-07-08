@@ -111,6 +111,87 @@ class ExportRequest(BaseModel):
     destination: str
 
 
+class ResonanceResetRequest(BaseModel):
+    seed: bool = False
+
+
+class ResonanceSeedRequest(BaseModel):
+    force: bool = False
+    session_id: str = "default"
+
+
+class ResonanceTrainFormRequest(BaseModel):
+    lang: str = "ru"
+    lemma: str
+    surface: str
+    pos: str = "NOUN"
+    gram: dict[str, Any] = Field(default_factory=dict)
+    role: Optional[str] = None
+    plane_id: Optional[str] = None
+    reward: float = 1.0
+
+
+class ResonanceSlotRequest(BaseModel):
+    id: Optional[str] = None
+    lemma: str
+    role: str = "subject"
+    pos: str = "NOUN"
+    gram: dict[str, Any] = Field(default_factory=dict)
+    preposition: Optional[str] = None
+
+
+class ResonanceTrainSentenceRequest(BaseModel):
+    lang: str = "ru"
+    sentence: str
+    slots: list[ResonanceSlotRequest] = Field(default_factory=list)
+    plane_id: Optional[str] = None
+    reward: float = 1.0
+
+
+class ResonanceQaAnnotationRequest(BaseModel):
+    index: Optional[int] = None
+    token: Optional[str] = None
+    surface: Optional[str] = None
+    lemma: Optional[str] = None
+    role: Optional[str] = None
+    pos: Optional[str] = None
+    concept: Optional[str] = None
+    concept_uri: Optional[str] = None
+    planes: list[str] = Field(default_factory=list)
+    plane_id: Optional[str] = None
+    gram: dict[str, Any] = Field(default_factory=dict)
+    preposition: Optional[str] = None
+
+
+class ResonanceTrainQaRequest(BaseModel):
+    question: str
+    expected_answer: str
+    lang: str = "ru"
+    session_id: str = "default"
+    plane_id: Optional[str] = None
+    annotations: list[ResonanceQaAnnotationRequest] = Field(default_factory=list)
+    reward: float = 1.0
+    epochs: int = 1
+
+
+class ResonanceGenerateRequest(BaseModel):
+    text: str = ""
+    lang: str = "ru"
+    session_id: str = "default"
+    plane_id: Optional[str] = None
+    slots: list[ResonanceSlotRequest] = Field(default_factory=list)
+    ants: int = 16
+    creativity: float = 0.35
+
+
+class ResonanceFeedbackRequest(BaseModel):
+    result_id: Optional[str] = None
+    session_id: str = "default"
+    score: int = Field(ge=0, le=5)
+    corrected_sentence: Optional[str] = None
+    corrected_tokens: list[ResonanceTrainFormRequest] = Field(default_factory=list)
+
+
 def model_payload(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()

@@ -9,11 +9,13 @@ const { runtimeState, apiMock } = vi.hoisted(() => {
     lastAnalysis: null as any,
     graph: null as any,
     chat: vi.fn(async () => undefined),
+    resonanceChat: vi.fn(async () => undefined),
   };
   const apiMock = {
     getSessions: vi.fn(),
     resetSession: vi.fn(),
     sendFeedback: vi.fn(),
+    resonanceFeedback: vi.fn(),
     getConceptDetail: vi.fn(),
   };
   return { runtimeState, apiMock };
@@ -35,7 +37,8 @@ describe('ChatPage', () => {
     runtimeState.lastAnalysis = null;
     runtimeState.graph = null;
     runtimeState.chat.mockReset();
-    runtimeState.chat.mockImplementation(async () => {
+    runtimeState.resonanceChat.mockReset();
+    runtimeState.resonanceChat.mockImplementation(async () => {
       runtimeState.lastAnalysis = {
         result: {
           result_id: 'result-1',
@@ -54,6 +57,9 @@ describe('ChatPage', () => {
             },
           ],
           semantic_vector: {
+            mode: 'resonance',
+            active_plane: 'language:ru',
+            tentative_forms: [],
             items: [{ uri: '/m/top/dialogue', label: 'Общение', layer: 0, layers: [0], active_layers: [0], score: 1.2 }],
             strength_vector: [3],
           },
@@ -64,6 +70,7 @@ describe('ChatPage', () => {
     apiMock.getSessions.mockReset();
     apiMock.resetSession.mockReset();
     apiMock.sendFeedback.mockReset();
+    apiMock.resonanceFeedback.mockReset();
     apiMock.getConceptDetail.mockReset();
   });
 
@@ -102,15 +109,13 @@ describe('ChatPage', () => {
     await flushPromises();
     await nextTick();
 
-    expect(runtimeState.chat).toHaveBeenCalledWith(
+    expect(runtimeState.resonanceChat).toHaveBeenCalledWith(
       expect.objectContaining({
         text: 'hello',
         session_id: 'default',
-        lang: 'auto',
-        mode: 'hybrid',
-        strength_vector: [3],
+        lang: 'ru',
         ants: 32,
-        depth: 4,
+        creativity: 0.35,
       }),
     );
     expect(apiMock.getSessions).toHaveBeenCalledTimes(2);
@@ -118,5 +123,15 @@ describe('ChatPage', () => {
     expect(wrapper.text()).toContain('Ассистент отвечает');
     expect(wrapper.text()).toContain('Ответ');
     expect(wrapper.text()).toContain('Semantic vector');
+
+    await wrapper.get('[data-feedback-result-id="result-1"][data-feedback-score="1"]').trigger('click');
+    await flushPromises();
+    expect(apiMock.resonanceFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result_id: 'result-1',
+        score: 1,
+        session_id: 'default',
+      }),
+    );
   });
 });

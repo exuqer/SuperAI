@@ -84,4 +84,23 @@ export const api = {
     request<Job>('/api/datasets/spc/download', { method: 'POST', body: JSON.stringify(payload) }),
   exportCheckpoint: (payload: Record<string, unknown>) =>
     request<Job>('/api/system/export', { method: 'POST', body: JSON.stringify(payload) }),
+  resonanceReset: (payload: Record<string, unknown>) =>
+    request<Job>('/api/resonance/reset-experiment', { method: 'POST', body: JSON.stringify(payload) }),
+  resonanceSeed: (payload: Record<string, unknown>) =>
+    request<Job>('/api/resonance/seed', { method: 'POST', body: JSON.stringify(payload) }),
+  resonanceTrainForm: (payload: Record<string, unknown>) =>
+    request<Job>('/api/resonance/train-form', { method: 'POST', body: JSON.stringify(payload) }),
+  resonanceTrainSentence: (payload: Record<string, unknown>) =>
+    request<Job>('/api/resonance/train-sentence', { method: 'POST', body: JSON.stringify(payload) }),
+  resonanceTrainQa: (payload: Record<string, unknown>) =>
+    request<Job>('/api/resonance/train-qa', { method: 'POST', body: JSON.stringify(payload) }),
+  resonanceGenerate: (payload: Record<string, unknown>) =>
+    request<AnalyzeResponse>('/api/resonance/generate', { method: 'POST', body: JSON.stringify(payload) }),
+  resonanceFeedback: (payload: Record<string, unknown>) =>
+    request<Record<string, unknown>>('/api/resonance/feedback', { method: 'POST', body: JSON.stringify(payload) }),
+  getResonanceMemory: () => request<Record<string, unknown>>('/api/resonance/memory'),
+  getResonancePlanes: () => request<Array<Record<string, unknown>>>('/api/resonance/planes'),
+  getResonanceAreas: () => request<Array<Record<string, unknown>>>('/api/resonance/areas'),
+  getResonanceSessionContext: (sessionId: string) =>
+    request<Record<string, unknown>>(`/api/resonance/session-context${query({ session_id: sessionId })}`),
 };

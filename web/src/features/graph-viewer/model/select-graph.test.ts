@@ -103,4 +103,23 @@ describe('selectGraphViewport', () => {
     expect(viewport.edges).toHaveLength(1);
     expect(viewport.edges[0].start).toBe(viewport.nodes[0].id);
   });
+
+  it('returns the whole graph when the viewport limit is disabled', () => {
+    const graph: GraphPayload = {
+      nodes: [node('a', true), node('b'), node('c')],
+      edges: [edge('a-b', 'a', 'b', true), edge('b-c', 'b', 'c')],
+      stats: { nodes: 3, edges: 2, signal_nodes: 1, signal_edges: 1 },
+    };
+
+    const viewport = selectGraphViewport(graph, {
+      focusedNodeLimit: 0,
+      focusedEdgeLimit: 0,
+      fallbackNodeLimit: 0,
+      fallbackEdgeLimit: 0,
+    });
+
+    expect(viewport.focused).toBe(true);
+    expect(viewport.nodes.map((item) => item.id)).toEqual(['a', 'b', 'c']);
+    expect(viewport.edges.map((item) => item.id)).toEqual(['a-b', 'b-c']);
+  });
 });

@@ -23,6 +23,19 @@ export function selectGraphViewport(graph: GraphPayload | null, options: GraphVi
     return { nodes: [], edges: [], focused: false };
   }
 
+  if (
+    options.focusedNodeLimit === 0 ||
+    options.focusedEdgeLimit === 0 ||
+    options.fallbackNodeLimit === 0 ||
+    options.fallbackEdgeLimit === 0
+  ) {
+    return {
+      nodes: [...graph.nodes].sort(compareFallbackNodes),
+      edges: [...graph.edges].sort(compareFallbackEdges),
+      focused: Boolean(graph.nodes.some((node) => node.signal.active) || graph.edges.some((edge) => edge.signal.active)),
+    };
+  }
+
   const focusedEdgeLimit = options.focusedEdgeLimit ?? DEFAULT_FOCUSED_EDGE_LIMIT;
   const focusedNodeLimit = options.focusedNodeLimit ?? DEFAULT_FOCUSED_NODE_LIMIT;
   const fallbackNodeLimit = options.fallbackNodeLimit ?? DEFAULT_FALLBACK_NODE_LIMIT;

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import random
+from collections import Counter
 from typing import Any, TYPE_CHECKING
 
 from semantic_ants.core.normalization import detect_language, tokenize
@@ -52,6 +55,7 @@ def build_vector_candidates(
     count: int = 3,
     navigator: Any | None = None,
     model_dir: str | None = None,
+    creativity: float = 0.35,
 ) -> list[str]:
     return select_vector_response(
         semantic_vector,
@@ -59,6 +63,7 @@ def build_vector_candidates(
         count=count,
         navigator=navigator,
         model_dir=model_dir,
+        creativity=creativity,
     )["candidates"]
 
 
@@ -68,8 +73,10 @@ def select_vector_response(
     count: int = 3,
     navigator: Any | None = None,
     model_dir: str | None = None,
+    creativity: float = 0.35,
 ) -> dict[str, Any]:
     lang = _vector_lang(semantic_vector)
+    creativity = min(max(float(creativity), 0.0), 1.0)
     items = [item for item in semantic_vector.get("items", []) if isinstance(item, dict)]
     if _is_sparse_unknown_vector(items):
         return {"response": "", "candidates": [], "source": "semantic_fallback", "lang": lang}
@@ -81,7 +88,20 @@ def select_vector_response(
     domain = _surface_for_uri(_domain_uri(semantic_vector), checkpoint, lang)
     vectors = _nonempty([subject, *items[:5], domain]) or _fallback_basis(items, checkpoint, lang)
 
-    exact_memory = _exact_memory_candidates(semantic_vector, checkpoint, lang, count=count)
+    exact_memory = _exact_memory_candidates(
+        semantic_vector,
+        checkpoint,
+        lang,
+        count=count,
+        creativity=creativity,
+    )
+    creative_memory = _creative_memory_candidates(
+        semantic_vector,
+        checkpoint,
+        lang,
+        count=count,
+        creativity=creativity,
+    )
     contextual = _contextual_candidates(semantic_vector, lang, count=count)
     definition_candidates = _unique_nonempty(
         [
@@ -102,8 +122,10 @@ def select_vector_response(
         lang=lang,
     )
     fallback_candidates = _fallback_candidates(vectors, lang, count=count)
-    candidates = _unique_nonempty(
-        [
+    prioritize_creative = _prefer_creative(semantic_vector, creativity=creativity, exact_count=len(exact_memory), creative_count=len(creative_memory))
+    if prioritize_creative and creative_memory:
+        response_candidates = [
+            *creative_memory,
             *exact_memory,
             *contextual,
             *definition_candidates,
@@ -111,12 +133,32 @@ def select_vector_response(
             *torch_candidates,
             *fallback_candidates,
         ]
+    else:
+        response_candidates = [
+            *exact_memory,
+            *creative_memory,
+            *contextual,
+            *definition_candidates,
+            *translation_candidates,
+            *torch_candidates,
+            *fallback_candidates,
+        ]
+    candidates = _unique_nonempty(
+        response_candidates
     )
     response = candidates[0] if candidates else ""
     return {
         "response": response,
         "candidates": candidates[: max(count, 1)],
-        "source": _candidate_source(response, exact_memory, contextual, definition_candidates, translation_candidates, torch_candidates),
+        "source": _candidate_source(
+            response,
+            exact_memory,
+            creative_memory,
+            contextual,
+            definition_candidates,
+            translation_candidates,
+            torch_candidates,
+        ),
         "lang": lang,
     }
 
@@ -613,15 +655,11 @@ def _memory_basis(checkpoint: Checkpoint, lang: str) -> list[str]:
     for item in checkpoint.accepted_answers[:10]:
         if not isinstance(item, dict):
             continue
-        answer = " ".join(str(item.get("answer", "")).split())
-        if answer:
-            candidates.append(answer)
+        candidates.extend(_item_responses(item))
     for item in checkpoint.response_memory.values():
         if not isinstance(item, dict):
             continue
-        answer = " ".join(str(item.get("answer", "")).split())
-        if answer:
-            candidates.append(answer)
+        candidates.extend(_item_responses(item))
     if candidates:
         return _unique_nonempty(candidates[:10])
     if lang == "ru":
@@ -629,7 +667,13 @@ def _memory_basis(checkpoint: Checkpoint, lang: str) -> list[str]:
     return ["It is related to a known concept."]
 
 
-def _exact_memory_candidates(semantic_vector: dict[str, Any], checkpoint: Checkpoint, lang: str, count: int) -> list[str]:
+def _exact_memory_candidates(
+    semantic_vector: dict[str, Any],
+    checkpoint: Checkpoint,
+    lang: str,
+    count: int,
+    creativity: float = 0.35,
+) -> list[str]:
     raw_input_text = str(semantic_vector.get("input_text", ""))
     if _is_follow_up_text(raw_input_text) and not _is_translation_request(raw_input_text):
         return []
@@ -640,25 +684,78 @@ def _exact_memory_candidates(semantic_vector: dict[str, Any], checkpoint: Checkp
         if not isinstance(item, dict):
             continue
         stimulus = _memory_text_key(str(item.get("stimulus", "")))
-        answer = " ".join(str(item.get("answer", "")).split())
-        if answer and not _memory_lang_matches(item, lang, raw_input_text):
+        answers = _item_responses(item)
+        if answers and not _memory_lang_matches(item, lang, raw_input_text):
             continue
-        if answer and stimulus and stimulus == input_text:
-            candidates.append(answer)
+        if answers and stimulus and stimulus == input_text:
+            candidates.extend(answers)
             continue
         memory_key = _concept_key(item.get("concepts", []))
-        if answer and concept_key and memory_key == concept_key:
-            candidates.append(answer)
+        if answers and concept_key and memory_key == concept_key:
+            candidates.extend(answers)
     for item in checkpoint.response_memory.values():
         if not isinstance(item, dict):
             continue
-        answer = " ".join(str(item.get("answer", "")).split())
-        if answer and not _memory_lang_matches(item, lang, raw_input_text):
+        answers = _item_responses(item)
+        if answers and not _memory_lang_matches(item, lang, raw_input_text):
             continue
         memory_key = _concept_key(item.get("concepts", []))
-        if answer and concept_key and memory_key == concept_key:
-            candidates.append(answer)
-    return _unique_nonempty(candidates)[:count]
+        if answers and concept_key and memory_key == concept_key:
+            candidates.extend(answers)
+    unique = _unique_nonempty(candidates)
+    if not unique:
+        return []
+    if creativity <= 0.0 or len(unique) == 1:
+        return unique[:count]
+    return _rotate_candidates(unique, raw_input_text, semantic_vector.get("chat_history"), count=count)
+
+
+def _creative_memory_candidates(
+    semantic_vector: dict[str, Any],
+    checkpoint: Checkpoint,
+    lang: str,
+    count: int,
+    creativity: float,
+) -> list[str]:
+    creativity = min(max(float(creativity), 0.0), 1.0)
+    if creativity <= 0.0:
+        return []
+    raw_input_text = str(semantic_vector.get("input_text", ""))
+    sequences = _response_sequences(checkpoint, lang, raw_input_text)
+    if len(sequences) < 2:
+        return []
+    transitions: dict[str, Counter[str]] = {}
+    starts: Counter[str] = Counter()
+    for sequence in sequences:
+        if len(sequence) < 2:
+            continue
+        starts[sequence[0]] += 1
+        for left, right in zip(sequence, sequence[1:]):
+            bucket = transitions.setdefault(left, Counter())
+            bucket[right] += 1
+    if not transitions:
+        return []
+    rng = random.Random(_creative_seed(raw_input_text, semantic_vector.get("chat_history"), creativity, len(sequences)))
+    prompt_tokens = [token.casefold() for token in tokenize(raw_input_text) if token]
+    start = _creative_start_token(prompt_tokens, transitions, starts, rng)
+    if not start:
+        return []
+    sequence = [start]
+    max_length = min(14, max(max((len(item) for item in sequences), default=0), 4))
+    while len(sequence) < max_length:
+        options = transitions.get(sequence[-1])
+        if not options:
+            break
+        next_token = _creative_next_token(options, rng, creativity, sequence)
+        if not next_token:
+            break
+        sequence.append(next_token)
+        if len(sequence) >= 5 and rng.random() > creativity and next_token in {sequence[-2], start}:
+            break
+        if len(sequence) >= max_length:
+            break
+    sentence = _render_creative_sentence(sequence, sequences, lang)
+    return [sentence] if sentence else []
 
 
 def _contextual_candidates(semantic_vector: dict[str, Any], lang: str, count: int) -> list[str]:
@@ -685,11 +782,143 @@ def _memory_text_key(value: str) -> str:
     return " ".join(str(value).split()).casefold()
 
 
+def _item_responses(item: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    responses = item.get("responses")
+    if isinstance(responses, list):
+        values.extend(str(value) for value in responses if str(value).strip())
+    for key in ("answer", "response"):
+        value = " ".join(str(item.get(key, "")).split())
+        if value:
+            values.append(value)
+    return _unique_nonempty(values)
+
+
 def _memory_lang_matches(item: dict[str, Any], lang: str, input_text: str) -> bool:
     item_lang = str(item.get("lang") or "")
     if item_lang not in {"ru", "en"} or item_lang == lang:
         return True
     return _is_translation_request(input_text)
+
+
+def _response_sequences(checkpoint: Checkpoint, lang: str, input_text: str) -> list[list[str]]:
+    sequences: list[list[str]] = []
+    for item in [*checkpoint.accepted_answers, *checkpoint.response_memory.values()]:
+        if not isinstance(item, dict):
+            continue
+        if not _memory_lang_matches(item, lang, input_text):
+            continue
+        for response in _item_responses(item):
+            tokens = [token.casefold() for token in tokenize(response) if token]
+            if len(tokens) >= 2 and tokens not in sequences:
+                sequences.append(tokens)
+    return sequences
+
+
+def _rotate_candidates(values: list[str], input_text: str, chat_history: list[dict[str, Any]] | None, count: int) -> list[str]:
+    if not values:
+        return []
+    if len(values) == 1:
+        return values[:count]
+    assistant_turns = 0
+    user_turns = 0
+    if isinstance(chat_history, list):
+        assistant_turns = sum(1 for turn in chat_history if isinstance(turn, dict) and str(turn.get("role", "")) == "assistant")
+        user_turns = sum(1 for turn in chat_history if isinstance(turn, dict) and str(turn.get("role", "")) == "user")
+    seed = _creative_seed(input_text, chat_history, float(len(values)) / max(count, 1), len(values) + assistant_turns + user_turns)
+    index = seed % len(values)
+    rotated = values[index:] + values[:index]
+    return rotated[:count]
+
+
+def _creative_seed(
+    input_text: str,
+    chat_history: list[dict[str, Any]] | None,
+    creativity: float,
+    variant_count: int,
+) -> int:
+    history_size = 0
+    if isinstance(chat_history, list):
+        history_size = sum(1 for turn in chat_history if isinstance(turn, dict))
+    payload = f"{_memory_text_key(input_text)}|{history_size}|{creativity:.3f}|{variant_count}"
+    return int(hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12], 16)
+
+
+def _prefer_creative(
+    semantic_vector: dict[str, Any],
+    *,
+    creativity: float,
+    exact_count: int,
+    creative_count: int,
+) -> bool:
+    if creative_count <= 0 or creativity <= 0.0:
+        return False
+    if creativity >= 0.65:
+        return True
+    if exact_count <= 1:
+        return True
+    input_text = str(semantic_vector.get("input_text", ""))
+    chat_history = semantic_vector.get("chat_history", [])
+    seed = _creative_seed(input_text, chat_history if isinstance(chat_history, list) else None, creativity, exact_count + creative_count)
+    return (seed % 1000) / 1000.0 < creativity
+
+
+def _creative_start_token(
+    prompt_tokens: list[str],
+    transitions: dict[str, Counter[str]],
+    starts: Counter[str],
+    rng: random.Random,
+) -> str:
+    prompt_candidates = [token for token in prompt_tokens if token in transitions]
+    if prompt_candidates:
+        return prompt_candidates[0]
+    if starts:
+        ordered = starts.most_common()
+        if len(ordered) == 1:
+            return ordered[0][0]
+        weights = [count for _, count in ordered]
+        return rng.choices([token for token, _ in ordered], weights=weights, k=1)[0]
+    return next(iter(transitions), "")
+
+
+def _creative_next_token(
+    options: Counter[str],
+    rng: random.Random,
+    creativity: float,
+    sequence: list[str],
+) -> str:
+    items = list(options.items())
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0][0]
+    weights: list[float] = []
+    for token, count in items:
+        novelty_penalty = 0.6 if token in sequence[-3:] else 1.0
+        weights.append(max(float(count), 0.1) * novelty_penalty)
+    if creativity >= 0.5:
+        return rng.choices([token for token, _ in items], weights=weights, k=1)[0]
+    return max(items, key=lambda pair: (pair[1], -len(pair[0])))[0]
+
+
+def _render_creative_sentence(sequence: list[str], sequences: list[list[str]], lang: str) -> str:
+    if not sequence:
+        return ""
+    cleaned = _unique_nonempty(sequence)
+    if len(cleaned) < 2:
+        return ""
+    sentence = " ".join(cleaned)
+    sentence = sentence[0].upper() + sentence[1:] if sentence else sentence
+    punctuation = "!"
+    if lang == "en":
+        punctuation = "."
+    if sequences and any(any(token.endswith("!") for token in seq) for seq in sequences):
+        punctuation = "!"
+    if sequences and any(any(token.endswith("?") for token in seq) for seq in sequences):
+        punctuation = "?"
+    if sentence and sentence[-1] not in ".!?":
+        sentence = f"{sentence}{punctuation}"
+    return sentence
 
 
 def _is_translation_request(value: str) -> bool:
@@ -799,6 +1028,7 @@ def _fallback_candidates(items: list[str], lang: str, count: int) -> list[str]:
 def _candidate_source(
     response: str,
     exact_memory: list[str],
+    creative_memory: list[str],
     contextual: list[str],
     definition_candidates: list[str],
     translation: list[str],
@@ -806,6 +1036,8 @@ def _candidate_source(
 ) -> str:
     if response and response in exact_memory:
         return "exact_memory"
+    if response and response in creative_memory:
+        return "creative_memory"
     if response and response in contextual:
         return "contextual_follow_up"
     if response and response in definition_candidates:

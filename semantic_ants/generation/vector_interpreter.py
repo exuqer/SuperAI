@@ -49,6 +49,7 @@ class SemanticVectorInterpreter:
             count=max(count, 4),
             navigator=self.navigator,
             model_dir=self.model_dir,
+            creativity=float(response_vector.get("creativity", 0.35) or 0.35),
         )
         if not selected["candidates"] and response_vector.get("response_lang") != normalized.get("lang"):
             fallback_vector = {**normalized, "response_lang": normalized.get("lang", "auto")}
@@ -58,6 +59,7 @@ class SemanticVectorInterpreter:
                 count=max(count, 4),
                 navigator=self.navigator,
                 model_dir=self.model_dir,
+                creativity=float(fallback_vector.get("creativity", 0.35) or 0.35),
             )
         return str(selected.get("response") or next((candidate for candidate in selected.get("candidates", []) if candidate), ""))
 
