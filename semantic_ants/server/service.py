@@ -7,7 +7,7 @@ from typing import Any
 from ..engine import EngineConfig, SemanticEngine
 
 
-@dataclass(slots=True)
+@dataclass
 class ServerConfig:
     state_dir: Path = Path(".semantic_ants")
     host: str = "127.0.0.1"
@@ -35,6 +35,26 @@ class EngineService:
             str(payload.get("text", "")),
             session_id=str(payload.get("session_id") or "default"),
             backpack_limit=payload.get("backpack_limit"),
+            include_graph=bool(payload.get("include_graph") or False),
+            include_layers=bool(payload.get("include_layers") or False),
+            include_trace=bool(payload.get("include_trace") or False),
+        )
+
+    def chat_backpack(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.engine.backpack(
+            session_id=str(payload.get("session_id") or "default"),
+            limit=payload.get("backpack_limit"),
+            result_id=payload.get("result_id"),
+            include_layers=bool(payload.get("include_layers") or False),
+        )
+
+    def chat_visuals(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.engine.chat_visuals(
+            result_id=str(payload.get("result_id") or ""),
+            session_id=str(payload.get("session_id") or "default"),
+            backpack_limit=payload.get("backpack_limit"),
+            graph_limit=payload.get("graph_limit"),
+            include_layers=bool(payload.get("include_layers") or False),
         )
 
     def drill_down(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -103,4 +123,5 @@ class EngineService:
         return job.to_dict() if job else None
 
     def shutdown(self) -> None:
+        self.engine.flush_pending_persist()
         self.engine.jobs.shutdown()

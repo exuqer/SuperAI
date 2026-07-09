@@ -9,6 +9,9 @@ class ChatRequest(BaseModel):
     text: str
     session_id: str = "default"
     backpack_limit: int | None = None
+    include_graph: bool = False
+    include_layers: bool = False
+    include_trace: bool = False
 
 
 class DrillRequest(BaseModel):

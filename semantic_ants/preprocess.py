@@ -80,7 +80,7 @@ PAIR_KEYS: tuple[tuple[str, str], ...] = (
 )
 
 
-@dataclass(slots=True)
+@dataclass
 class PreprocessStats:
     input_path: str
     output_path: str

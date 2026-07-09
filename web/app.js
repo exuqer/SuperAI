@@ -18,6 +18,7 @@ const state = {
   trainSessionId: localStorage.getItem('semantic_ants.train_session') || 'default',
   trainEpochs: 1,
   graphInstances: new Map(),
+  visualRequestId: 0,
 };
 
 const el = {
@@ -197,6 +198,9 @@ async function sendChatMessage(event) {
       text,
       session_id: sanitizeSessionId(el.chatSessionInput.value || state.selectedSessionId),
       backpack_limit: 48,
+      include_graph: false,
+      include_layers: false,
+      include_trace: false,
     };
     const response = await requestJSON('/api/chat/message', {
       method: 'POST',
@@ -204,7 +208,7 @@ async function sendChatMessage(event) {
     });
     state.lastResult = response.result || null;
     state.backpack = response.backpack || response;
-    state.graph = response.graph || state.graph || null;
+    state.graph = state.graph || null;
     state.activeDetailKind = 'result';
     state.nodeDetail = null;
     state.selectedNodeId = null;
@@ -213,9 +217,25 @@ async function sendChatMessage(event) {
     el.chatSessionInput.value = state.selectedSessionId;
     localStorage.setItem('semantic_ants.session', state.selectedSessionId);
     el.chatInput.value = '';
-    await Promise.all([refreshSessions(), refreshConfig()]);
+    mergeResultIntoSessions(payload.session_id, state.lastResult);
     renderAll();
     scrollChatToEnd();
+    const resultId = state.lastResult?.result_id || null;
+    if (resultId) {
+      const requestId = ++state.visualRequestId;
+      loadChatBackpack({
+        sessionId: payload.session_id,
+        resultId,
+        requestId,
+      }).catch((error) => console.warn('lazy backpack failed', error));
+    }
+    refreshSessions()
+      .then(() => {
+        renderChat();
+        scrollChatToEnd();
+      })
+      .catch(() => undefined);
+    refreshConfig().then(renderTopbar).catch(() => undefined);
   } finally {
     state.busy = false;
     renderTopbar();
@@ -262,6 +282,7 @@ async function drillBackpackDown() {
     state.backpack = response;
     state.graph = state.graph || null;
     state.activeDetailKind = 'none';
+    await loadChatBackpack({ sessionId: sanitizeSessionId(el.chatSessionInput.value || state.selectedSessionId) });
     renderAll();
   } finally {
     state.busy = false;
@@ -283,11 +304,63 @@ async function drillBackpackUp() {
     state.backpack = response;
     state.graph = state.graph || null;
     state.activeDetailKind = 'none';
+    await loadChatBackpack({ sessionId: sanitizeSessionId(el.chatSessionInput.value || state.selectedSessionId) });
     renderAll();
   } finally {
     state.busy = false;
     renderTopbar();
   }
+}
+
+function mergeResultIntoSessions(sessionId, result) {
+  if (!result) return;
+  const id = sanitizeSessionId(sessionId || result.session_id || state.selectedSessionId);
+  let session = state.sessions.find((item) => item.session_id === id);
+  if (!session) {
+    session = { session_id: id, turns: [], turn_count: 0, updated_at: result.created_at || Date.now() / 1000 };
+    state.sessions = [session, ...state.sessions];
+  }
+  const turns = Array.isArray(session.turns) ? session.turns.filter((turn) => turn.result_id !== result.result_id) : [];
+  turns.push({
+    role: 'user',
+    text: result.input_text || '',
+    created_at: result.created_at,
+    result_id: result.result_id,
+    kind: 'message',
+  });
+  turns.push({
+    role: 'assistant',
+    text: result.response || '',
+    created_at: result.created_at,
+    result_id: result.result_id,
+    kind: 'message',
+    source: result.response_source,
+  });
+  session.turns = turns;
+  session.turn_count = turns.length;
+  session.updated_at = result.created_at || session.updated_at || Date.now() / 1000;
+}
+
+async function loadChatBackpack({ sessionId, resultId = null, requestId = null } = {}) {
+  const params = new URLSearchParams();
+  params.set('session_id', sanitizeSessionId(sessionId || state.selectedSessionId));
+  params.set('backpack_limit', '48');
+  let response;
+  if (resultId) {
+    params.set('graph_limit', String(state.graphLimit || 120));
+    params.set('layers', 'false');
+    response = await requestJSON(`/api/chat/results/${encodeURIComponent(resultId)}/visuals?${params.toString()}`);
+    if (requestId != null && requestId !== state.visualRequestId) return null;
+    if (state.lastResult?.result_id && state.lastResult.result_id !== resultId) return null;
+    state.backpack = response.backpack || response;
+    state.graph = response.graph || state.graph || null;
+  } else {
+    response = await requestJSON(`/api/chat/backpack?${params.toString()}`);
+    state.backpack = response;
+  }
+  renderGraphPanel();
+  renderDetail();
+  return response;
 }
 
 function renderAll() {

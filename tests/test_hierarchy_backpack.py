@@ -116,11 +116,12 @@ class HierarchyBackpackTests(unittest.TestCase):
             reset = engine.reset_session("unit")
 
             backpack = response["backpack"]
-            graph_data = backpack["graph_data"]
+            graph_data = engine.backpack(result_id=response["result"]["result_id"])["graph_data"]
             self.assertEqual(drill_down["current_depth"], 1)
             self.assertEqual(backpack["current_depth"], 1)
             self.assertEqual(backpack["active_focus_label"], "intro")
             self.assertGreaterEqual(backpack["total_depth_layers"], 1)
+            self.assertNotIn("layers", backpack)
             self.assertIn("nodes", graph_data)
             self.assertIn("edges", graph_data)
             self.assertTrue(graph_data["nodes"])

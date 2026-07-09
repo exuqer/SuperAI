@@ -190,7 +190,7 @@ class EngineVectorTests(unittest.TestCase):
             self.assertTrue(all(node["type"] == "token" for node in graph["nodes"]))
             self.assertTrue(all(node["shape"] == "circle" for node in graph["nodes"]))
 
-    def test_chat_backpack_includes_recursive_layers(self) -> None:
+    def test_chat_backpack_omits_recursive_layers_and_graph_data_until_lazy_load(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp) / "state"))
             engine._embedding_backend = FakeEmbeddingBackend()
@@ -198,12 +198,40 @@ class EngineVectorTests(unittest.TestCase):
 
             payload = engine.chat("Привет! Расскажи анекдот", session_id="unit")
             backpack = payload["backpack"]
-            layers = backpack["layers"]
 
-            self.assertGreaterEqual(len(layers), 2)
-            self.assertTrue(all("nodes" in layer and "edges" in layer for layer in layers))
-            self.assertTrue(all(layer["nodes"] for layer in layers))
-            self.assertNotEqual(layers[0]["focus_ids"], layers[1]["focus_ids"])
+            self.assertNotIn("layers", backpack)
+            self.assertNotIn("graph_data", backpack)
+            lazy_backpack = engine.backpack(result_id=payload["result"]["result_id"])
+            self.assertIn("graph_data", lazy_backpack)
+            self.assertTrue(lazy_backpack["graph_data"]["nodes"])
+            self.assertTrue(lazy_backpack["graph_data"]["edges"])
+
+    def test_chat_response_uses_lazy_backpack_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp) / "state"))
+            engine._embedding_backend = FakeEmbeddingBackend()
+            engine.train_text("Привет! Расскажи анекдот -- Блин! - сказал слон.", session_id="unit")
+
+            response = engine.chat("Привет! Расскажи анекдот", session_id="unit")
+            self.assertNotIn("graph_data", response["backpack"])
+
+            backpack = engine.backpack(result_id=response["result"]["result_id"])
+            self.assertIn("graph_data", backpack)
+            self.assertTrue(backpack["graph_data"]["nodes"])
+            self.assertTrue(backpack["graph_data"]["edges"])
+
+    def test_chat_uses_deferred_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp) / "state"))
+            engine._embedding_backend = FakeEmbeddingBackend()
+            engine.train_text("Привет! Расскажи анекдот.", session_id="unit")
+
+            with mock.patch.object(engine, "_schedule_persist", wraps=engine._schedule_persist) as schedule_persist, \
+                mock.patch.object(engine, "_persist", wraps=engine._persist) as persist:
+                engine.chat("Привет!", session_id="unit")
+
+            self.assertGreaterEqual(schedule_persist.call_count, 1)
+            self.assertEqual(persist.call_count, 0)
 
     def test_generation_candidates_apply_semantic_suppression_repetition_and_terminal_gravity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -284,6 +312,86 @@ class EngineVectorTests(unittest.TestCase):
             self.assertAlmostEqual(scores[token_id("дальше")], 2.0 * 2.0 * 1.3, places=5)
             self.assertAlmostEqual(scores[token_id("самокат")], 2.0 * 2.0 * 1.3, places=5)
             self.assertAlmostEqual(scores[token_id("ответ")], 2.0 * 2.0 * 0.01, places=5)
+
+    def test_generation_candidates_rank_by_weight_times_one_plus_cosine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp) / "state"))
+            engine._embedding_backend = FakeEmbeddingBackend()
+            now = 1.0
+            report = engine._empty_train_report(session_id="unit", epochs=1)
+            for token in ["__assistant__", "close", "far"]:
+                engine._ensure_token(token, report, now)
+            engine.checkpoint.tokens["close"]["vector"] = vec(1.0)
+            engine.checkpoint.tokens["far"]["vector"] = vec(0.0, 1.0)
+            engine._add_edge(token_id("__assistant__"), token_id("close"), 3.0, report, now)
+            engine._add_edge(token_id("__assistant__"), token_id("far"), 3.0, report, now)
+
+            scores = engine._generation_candidates(token_id("__assistant__"), vec(1.0), query_tokens=set(), generated_tokens=[])
+
+            self.assertGreater(scores[token_id("close")], scores[token_id("far")])
+            self.assertAlmostEqual(scores[token_id("close")], 6.0, places=5)
+            self.assertAlmostEqual(scores[token_id("far")], 3.0, places=5)
+
+    def test_outgoing_edges_are_limited_to_top_hundred_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp) / "state"))
+            engine._embedding_backend = FakeEmbeddingBackend()
+            now = 1.0
+            report = engine._empty_train_report(session_id="unit", epochs=1)
+            engine._ensure_token("source", report, now)
+            for index in range(150):
+                token = f"cand{index}"
+                engine._ensure_token(token, report, now)
+                engine._add_edge(token_id("source"), token_id(token), float(index), report, now)
+
+            edges = engine._outgoing_edges(token_id("source"))
+
+            self.assertEqual(len(edges), 100)
+            self.assertEqual(edges[0]["target"], token_id("cand149"))
+            self.assertEqual(edges[-1]["target"], token_id("cand50"))
+
+    def test_root_synthesis_uses_sqlite_outgoing_edges_without_global_graph_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp) / "state"))
+            engine._embedding_backend = FakeEmbeddingBackend()
+            now = 1.0
+            report = engine._empty_train_report(session_id="unit", epochs=1)
+            for token in ["__assistant__", "ответ", "дальше"]:
+                engine._ensure_token(token, report, now)
+            engine.checkpoint.tokens["ответ"]["vector"] = vec(1.0)
+            engine.checkpoint.tokens["дальше"]["vector"] = vec(0.0, 1.0)
+            engine._add_edge(token_id("__assistant__"), token_id("ответ"), 2.0, report, now)
+            engine._add_edge(token_id("ответ"), token_id("дальше"), 1.0, report, now)
+            backpack = engine._build_dense_backpack("привет", session_id="unit")
+
+            with mock.patch.object(engine, "_active_graph_edges", side_effect=AssertionError("active graph should not be loaded")), \
+                mock.patch.object(engine, "_all_edges", side_effect=AssertionError("global edge scan should not happen")):
+                response, source = engine._synthesize_response(
+                    ["привет"],
+                    backpack,
+                    session_id="unit",
+                    milestones=[],
+                    prompt_tail_token="привет",
+                )
+
+            self.assertEqual(source, "graph")
+            self.assertTrue(response)
+
+    def test_runtime_caches_rebuild_after_training_and_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = SemanticEngine(config=EngineConfig(state_dir=Path(tmp) / "state"))
+            engine._embedding_backend = FakeEmbeddingBackend()
+
+            with mock.patch.object(engine, "_rebuild_runtime_caches", wraps=engine._rebuild_runtime_caches) as rebuild_train:
+                engine.train_text("Самокат едет быстро.", session_id="unit")
+
+            self.assertGreaterEqual(rebuild_train.call_count, 1)
+
+            result = engine.chat("Привет", session_id="unit")["result"]
+            with mock.patch.object(engine, "_rebuild_runtime_caches", wraps=engine._rebuild_runtime_caches) as rebuild_feedback:
+                engine.feedback(result_id=result["result_id"], score=1, corrected_response="Отлично")
+
+            self.assertGreaterEqual(rebuild_feedback.call_count, 1)
 
 
 if __name__ == "__main__":

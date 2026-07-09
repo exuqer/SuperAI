@@ -9,7 +9,7 @@ from pathlib import Path
 import random
 import re
 import sqlite3
-from threading import RLock
+from threading import RLock, Timer
 import tempfile
 import time
 from typing import Any, Callable, Iterator
@@ -149,13 +149,40 @@ def cosine(left: list[float], right: list[float]) -> float:
 def cosine_similarity_matrix(vectors: np.ndarray, query_vector: np.ndarray) -> np.ndarray:
     if vectors.size == 0:
         return np.zeros((0,), dtype=np.float32)
-    query_norm = float(np.linalg.norm(query_vector))
-    vector_norms = np.linalg.norm(vectors, axis=1)
+    vector_array = np.asarray(vectors, dtype=np.float32)
+    query_array = np.asarray(query_vector, dtype=np.float32).reshape(-1)
+    if vector_array.ndim != 2 or query_array.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    query_norm = float(np.linalg.norm(query_array))
+    if query_norm <= 0.0:
+        return np.zeros((vector_array.shape[0],), dtype=np.float32)
+    vector_norms = np.linalg.norm(vector_array, axis=1)
+    dot_products = vector_array @ query_array
     denominator = vector_norms * query_norm
-    similarities = np.zeros((vectors.shape[0],), dtype=np.float32)
+    similarities = np.zeros((vector_array.shape[0],), dtype=np.float32)
     valid = denominator > 0.0
     if np.any(valid):
-        similarities[valid] = np.dot(vectors[valid], query_vector) / denominator[valid]
+        similarities[valid] = dot_products[valid] / denominator[valid]
+    return similarities
+
+
+def cosine_similarity_matrix_with_norms(vectors: np.ndarray, vector_norms: np.ndarray, query_vector: np.ndarray) -> np.ndarray:
+    if vectors.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    vector_array = np.asarray(vectors, dtype=np.float32)
+    norms = np.asarray(vector_norms, dtype=np.float32).reshape(-1)
+    query_array = np.asarray(query_vector, dtype=np.float32).reshape(-1)
+    if vector_array.ndim != 2 or query_array.size == 0 or norms.size != vector_array.shape[0]:
+        return np.zeros((0,), dtype=np.float32)
+    query_norm = float(np.linalg.norm(query_array))
+    if query_norm <= 0.0:
+        return np.zeros((vector_array.shape[0],), dtype=np.float32)
+    denominator = norms * query_norm
+    dot_products = vector_array @ query_array
+    similarities = np.zeros((vector_array.shape[0],), dtype=np.float32)
+    valid = denominator > 0.0
+    if np.any(valid):
+        similarities[valid] = dot_products[valid] / denominator[valid]
     return similarities
 
 
@@ -263,6 +290,25 @@ class SemanticEngine:
         self.checkpoint.vector_dim = DEFAULT_VECTOR_DIM
         self._normalize_loaded_state()
         self._normalize_hierarchy_state()
+        self._edge_index_conn: sqlite3.Connection | None = None
+        self._runtime_cache_dirty = True
+        self._token_vector_lookup_cache: dict[str, np.ndarray] = {}
+        self._token_vector_labels: list[str] = []
+        self._token_vector_matrix_cache = np.zeros((0, DEFAULT_VECTOR_DIM), dtype=np.float32)
+        self._token_vector_norms_cache = np.zeros((0,), dtype=np.float32)
+        self._content_token_labels: list[str] = []
+        self._content_token_matrix_cache = np.zeros((0, DEFAULT_VECTOR_DIM), dtype=np.float32)
+        self._content_token_norms_cache = np.zeros((0,), dtype=np.float32)
+        self._token_out_degree_cache: dict[str, int] = {}
+        self._token_continuation_cache: dict[str, bool] = {}
+        self._active_subgraph_edge_cache: dict[str, list[dict[str, Any]]] = {}
+        self._node_by_id_cache: dict[str, dict[str, Any]] = {}
+        self._node_rank_pool_cache: list[str] = []
+        self._visual_adjacency_cache: dict[str, list[dict[str, Any]]] = {}
+        self._persist_timer: Timer | None = None
+        self._persist_dirty = False
+        self._refresh_edge_index()
+        self._rebuild_runtime_caches()
         self._touch_meta("state_dir", str(self.config.state_dir))
         self._touch_meta("embedding_model", EMBEDDING_MODEL_NAME)
 
@@ -348,6 +394,15 @@ class SemanticEngine:
             return [normalize_vector(vector) for vector in self._embedding_backend.encode_many(texts)]
         return [zero_vector() for _ in texts]
 
+    def _token_vector_matrix(self, labels: list[str]) -> np.ndarray:
+        if not labels:
+            return np.zeros((0, DEFAULT_VECTOR_DIM), dtype=np.float32)
+        self._ensure_runtime_caches()
+        rows = [self._token_vector_lookup_cache.get(canonical_token(label), np.zeros((DEFAULT_VECTOR_DIM,), dtype=np.float32)) for label in labels]
+        if not rows:
+            return np.zeros((0, DEFAULT_VECTOR_DIM), dtype=np.float32)
+        return np.asarray(rows, dtype=np.float32)
+
     def _token_embedding(self, token: str) -> list[float]:
         cleaned = canonical_token(token)
         if not cleaned or cleaned in PUNCT_TOKENS or cleaned in ROLE_TOKENS:
@@ -360,6 +415,160 @@ class SemanticEngine:
             store = {}
             self.checkpoint.meta["hypernodes"] = store
         return store
+
+    def _edge_index_connection(self) -> sqlite3.Connection:
+        conn = self._edge_index_conn
+        if conn is None:
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=MEMORY")
+            conn.execute("PRAGMA synchronous=OFF")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS edges (edge_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL, relation TEXT NOT NULL, weight REAL NOT NULL, pheromone REAL NOT NULL)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_weight ON edges (source, weight DESC)")
+            self._edge_index_conn = conn
+        return conn
+
+    def _mark_runtime_caches_dirty(self) -> None:
+        self._runtime_cache_dirty = True
+
+    def _ensure_runtime_caches(self) -> None:
+        if self._runtime_cache_dirty:
+            self._rebuild_runtime_caches()
+
+    def _rebuild_runtime_caches(self) -> None:
+        token_labels = list(self.checkpoint.tokens.keys())
+        token_vectors: list[np.ndarray] = []
+        token_lookup: dict[str, np.ndarray] = {}
+        for label in token_labels:
+            vector = np.asarray(normalize_vector(self.checkpoint.tokens[label].get("vector")), dtype=np.float32)
+            token_vectors.append(vector)
+            token_lookup[label] = vector
+        if token_vectors:
+            matrix = np.asarray(token_vectors, dtype=np.float32)
+            norms = np.linalg.norm(matrix, axis=1)
+        else:
+            matrix = np.zeros((0, DEFAULT_VECTOR_DIM), dtype=np.float32)
+            norms = np.zeros((0,), dtype=np.float32)
+        content_indexes = [index for index, label in enumerate(token_labels) if label not in ROLE_TOKENS and label not in PUNCT_TOKENS]
+        content_labels = [token_labels[index] for index in content_indexes]
+        content_matrix = matrix[content_indexes] if content_indexes else np.zeros((0, DEFAULT_VECTOR_DIM), dtype=np.float32)
+        content_norms = norms[content_indexes] if content_indexes else np.zeros((0,), dtype=np.float32)
+        out_degrees: dict[str, int] = {}
+        continuation_cache: dict[str, bool] = {}
+        active_edges_cache: dict[str, list[dict[str, Any]]] = {}
+        visual_adjacency: dict[str, list[dict[str, Any]]] = {}
+        for node_id, record in self._hypernode_store().items():
+            if not isinstance(record, dict):
+                continue
+            subgraph = self._normalize_subgraph_payload(record.get("subgraph"))
+            node_edges = self._graph_edges_from_subgraph(str(node_id), subgraph)
+            if str(node_id) != ROOT_HYPERNODE_ID:
+                active_edges_cache[str(node_id)] = node_edges
+            for edge in node_edges:
+                source_id = str(edge.get("source") or "")
+                target_id = str(edge.get("target") or "")
+                if source_id and target_id:
+                    visual_adjacency.setdefault(source_id, []).append(edge)
+                    visual_adjacency.setdefault(target_id, []).append(edge)
+                source = str(edge.get("source") or "")
+                target = str(edge.get("target") or "")
+                if source.startswith("token:") and target.startswith("token:"):
+                    out_degrees[source] = out_degrees.get(source, 0) + 1
+                    target_label = canonical_token(target.removeprefix("token:"))
+                    if target_label and target_label not in ROLE_TOKENS and target_label not in TERMINAL_TOKENS:
+                        continuation_cache[source] = True
+        for edges in visual_adjacency.values():
+            edges.sort(key=lambda edge: float(edge.get("weight", 0.0)), reverse=True)
+        node_by_id = {
+            f"token:{token}": {
+                "id": f"token:{token}",
+                "type": "token",
+                "token": token,
+                "label": record.get("label") or token,
+                "count": int(record.get("count", 0)),
+            }
+            for token, record in self.checkpoint.tokens.items()
+        }
+        for node_id, record in self._hypernode_store().items():
+            if not isinstance(record, dict):
+                continue
+            node_by_id[str(node_id)] = {
+                "id": str(node_id),
+                "type": "hypernode",
+                "label": record.get("label") or str(node_id).removeprefix(HIERARCHY_NODE_PREFIX),
+                "count": int(record.get("count", 0)),
+            }
+        rank_pool = sorted(node_by_id, key=lambda node_id: self._node_rank(node_by_id[node_id]), reverse=True)
+        for token in self.checkpoint.tokens:
+            out_degrees.setdefault(f"token:{token}", 0)
+            continuation_cache.setdefault(f"token:{token}", False)
+        self._token_vector_labels = token_labels
+        self._token_vector_lookup_cache = token_lookup
+        self._token_vector_matrix_cache = matrix
+        self._token_vector_norms_cache = norms
+        self._content_token_labels = content_labels
+        self._content_token_matrix_cache = content_matrix
+        self._content_token_norms_cache = content_norms
+        self._token_out_degree_cache = out_degrees
+        self._token_continuation_cache = continuation_cache
+        self._active_subgraph_edge_cache = active_edges_cache
+        self._node_by_id_cache = node_by_id
+        self._node_rank_pool_cache = rank_pool
+        self._visual_adjacency_cache = visual_adjacency
+        self._runtime_cache_dirty = False
+
+    def _edge_index_row(
+        self,
+        edge_id: str,
+        source: str,
+        target: str,
+        relation: str,
+        weight: float,
+        pheromone: float,
+    ) -> tuple[str, str, str, str, float, float]:
+        return (str(edge_id), str(source), str(target), str(relation), float(weight), float(pheromone))
+
+    def _refresh_edge_index(self) -> None:
+        conn = self._edge_index_connection()
+        conn.execute("DELETE FROM edges")
+        rows: list[tuple[str, str, str, str, float, float]] = []
+        for node_id, record in self._hypernode_store().items():
+            if not isinstance(record, dict):
+                continue
+            subgraph = self._normalize_subgraph_payload(record.get("subgraph"))
+            for edge_id, payload in subgraph.get("edges", {}).items():
+                parsed = self._parse_edge_key(edge_id)
+                if parsed is None:
+                    continue
+                source, relation, target = parsed
+                rows.append(
+                    self._edge_index_row(
+                        edge_id,
+                        source,
+                        target,
+                        relation,
+                        float(payload.get("weight", 0.0)),
+                        float(payload.get("pheromone", 0.0)),
+                    )
+                )
+        if rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO edges (edge_id, source, target, relation, weight, pheromone) VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+        conn.commit()
+        self._mark_runtime_caches_dirty()
+
+    def _upsert_edge_index(self, edge_id: str, source: str, target: str, relation: str, weight: float, pheromone: float) -> None:
+        conn = self._edge_index_connection()
+        conn.execute(
+            "INSERT OR REPLACE INTO edges (edge_id, source, target, relation, weight, pheromone) VALUES (?, ?, ?, ?, ?, ?)",
+            self._edge_index_row(edge_id, source, target, relation, weight, pheromone),
+        )
+        self._mark_runtime_caches_dirty()
 
     def _ensure_root_hypernode(self) -> dict[str, Any]:
         store = self._hypernode_store()
@@ -673,7 +882,14 @@ class SemanticEngine:
             record = self._ensure_root_hypernode()
         else:
             _, record = self._active_graph_record(session_id)
-        return self._graph_edges_from_subgraph(str(record.get("id") or ROOT_HYPERNODE_ID), self._normalize_subgraph_payload(record.get("subgraph")))
+        node_id = str(record.get("id") or ROOT_HYPERNODE_ID)
+        self._ensure_runtime_caches()
+        cached = self._active_subgraph_edge_cache.get(node_id)
+        if cached is not None:
+            return list(cached)
+        edges = self._graph_edges_from_subgraph(node_id, self._normalize_subgraph_payload(record.get("subgraph")))
+        self._active_subgraph_edge_cache[node_id] = list(edges)
+        return edges
 
     def _total_edge_count(self) -> int:
         total = 0
@@ -1225,7 +1441,16 @@ class SemanticEngine:
         finally:
             conn.close()
 
-    def chat(self, text: str, *, session_id: str = "default", backpack_limit: int | None = None) -> dict[str, Any]:
+    def chat(
+        self,
+        text: str,
+        *,
+        session_id: str = "default",
+        backpack_limit: int | None = None,
+        include_graph: bool = False,
+        include_layers: bool = False,
+        include_trace: bool = False,
+    ) -> dict[str, Any]:
         normalized = normalize_text(text)
         if not normalized:
             raise ValueError("text is required")
@@ -1247,6 +1472,8 @@ class SemanticEngine:
             current_depth = self._stack_depth(session_id)
             total_depth_layers = self._total_depth_layers()
             active_focus_label = self._focus_label(stack_focus_id) if stack_focus_id else normalized
+            seed_ids = [item["node_id"] for item in top_tokens[:4]]
+            stack_snapshot = self._stack_snapshot(session_id)
             result = {
                 "result_id": result_id,
                 "input_text": normalized,
@@ -1272,60 +1499,53 @@ class SemanticEngine:
                         for item in backpack["history_vectors"]
                     ],
                     "token_scores": top_tokens,
-                    "backpack_stack": self._stack_snapshot(session_id),
+                    "backpack_stack": stack_snapshot,
                 },
             }
-            graph_backpack = self._build_backpack_graph(
-                session_id=session_id,
-                query=normalized,
-                limit=backpack_limit or self.config.backpack_limit,
-                seed_ids=[item["node_id"] for item in top_tokens[:4]],
-                highlight_result_id=None,
-            )
-            backpack_layers = self._build_recursive_backpack_layers(
-                base_graph=graph_backpack,
-                query=normalized,
-                limit=backpack_limit or self.config.backpack_limit,
-                seed_ids=[item["node_id"] for item in top_tokens[:4]],
-                highlight_result_id=None,
-            )
-            graph_backpack["layers"] = backpack_layers
-            graph_backpack["layer_count"] = len(backpack_layers)
-            graph_backpack["current_depth"] = current_depth
-            graph_backpack["total_depth_layers"] = total_depth_layers
-            graph_backpack["active_focus_label"] = active_focus_label
-            graph_backpack["stack"] = self._stack_snapshot(session_id)
             result["backpack"] = {
                 "current_depth": current_depth,
                 "total_depth_layers": total_depth_layers,
                 "active_focus_label": active_focus_label,
-                "graph_id": graph_backpack.get("graph_id", ""),
-                "graph_data": graph_backpack,
-                "layers": backpack_layers,
-                "stack": self._stack_snapshot(session_id),
+                "stack": stack_snapshot,
+                "seed_ids": seed_ids,
+                "focus_id": stack_focus_id,
                 "query_vector": backpack["query_vector"],
                 "raw_query_vector": backpack["raw_query_vector"],
                 "focus_vector": scoring_vector,
                 "history_vectors": backpack["history_vectors"],
             }
+            graph: dict[str, Any] | None = None
+            if include_graph:
+                result["backpack"] = self._build_result_backpack_payload(
+                    result,
+                    limit=backpack_limit or self.config.backpack_limit,
+                    include_layers=include_layers,
+                )
+                graph = self._build_graph(
+                    query=normalized,
+                    limit=self.config.graph_limit,
+                    seed_ids=seed_ids,
+                    highlight_result_id=result_id,
+                )
             self._store_result(result, session_id=session_id, user_text=normalized)
-            graph = self._build_graph(
-                query=normalized,
-                limit=self.config.graph_limit,
-                seed_ids=[item["node_id"] for item in top_tokens[:4]],
-                highlight_result_id=result_id,
-            )
-            self._persist()
-            return {
+            self._schedule_persist()
+            hidden_backpack_keys = {"query_vector", "raw_query_vector", "focus_vector", "history_vectors"}
+            if not include_graph:
+                hidden_backpack_keys.update({"graph_data", "layers"})
+            response_backpack = {key: value for key, value in result["backpack"].items() if key not in hidden_backpack_keys}
+            payload = {
                 "result": result,
-                "graph": graph,
-                "graph_data": graph_backpack,
-                "backpack": result["backpack"],
+                "backpack": response_backpack,
                 "current_depth": current_depth,
                 "total_depth_layers": total_depth_layers,
                 "active_focus_label": active_focus_label,
-                "trace": result["trace"],
+                "graph_status": "ready" if include_graph else "lazy",
             }
+            if graph is not None:
+                payload["graph"] = graph
+            if include_trace:
+                payload["trace"] = result["trace"]
+            return payload
 
     def drill_down(self, node_id: str, *, session_id: str = "default", limit: int | None = None) -> dict[str, Any]:
         with self._lock:
@@ -1334,7 +1554,7 @@ class SemanticEngine:
             stack = self._session_backpack_stack(session_id)
             stack.append(str(node_id))
             self._trim_stack(session_id)
-            self._persist()
+            self._schedule_persist()
             return self._backpack_snapshot(session_id=session_id, query=None, limit=limit)
 
     def drill_up(self, *, session_id: str = "default", limit: int | None = None) -> dict[str, Any]:
@@ -1343,7 +1563,7 @@ class SemanticEngine:
             if stack:
                 stack.pop()
             self._trim_stack(session_id)
-            self._persist()
+            self._schedule_persist()
             return self._backpack_snapshot(session_id=session_id, query=None, limit=limit)
 
     def _stack_snapshot(self, session_id: str) -> list[dict[str, Any]]:
@@ -1569,7 +1789,7 @@ class SemanticEngine:
         with self._lock:
             self.checkpoint.sessions[session_id] = []
             self._backpack_stack_store().pop(session_id, None)
-            self._persist()
+            self._schedule_persist()
         return {"session_id": session_id, "reset": True}
 
     def feedback(self, *, result_id: str, score: int, corrected_response: str | None = None) -> dict[str, Any]:
@@ -1590,6 +1810,7 @@ class SemanticEngine:
                     run = {"session_id": str(result.get("session_id") or "default"), "kind": "feedback", "sequences": 0}
                     self._train_dialogue_pair(prompt_text, response_text, report, run)
             self._persist()
+            self._rebuild_runtime_caches()
             return {
                 "result_id": result_id,
                 "score": score,
@@ -1605,14 +1826,126 @@ class SemanticEngine:
 
     def save(self) -> None:
         with self._lock:
+            self._cancel_persist_timer()
             self._persist()
+
+    def flush_pending_persist(self) -> None:
+        with self._lock:
+            self._cancel_persist_timer()
+            if self._persist_dirty:
+                self._persist()
+
+    def backpack(
+        self,
+        *,
+        session_id: str = "default",
+        limit: int | None = None,
+        result_id: str | None = None,
+        include_layers: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if result_id:
+                result = self.checkpoint.results.get(result_id)
+                if not result:
+                    raise KeyError(result_id)
+                return self._build_result_backpack_payload(result, limit=limit or self.config.backpack_limit, include_layers=include_layers)
+            return self._backpack_snapshot(session_id=session_id, query=None, limit=limit)
+
+    def chat_visuals(
+        self,
+        *,
+        result_id: str,
+        session_id: str = "default",
+        backpack_limit: int | None = None,
+        graph_limit: int | None = None,
+        include_layers: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            result = self.checkpoint.results.get(result_id)
+            if not result:
+                raise KeyError(result_id)
+            result_session_id = str(result.get("session_id") or session_id or "default")
+            backpack = self._build_result_backpack_payload(
+                result,
+                limit=backpack_limit or self.config.backpack_limit,
+                include_layers=include_layers,
+            )
+            seed_ids = list((backpack.get("seed_ids") or [])[:4])
+            graph = self._build_graph(
+                query=normalize_text(str(result.get("input_text") or "")) or None,
+                limit=graph_limit or self.config.graph_limit,
+                seed_ids=seed_ids,
+                highlight_result_id=result_id,
+            )
+            return {
+                "result_id": result_id,
+                "session_id": result_session_id,
+                "backpack": backpack,
+                "graph_data": backpack.get("graph_data"),
+                "graph": graph,
+            }
+
+    def _build_result_backpack_payload(self, result: dict[str, Any], *, limit: int, include_layers: bool = False) -> dict[str, Any]:
+        backpack = dict(result.get("backpack") or {}) if isinstance(result.get("backpack"), dict) else {}
+        result_id = str(result.get("result_id") or "")
+        session_id = str(result.get("session_id") or "default")
+        query = normalize_text(str(result.get("input_text") or ""))
+        seed_ids = [str(node_id) for node_id in (backpack.get("seed_ids") or []) if str(node_id)]
+        if not seed_ids:
+            seed_ids = [str(item.get("node_id") or "") for item in (result.get("top_tokens") or [])[:4] if str(item.get("node_id") or "")]
+        focus_id = str(backpack.get("focus_id") or "")
+        if focus_id.startswith(HIERARCHY_NODE_PREFIX):
+            graph_data = self._build_hypernode_graph(focus_id, limit=limit or self.config.backpack_limit, highlight_result_id=result_id or None)
+        else:
+            graph_data = self._build_backpack_graph(
+                session_id=session_id,
+                query=query or None,
+                limit=limit or self.config.backpack_limit,
+                seed_ids=seed_ids,
+                highlight_result_id=result_id or None,
+            )
+        current_depth = int(backpack.get("current_depth", self._stack_depth(session_id)) or 0)
+        total_depth_layers = int(backpack.get("total_depth_layers", self._total_depth_layers()) or 0)
+        active_focus_label = normalize_text(str(backpack.get("active_focus_label") or query))
+        stack = list(backpack.get("stack") or self._stack_snapshot(session_id))
+        graph_data["current_depth"] = current_depth
+        graph_data["total_depth_layers"] = total_depth_layers
+        graph_data["active_focus_label"] = active_focus_label
+        graph_data["stack"] = stack
+        payload = {
+            **backpack,
+            "current_depth": current_depth,
+            "total_depth_layers": total_depth_layers,
+            "active_focus_label": active_focus_label,
+            "stack": stack,
+            "seed_ids": seed_ids,
+            "graph_id": graph_data.get("graph_id", ""),
+            "graph_data": graph_data,
+        }
+        if include_layers:
+            layers = self._build_recursive_backpack_layers(
+                base_graph=graph_data,
+                query=query or None,
+                limit=limit or self.config.backpack_limit,
+                seed_ids=seed_ids,
+                highlight_result_id=result_id or None,
+            )
+            graph_data["layers"] = layers
+            graph_data["layer_count"] = len(layers)
+            payload["layers"] = layers
+        return payload
 
     def analyze(self, text: str, **kwargs: Any) -> dict[str, Any]:
         return self.chat(text, session_id=str(kwargs.get("session_id") or "default"))["result"]
 
     def analyze_with_graph(self, text: str, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         payload = self.chat(text, session_id=str(kwargs.get("session_id") or "default"))
-        return payload["result"], payload["graph"]
+        result = payload["result"]
+        backpack = self.backpack(result_id=result["result_id"])
+        graph = backpack.get("graph_data") if isinstance(backpack, dict) else None
+        if not isinstance(graph, dict):
+            graph = self.graph(query=text, result_id=result["result_id"])
+        return result, graph
 
     def _empty_train_report(self, *, session_id: str, epochs: int) -> dict[str, Any]:
         return {
@@ -1645,6 +1978,7 @@ class SemanticEngine:
         report["tokens"] = len(self.checkpoint.tokens)
         report["edges"] = self._total_edge_count()
         self._persist()
+        self._rebuild_runtime_caches()
 
     def _dataset_mode(self, path: Path) -> str:
         sample_lines: list[str] = []
@@ -1961,7 +2295,9 @@ class SemanticEngine:
         else:
             existing["weight"] = float(existing.get("weight", 0.0)) + 1.0
             existing["pheromone"] = max(float(existing.get("pheromone", 0.0)), 1.0)
+            payload = existing
         parent["subgraph"] = subgraph
+        self._upsert_edge_index(edge_key, parent_id, child_id, "hierarchical_edge", float(payload.get("weight", 0.0)), float(payload.get("pheromone", 0.0)))
         parent["updated_at"] = now
 
     def _merge_subgraphs(self, left: Any, right: Any) -> dict[str, Any]:
@@ -2100,6 +2436,7 @@ class SemanticEngine:
         )
         local_record["label"] = str(local_record.get("label") or cleaned)
         local_record["count"] = int(local_record.get("count", 0) or 0) + max(int(count or 1), 1)
+        self._mark_runtime_caches_dirty()
         return record
 
     def _jsonl_record_to_text(self, record: Any) -> str:
@@ -2114,6 +2451,12 @@ class SemanticEngine:
         hierarchy_text = normalize_text(str(record.get("text") or record.get("content") or record.get("body") or ""))
         if hierarchy_text and "hierarchy" in record:
             return hierarchy_text
+        sample = record.get("sample")
+        if isinstance(sample, list):
+            parts = [self._jsonl_record_to_text(item) for item in sample]
+            joined = "\n".join(part for part in parts if part)
+            if joined:
+                return joined
         pair_candidates = (
             ("prompt", "response"),
             ("question", "answer"),
@@ -2188,15 +2531,14 @@ class SemanticEngine:
                 }
                 for token in query_set
             ]
-        labels = list(self.checkpoint.tokens.keys())
-        vectors = np.asarray([normalize_vector(self.checkpoint.tokens[label].get("vector")) for label in labels], dtype=np.float32)
-        similarities = cosine_similarity_matrix(vectors, np.asarray(normalize_vector(query_vector), dtype=np.float32))
+        self._ensure_runtime_caches()
+        labels = self._content_token_labels
+        vectors = self._content_token_matrix_cache
+        similarities = cosine_similarity_matrix_with_norms(vectors, self._content_token_norms_cache, np.asarray(normalize_vector(query_vector), dtype=np.float32))
         max_count = max((int(record.get("count", 0)) for record in self.checkpoint.tokens.values()), default=1)
         scored: list[dict[str, Any]] = []
         for label, similarity in zip(labels, similarities):
             record = self.checkpoint.tokens[label]
-            if label in ROLE_TOKENS or label in PUNCT_TOKENS:
-                continue
             score = float(similarity)
             if label in query_set:
                 score += 0.45
@@ -2234,11 +2576,12 @@ class SemanticEngine:
         query_array = np.asarray(normalize_vector(query_vector), dtype=np.float32)
         if float(np.linalg.norm(query_array)) <= 0.0:
             return length_based
-        labels = [label for label in self.checkpoint.tokens if label not in ROLE_TOKENS and label not in PUNCT_TOKENS]
+        self._ensure_runtime_caches()
+        labels = self._content_token_labels
         if not labels:
             return length_based
-        vectors = np.asarray([normalize_vector(self.checkpoint.tokens[label].get("vector")) for label in labels], dtype=np.float32)
-        similarities = cosine_similarity_matrix(vectors, query_array)
+        vectors = self._content_token_matrix_cache
+        similarities = cosine_similarity_matrix_with_norms(vectors, self._content_token_norms_cache, query_array)
         if similarities.size == 0:
             return length_based
         top_similarity = float(np.max(similarities))
@@ -2278,11 +2621,12 @@ class SemanticEngine:
         query_array = np.asarray(normalize_vector(query_vector), dtype=np.float32)
         if float(np.linalg.norm(query_array)) <= 0.0:
             return []
-        labels = [label for label in self.checkpoint.tokens if label not in ROLE_TOKENS and label not in PUNCT_TOKENS]
+        self._ensure_runtime_caches()
+        labels = self._content_token_labels
         if not labels:
             return []
-        vectors = np.asarray([normalize_vector(self.checkpoint.tokens[label].get("vector")) for label in labels], dtype=np.float32)
-        similarities = cosine_similarity_matrix(vectors, query_array)
+        vectors = self._content_token_matrix_cache
+        similarities = cosine_similarity_matrix_with_norms(vectors, self._content_token_norms_cache, query_array)
         candidate_indexes = np.flatnonzero(similarities > 0.0)
         if candidate_indexes.size == 0:
             return []
@@ -2384,8 +2728,9 @@ class SemanticEngine:
     ) -> tuple[str, str]:
         current_token = token_id(ROLE_ASSISTANT_TOKEN)
         active_graph_id, active_record = self._active_graph_record(session_id)
-        active_graph = self._subgraph_to_graph_payload(active_graph_id, active_record.get("subgraph"), label=str(active_record.get("label") or active_graph_id))
-        active_edges = list(active_graph.get("edges", []))
+        active_edges: list[dict[str, Any]] | None = None
+        if active_graph_id != ROOT_HYPERNODE_ID:
+            active_edges = self._active_graph_edges(session_id)
         prompt_tail = next((canonical_token(token) for token in reversed(query_tokens) if canonical_token(token)), "")
         previous_token: str | None = token_id(prompt_tail) if prompt_tail else None
         raw_tail = canonical_token(prompt_tail_token or "")
@@ -2394,23 +2739,21 @@ class SemanticEngine:
             if raw_tail_id != previous_token and (previous_token is None or not self._transition_targets(previous_token, current_token)):
                 previous_token = raw_tail_id
         generated: list[str] = []
+        generated_non_terminal_count = 0
         query_token_set = {canonical_token(token) for token in query_tokens}
-        out_degrees = self._source_out_degrees(edges=active_edges)
-        milestone_ids = [
-            token_id(milestone)
-            for milestone in (milestones or [])
-            if token_id(milestone).removeprefix("token:") in self.checkpoint.tokens
-        ]
+        self._ensure_runtime_caches()
+        out_degrees = self._source_out_degrees(edges=active_edges) if active_edges is not None else self._token_out_degree_cache
+        milestone_ids = [token_id(milestone) for milestone in (milestones or []) if token_id(milestone).removeprefix("token:") in self.checkpoint.tokens]
+        milestone_vectors = [np.asarray(self._token_vector(milestone.removeprefix("token:")), dtype=np.float32) for milestone in milestone_ids]
         query_array = np.asarray(normalize_vector(backpack["focus_vector"] if self._vector_norm(backpack.get("focus_vector", [])) > 0.0 else backpack["query_vector"]), dtype=np.float32)
         for step in range(max_length):
-            non_terminal_count = len([token for token in (item.removeprefix("token:") for item in generated) if token and token not in TERMINAL_TOKENS])
-            close_ready = non_terminal_count >= 4
+            close_ready = generated_non_terminal_count >= 4
             final_phase = False
             next_milestone: str | None = None
             focal_vector = backpack["query_vector"]
             if milestone_ids:
                 phase_index = min((step * len(milestone_ids)) // max(max_length, 1), len(milestone_ids) - 1)
-                milestone_vector = np.asarray(normalize_vector(self._token_vector(milestone_ids[phase_index].removeprefix("token:"))), dtype=np.float32)
+                milestone_vector = milestone_vectors[phase_index]
                 focal_vector = normalize_vector(((query_array * 0.5) + (milestone_vector * 1.5)).tolist())
                 final_phase = phase_index == len(milestone_ids) - 1
                 if not final_phase:
@@ -2439,6 +2782,8 @@ class SemanticEngine:
                 break
             generated.append(next_token)
             next_label = canonical_token(next_token.removeprefix("token:"))
+            if next_label and next_label not in TERMINAL_TOKENS:
+                generated_non_terminal_count += 1
             if self._is_stop_token(next_token) and (final_phase or (next_label == "." and close_ready) or not self._terminal_has_continuation(next_token, edges=active_edges)):
                 break
             previous_token = current_token
@@ -2462,55 +2807,65 @@ class SemanticEngine:
         terminal_gravity: float | None = None,
         out_degrees: dict[str, int] | None = None,
     ) -> dict[str, float]:
-        edge_pool = active_edges if active_edges is not None else self._active_graph_edges()
-        edges = [edge for edge in self._outgoing_edges(current_token, edges=edge_pool) if str(edge.get("target") or "").startswith("token:")]
+        self._ensure_runtime_caches()
+        edge_pool = active_edges
+        edges = self._outgoing_edges(current_token) if edge_pool is None else self._outgoing_edges(current_token, edges=edge_pool)
+        edges = [edge for edge in edges if str(edge.get("target") or "").startswith("token:")]
         if not edges:
             return {}
-        candidate_ids = [str(edge["target"]) for edge in edges]
-        labels = [candidate.removeprefix("token:") for candidate in candidate_ids]
-        valid_indexes = [index for index, label in enumerate(labels) if label and not is_role_token(label)]
-        if not valid_indexes:
+        candidate_ids = np.asarray([str(edge["target"]) for edge in edges], dtype=object)
+        labels = np.asarray([candidate.removeprefix("token:") for candidate in candidate_ids], dtype=object)
+        valid_mask = np.asarray([bool(label) and not is_role_token(str(label)) for label in labels], dtype=bool)
+        if not np.any(valid_mask):
             return {}
-        candidate_ids = [candidate_ids[index] for index in valid_indexes]
-        labels = [labels[index] for index in valid_indexes]
-        candidate_ids_array = np.asarray(candidate_ids, dtype=object)
-        labels_array = np.asarray(labels, dtype=object)
-        edge_weights = np.asarray([max(float(edge.get("weight", 0.0)), 0.0) for edge in edges], dtype=np.float32)
-        base_weights = edge_weights[np.asarray(valid_indexes, dtype=np.intp)]
-        vectors = np.asarray([normalize_vector(self._token_vector(label)) for label in labels], dtype=np.float32)
-        similarities = cosine_similarity_matrix(vectors, np.asarray(normalize_vector(query_vector), dtype=np.float32))
-        reinforcement = np.ones(len(candidate_ids), dtype=np.float32)
+        candidate_ids = candidate_ids[valid_mask]
+        labels = labels[valid_mask]
+        edge_weights = np.asarray([max(float(edge.get("weight", 0.0)), 0.0) for edge in edges], dtype=np.float32)[valid_mask]
+        candidate_vectors = self._token_vector_matrix([str(label) for label in labels])
+        similarities = cosine_similarity_matrix(candidate_vectors, np.asarray(normalize_vector(query_vector), dtype=np.float32))
+        scores = edge_weights * (1.0 + similarities)
+        reinforcement = np.ones(candidate_ids.shape[0], dtype=np.float32)
         if next_milestone:
             milestone_id = token_id(next_milestone)
-            edge_sources = np.asarray([str(edge.get("source") or "") for edge in edge_pool], dtype=object)
-            edge_targets = np.asarray([str(edge.get("target") or "") for edge in edge_pool], dtype=object)
-            milestone_sources = edge_sources[edge_targets == milestone_id]
-            milestone_mask = (candidate_ids_array == milestone_id) | np.isin(candidate_ids_array, milestone_sources)
+            if edge_pool is None:
+                candidate_list = [str(candidate_id) for candidate_id in candidate_ids.tolist()]
+                if candidate_list:
+                    placeholders = ", ".join("?" for _ in candidate_list)
+                    rows = self._edge_index_connection().execute(
+                        f"SELECT source FROM edges WHERE target = ? AND source IN ({placeholders})",
+                        (milestone_id, *candidate_list),
+                    ).fetchall()
+                    milestone_sources = np.unique(np.asarray([str(row["source"]) for row in rows], dtype=object))
+                else:
+                    milestone_sources = np.asarray([], dtype=object)
+            else:
+                edge_sources = np.asarray([str(edge.get("source") or "") for edge in edge_pool], dtype=object)
+                edge_targets = np.asarray([str(edge.get("target") or "") for edge in edge_pool], dtype=object)
+                milestone_sources = np.unique(edge_sources[edge_targets == milestone_id])
+            milestone_mask = (candidate_ids == milestone_id) | np.isin(candidate_ids, milestone_sources)
             reinforcement = reinforcement + milestone_mask.astype(np.float32) * 0.3
-        repeat_labels = np.asarray([label.casefold() for label in labels], dtype=object)
+        repeat_labels = np.asarray([str(label).casefold() for label in labels], dtype=object)
         generated = generated_tokens or []
         generated_labels = np.asarray([canonical_token(str(token).removeprefix("token:")) for token in generated], dtype=object)
         repeat_mask = np.isin(repeat_labels, generated_labels)
         reinforcement = np.where(repeat_mask, 0.01, reinforcement)
-        scores = base_weights * (1.0 + similarities) * reinforcement
+        scores = scores * reinforcement
         transition_targets = self._transition_targets(previous_token, current_token) if previous_token else {}
-        transition_boosts = np.asarray([3.0 if candidate_id in transition_targets else 1.0 for candidate_id in candidate_ids], dtype=np.float32)
+        transition_boosts = np.where(np.isin(candidate_ids, np.asarray(list(transition_targets.keys()), dtype=object)), 3.0, 1.0).astype(np.float32)
         scores = scores * transition_boosts
-        degrees = out_degrees or {}
-        if degrees:
-            hub_divisors = np.asarray(
-                [math.log(float(degrees.get(candidate_id, 0))) if int(degrees.get(candidate_id, 0)) > 15 else 1.0 for candidate_id in candidate_ids],
-                dtype=np.float32,
-            )
+        degrees = self._token_out_degree_cache if out_degrees is None else out_degrees
+        degree_values = np.asarray([int(degrees.get(str(candidate_id), 0)) for candidate_id in candidate_ids], dtype=np.float32)
+        if degree_values.size:
+            hub_divisors = np.where(degree_values > 15.0, np.log(np.maximum(degree_values, 1.0)), 1.0).astype(np.float32)
             scores = scores / np.maximum(hub_divisors, 1.0)
         query_set = {canonical_token(token) for token in (query_tokens or [])}
-        generated_label_set = {label.casefold() for label in generated_labels.tolist() if label}
-        non_terminal_generated = [label for label in generated_labels.tolist() if label and label not in TERMINAL_TOKENS]
+        generated_labels_list = [label for label in generated_labels.tolist() if label]
+        non_terminal_count = int(np.count_nonzero(np.asarray([label not in TERMINAL_TOKENS for label in generated_labels_list], dtype=bool)))
         terminal_multiplier = float(terminal_gravity) if terminal_gravity is not None else 5.0
-        query_mask = np.isin(labels_array, np.asarray(list(query_set), dtype=object)) if query_set else np.zeros(len(labels), dtype=bool)
-        scores = np.where((len(non_terminal_generated) < 6) & query_mask, 0.0, scores)
-        terminal_mask = np.isin(labels_array, np.asarray(list(TERMINAL_TOKENS), dtype=object))
-        continuation_mask = np.asarray([self._terminal_has_continuation(candidate_ids[index], edges=edge_pool) for index in range(len(candidate_ids))], dtype=bool)
+        query_mask = np.isin(labels, np.asarray(list(query_set), dtype=object)) if query_set else np.zeros(candidate_ids.shape[0], dtype=bool)
+        scores = np.where((non_terminal_count < 6) & query_mask, 0.0, scores)
+        terminal_mask = np.isin(labels, np.asarray(list(TERMINAL_TOKENS), dtype=object))
+        continuation_mask = self._candidate_continuation_mask(candidate_ids, edges=edge_pool)
         if allow_terminals is False:
             terminal_block = terminal_mask & ((transition_boosts <= 1.0) | ~continuation_mask)
             scores = np.where(terminal_block, 0.0, scores)
@@ -2519,10 +2874,10 @@ class SemanticEngine:
         else:
             terminal_soft = terminal_mask & (transition_boosts > 1.0) & continuation_mask
             scores = np.where(terminal_soft, scores, scores)
-            scores = np.where(terminal_mask & (len(non_terminal_generated) < 4), 0.0, scores)
-            scores = np.where(terminal_mask & (len(non_terminal_generated) >= 6), scores * 5.0, scores)
-            scores = np.where(terminal_mask & (len(non_terminal_generated) >= 4) & (len(non_terminal_generated) < 6), scores * 2.0, scores)
-        return {candidate_id: float(score) for candidate_id, score in zip(candidate_ids, scores) if float(score) > 0.0}
+            scores = np.where(terminal_mask & (non_terminal_count < 4), 0.0, scores)
+            scores = np.where(terminal_mask & (non_terminal_count >= 6), scores * 5.0, scores)
+            scores = np.where(terminal_mask & (non_terminal_count >= 4) & (non_terminal_count < 6), scores * 2.0, scores)
+        return {str(candidate_id): float(score) for candidate_id, score in zip(candidate_ids.tolist(), scores.tolist()) if float(score) > 0.0}
 
     def _weighted_random_choice(self, candidates: dict[str, float], temperature: float = 0.7) -> str | None:
         filtered = [(token, max(float(score), 0.0)) for token, score in candidates.items() if token and float(score) > 0.0]
@@ -2714,7 +3069,13 @@ class SemanticEngine:
         for node_id in queue:
             selected[node_id] = self._node_payload(node_id, node_scores=node_scores, highlight_result_id=highlight_result_id)
         adjacency = self._visual_adjacency()
-        rank_pool = sorted(node_by_id, key=lambda node_id: (float(node_scores.get(node_id, 0.0)), self._node_rank(node_by_id[node_id])), reverse=True)
+        if node_scores:
+            score_candidates = [node_id for node_id, score in node_scores.items() if node_id in node_by_id and float(score) > 0.0]
+            score_candidates.sort(key=lambda node_id: (float(node_scores.get(node_id, 0.0)), self._node_rank(node_by_id[node_id])), reverse=True)
+            score_candidate_set = set(score_candidates)
+            rank_pool = score_candidates + [node_id for node_id in self._node_rank_pool_cache if node_id not in score_candidate_set]
+        else:
+            rank_pool = self._node_rank_pool_cache
         rank_index = 0
         while len(selected) < min(limit, len(node_by_id)):
             grew = False
@@ -2742,7 +3103,12 @@ class SemanticEngine:
             if not grew:
                 break
         selected_ids = set(selected)
-        selected_edges = [edge for edge in self._all_edges() if edge["source"] in selected_ids and edge["target"] in selected_ids]
+        selected_edges_by_id: dict[str, dict[str, Any]] = {}
+        for node_id in selected_ids:
+            for edge in adjacency.get(node_id, []):
+                if edge["source"] in selected_ids and edge["target"] in selected_ids:
+                    selected_edges_by_id[str(edge["id"])] = edge
+        selected_edges = list(selected_edges_by_id.values())
         selected_edges.sort(key=lambda edge: float(edge.get("weight", 0.0)), reverse=True)
         nodes = sorted(selected.values(), key=lambda node: (float(node.get("score", 0.0)), int(node.get("count", 0))), reverse=True)
         return {"nodes": nodes, "edges": selected_edges[: max(limit * 2, 24)]}
@@ -2822,35 +3188,27 @@ class SemanticEngine:
         }
 
     def _all_nodes(self) -> dict[str, dict[str, Any]]:
-        nodes = {
-            f"token:{token}": {
-                "id": f"token:{token}",
-                "type": "token",
-                "token": token,
-                "label": record.get("label") or token,
-                "count": int(record.get("count", 0)),
-            }
-            for token, record in self.checkpoint.tokens.items()
-        }
-        for node_id, record in self._hypernode_store().items():
-            if not isinstance(record, dict):
-                continue
-            nodes[str(node_id)] = {
-                "id": str(node_id),
-                "type": "hypernode",
-                "label": record.get("label") or str(node_id).removeprefix(HIERARCHY_NODE_PREFIX),
-                "count": int(record.get("count", 0)),
-            }
-        return nodes
+        self._ensure_runtime_caches()
+        return dict(self._node_by_id_cache)
 
     def _all_edges(self) -> list[dict[str, Any]]:
-        edges: list[dict[str, Any]] = []
-        for node_id, record in self._hypernode_store().items():
-            if not isinstance(record, dict):
-                continue
-            subgraph = self._normalize_subgraph_payload(record.get("subgraph"))
-            edges.extend(self._graph_edges_from_subgraph(node_id, subgraph))
-        return edges
+        conn = self._edge_index_connection()
+        rows = conn.execute(
+            "SELECT edge_id, source, target, relation, weight, pheromone FROM edges ORDER BY source, weight DESC"
+        ).fetchall()
+        return [
+            {
+                "id": str(row["edge_id"]),
+                "source": str(row["source"]),
+                "target": str(row["target"]),
+                "relation": str(row["relation"]),
+                "type": "transition_edge" if str(row["relation"]) == "next" else str(row["relation"]),
+                "weight": float(row["weight"]),
+                "pheromone": float(row["pheromone"]),
+                "title": f"{str(row['relation'])} | {float(row['weight']):.2f}",
+            }
+            for row in rows
+        ]
 
     def _source_out_degrees(self, *, edges: list[dict[str, Any]]) -> dict[str, int]:
         degrees: dict[str, int] = {}
@@ -2862,19 +3220,32 @@ class SemanticEngine:
         return degrees
 
     def _outgoing_edges(self, source: str, *, edges: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-        pool = edges if edges is not None else self._all_edges()
-        edges = [edge for edge in pool if edge["source"] == source]
-        edges.sort(key=lambda edge: float(edge.get("weight", 0.0)), reverse=True)
-        return edges
+        if edges is None:
+            conn = self._edge_index_connection()
+            rows = conn.execute(
+                "SELECT target, weight FROM edges WHERE source = ? ORDER BY weight DESC LIMIT 100",
+                (str(source),),
+            ).fetchall()
+            return [
+                {
+                    "id": self._edge_id(str(source), str(row["target"])),
+                    "source": str(source),
+                    "target": str(row["target"]),
+                    "relation": "next",
+                    "type": "transition_edge",
+                    "weight": float(row["weight"]),
+                    "pheromone": 0.0,
+                    "title": f"next | {float(row['weight']):.2f}",
+                }
+                for row in rows
+            ]
+        filtered = [edge for edge in edges if edge["source"] == source]
+        filtered.sort(key=lambda edge: float(edge.get("weight", 0.0)), reverse=True)
+        return filtered[:100]
 
     def _visual_adjacency(self) -> dict[str, list[dict[str, Any]]]:
-        adjacency: dict[str, list[dict[str, Any]]] = {}
-        for edge in self._all_edges():
-            adjacency.setdefault(str(edge["source"]), []).append(edge)
-            adjacency.setdefault(str(edge["target"]), []).append(edge)
-        for edges in adjacency.values():
-            edges.sort(key=lambda edge: float(edge.get("weight", 0.0)), reverse=True)
-        return adjacency
+        self._ensure_runtime_caches()
+        return self._visual_adjacency_cache
 
     def _node_by_id(self, node_id: str) -> dict[str, Any] | None:
         if not str(node_id).startswith("token:"):
@@ -2939,10 +3310,11 @@ class SemanticEngine:
         return float(node.get("count", 0))
 
     def _token_vector(self, token: str) -> list[float]:
-        record = self.checkpoint.tokens.get(canonical_token(token))
-        if record is None:
+        self._ensure_runtime_caches()
+        vector = self._token_vector_lookup_cache.get(canonical_token(token))
+        if vector is None:
             return zero_vector()
-        return normalize_vector(record.get("vector"))
+        return normalize_vector(vector.tolist())
 
     def _is_stop_token(self, value: str) -> bool:
         return canonical_token(str(value).removeprefix("token:")) in TERMINAL_TOKENS
@@ -2955,6 +3327,23 @@ class SemanticEngine:
             if target and target not in ROLE_TOKENS and target not in TERMINAL_TOKENS:
                 return True
         return False
+
+    def _candidate_continuation_mask(self, candidate_ids: np.ndarray, *, edges: list[dict[str, Any]] | None = None) -> np.ndarray:
+        if candidate_ids.size == 0:
+            return np.zeros((0,), dtype=bool)
+        if edges is not None:
+            continuation_sources: set[str] = set()
+            for edge in edges:
+                source = str(edge.get("source") or "")
+                target = str(edge.get("target") or "")
+                if not source.startswith("token:") or not target.startswith("token:"):
+                    continue
+                target_label = canonical_token(target.removeprefix("token:"))
+                if target_label and target_label not in ROLE_TOKENS and target_label not in TERMINAL_TOKENS:
+                    continuation_sources.add(source)
+            return np.isin(candidate_ids, np.asarray(list(continuation_sources), dtype=object))
+        self._ensure_runtime_caches()
+        return np.asarray([bool(self._token_continuation_cache.get(str(candidate_id), False)) for candidate_id in candidate_ids.tolist()], dtype=bool)
 
     def _terminal_bridge_token(self, value: str, *, edges: list[dict[str, Any]]) -> str | None:
         for edge in self._outgoing_edges(str(value), edges=edges):
@@ -3042,14 +3431,16 @@ class SemanticEngine:
                 parsed = self._parse_edge_key(edge_id)
                 if parsed is None:
                     continue
-                source, _, target = parsed
+                source, relation, target = parsed
                 if source != node_id and target != node_id:
                     continue
                 edge["weight"] = max(0.0, float(edge.get("weight", 0.0)) + amount)
                 edge["pheromone"] = max(0.0, float(edge.get("pheromone", 0.0)) + amount)
+                self._upsert_edge_index(edge_id, source, target, relation, float(edge["weight"]), float(edge["pheromone"]))
                 changed = True
             if changed:
                 record["subgraph"] = subgraph
+        self._mark_runtime_caches_dirty()
 
     def _add_edge(self, source: str, target: str, weight: float, report: dict[str, Any], now: float, subgraph_node_id: str | None = None) -> None:
         scope_id = subgraph_node_id or ROOT_HYPERNODE_ID
@@ -3064,6 +3455,8 @@ class SemanticEngine:
             report["updated_edges"] = int(report.get("updated_edges", 0)) + 1
         record["weight"] = float(record.get("weight", 0.0)) + float(weight)
         record["pheromone"] = float(record.get("pheromone", 0.0)) * 0.92 + float(weight)
+        self._upsert_edge_index(edge_id, source, target, "next", float(record["weight"]), float(record["pheromone"]))
+        self._mark_runtime_caches_dirty()
 
     def _edge_key(self, source: str, relation: str, target: str) -> str:
         return f"{self._canonical_edge_node_id(source)}|{self._canonical_edge_relation(relation)}|{self._canonical_edge_node_id(target)}"
@@ -3133,6 +3526,28 @@ class SemanticEngine:
 
     def _persist(self) -> None:
         save_checkpoint(self.state_path, self.checkpoint)
+        self._persist_dirty = False
+
+    def _schedule_persist(self, delay: float = 0.25) -> None:
+        self._persist_dirty = True
+        timer = self._persist_timer
+        if timer is not None:
+            timer.cancel()
+        timer = Timer(max(float(delay), 0.0), self._persist_debounced)
+        timer.daemon = True
+        self._persist_timer = timer
+        timer.start()
+
+    def _cancel_persist_timer(self) -> None:
+        timer = self._persist_timer
+        if timer is not None:
+            timer.cancel()
+            self._persist_timer = None
+
+    def _persist_debounced(self) -> None:
+        with self._lock:
+            self._persist_timer = None
+            self._persist()
 
 
 def _load_engine_config(state_dir: Path | None = None) -> EngineConfig:
