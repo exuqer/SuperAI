@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantic-ants"
+version = "0.2.0"
+description = "Dense token graph AI prototype with vector-guided generation"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "numpy>=1.26",
+  "sentence-transformers>=3.0",
+  "uvicorn>=0.30",
+]
+
+[project.scripts]
+semantic-ants = "semantic_ants.cli:main"
+semantic-ants-web = "semantic_ants.server.cli:main"
+semantic-ants-mass-train = "semantic_ants.mass_train:main"
+
+[tool.setuptools.packages.find]
+include = ["semantic_ants*"]

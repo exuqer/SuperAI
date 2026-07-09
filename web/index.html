@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>semantic_ants</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">SG</div>
+          <div>
+            <div class="brand-title">semantic_ants</div>
+            <div class="brand-subtitle">dense token graph</div>
+          </div>
+        </div>
+        <div class="status-strip" id="statusStrip"></div>
+        <nav class="tabs" aria-label="Navigation">
+          <button class="tab active" data-view="chat" type="button">Chat</button>
+          <button class="tab" data-view="graph" type="button">Graph</button>
+          <button class="tab" data-view="train" type="button">Training</button>
+        </nav>
+      </header>
+
+      <main class="workspace">
+        <section class="view view-active" data-view-panel="chat">
+          <div class="layout layout-chat">
+            <section class="panel chat-panel">
+              <div class="panel-head">
+                <div>
+                  <div class="eyebrow">Chat</div>
+                  <h1>Context, response, token graph</h1>
+                </div>
+                <div class="row">
+                  <label class="inline-field">
+                    Session
+                    <input id="chatSessionInput" type="text" value="default" />
+                  </label>
+                  <button id="resetSessionButton" class="ghost" type="button">Reset</button>
+                </div>
+              </div>
+
+              <div class="chat-feed" id="chatFeed">
+                <div class="empty-state">No messages yet.</div>
+              </div>
+
+              <form class="composer" id="chatForm">
+                <label class="field field-grow">
+                  <span>Message</span>
+                  <textarea id="chatInput" rows="4" placeholder="Enter text to query the learned graph."></textarea>
+                </label>
+                <div class="row composer-row">
+                  <div class="muted" id="chatHint">Training text is the only source of vocabulary.</div>
+                  <button class="primary" type="submit">Send</button>
+                </div>
+              </form>
+            </section>
+
+            <aside class="side-stack">
+              <section class="panel graph-panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="eyebrow">Backpack</div>
+                    <h2>Focused subgraph</h2>
+                  </div>
+                  <div class="row">
+                    <div class="chip" id="backpackStats">0 nodes</div>
+                    <button id="backpackUpButton" class="ghost" type="button">Up</button>
+                    <button id="backpackDownButton" class="ghost" type="button">Down</button>
+                  </div>
+                </div>
+                <div class="graph-frame">
+                  <div id="backpackGraph" class="backpack-stack" aria-label="Recursive backpack graph"></div>
+                </div>
+              </section>
+
+              <section class="panel detail-panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="eyebrow">Inspector</div>
+                    <h2>Selected item</h2>
+                  </div>
+                </div>
+                <div id="chatDetail" class="detail-content">
+                  <div class="empty-state">Select a node in the graph.</div>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" data-view-panel="graph">
+          <div class="layout layout-graph">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="eyebrow">Graph explorer</div>
+                  <h1>Global learned graph</h1>
+                </div>
+                <div class="row">
+                  <label class="inline-field">
+                    Query
+                    <input id="graphQueryInput" type="text" placeholder="Search tokens" />
+                  </label>
+                  <label class="inline-field">
+                    Limit
+                    <input id="graphLimitInput" type="number" min="24" max="1000" value="160" />
+                  </label>
+                  <button id="graphRefreshButton" class="ghost" type="button">Refresh</button>
+                </div>
+              </div>
+
+              <div class="graph-frame graph-frame-wide">
+                <div id="globalGraph" class="graph-canvas" aria-label="Global graph canvas"></div>
+              </div>
+            </section>
+
+            <section class="panel detail-panel">
+              <div class="panel-head">
+                <div>
+                  <div class="eyebrow">Inspector</div>
+                  <h2>Graph detail</h2>
+                </div>
+              </div>
+              <div id="graphDetail" class="detail-content">
+                <div class="empty-state">Select a node or edge.</div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view-panel="train">
+          <div class="layout layout-train">
+            <section class="panel train-panel">
+              <div class="panel-head">
+                <div>
+                  <div class="eyebrow">Training</div>
+                  <h1>Raw text and token chains</h1>
+                </div>
+                <div class="row">
+                  <label class="inline-field">
+                    Session
+                    <input id="trainSessionInput" type="text" value="default" />
+                  </label>
+                  <label class="inline-field">
+                    Epochs
+                    <input id="trainEpochsInput" type="number" min="1" value="1" />
+                  </label>
+                </div>
+              </div>
+
+              <label class="field field-grow">
+                <span>Training text</span>
+                <textarea id="trainInput" rows="14" placeholder="Paste paragraphs or dialogue pairs like: Как дела? => Нормально"></textarea>
+              </label>
+
+              <div class="row composer-row">
+                <div class="muted">No phrase memory, only token vectors and directed transitions.</div>
+                <button id="trainButton" class="primary" type="button">Start training</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="eyebrow">Jobs</div>
+                  <h2>Background tasks</h2>
+                </div>
+                <div class="chip" id="jobsCount">0 jobs</div>
+              </div>
+              <div id="jobsList" class="jobs-list">
+                <div class="empty-state">No jobs running.</div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/vendor/cytoscape-3.31.2.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

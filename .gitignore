@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.semantic_ants/
+.semantic_ants_*/
+node_modules/
+web/dist/
