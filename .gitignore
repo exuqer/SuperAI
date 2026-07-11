@@ -1,0 +1,9 @@
+.superai/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+web/node_modules/
+web/dist/
+playwright-report/
+test-results/
