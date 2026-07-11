@@ -26,6 +26,25 @@ import {
   type FixtureScenarioId,
 } from '@/shared/mocks/fixtures'
 
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  timestamp: string
+  taskId?: string
+  traceId?: string
+}
+
+const conversationsStorageKey = 'superai.conversations.v1'
+
+function loadConversations(): Record<string, ChatMessage[]> {
+  try {
+    const raw = window.localStorage.getItem(conversationsStorageKey)
+    return raw ? JSON.parse(raw) as Record<string, ChatMessage[]> : {}
+  } catch {
+    return {}
+  }
+}
+
 function asUiError(error: unknown): UiError {
   if (error instanceof ContractValidationError) {
     return {
@@ -46,7 +65,9 @@ function wait(milliseconds: number): Promise<void> {
 }
 
 export const useRuntimeStore = defineStore('runtime', () => {
-  const mode = ref<ApiMode>(import.meta.env.VITE_API_BASE_URL ? 'live' : 'mock')
+  // Vite proxies /api to the local backend, so the client must use the real
+  // service even when VITE_API_BASE_URL is empty.
+  const mode = ref<ApiMode>('live')
   const selectedFixtureId = ref<FixtureScenarioId>(defaultFixtureId)
   const task = ref<UiTask>()
   const activeTraceId = ref<string>()
@@ -59,6 +80,7 @@ export const useRuntimeStore = defineStore('runtime', () => {
   const systemError = ref<UiError>()
   const isRunning = ref(false)
   const isBootstrapping = ref(false)
+  const conversations = ref<Record<string, ChatMessage[]>>(loadConversations())
 
   const activeTrace = computed(() =>
     activeTraceId.value ? traces.value[activeTraceId.value] : undefined,
@@ -68,7 +90,7 @@ export const useRuntimeStore = defineStore('runtime', () => {
       (right.startedAt ?? '').localeCompare(left.startedAt ?? ''),
     ),
   )
-  const isModeToggleAvailable = import.meta.env.DEV
+  const isModeToggleAvailable = false
 
   function service() {
     return serviceFor(mode.value)
@@ -78,6 +100,33 @@ export const useRuntimeStore = defineStore('runtime', () => {
     mode.value = nextMode
     runError.value = undefined
     systemError.value = undefined
+  }
+
+  function saveConversations() {
+    try {
+      window.localStorage.setItem(conversationsStorageKey, JSON.stringify(conversations.value))
+    } catch {
+      // Persistence is best effort; the in-memory conversation remains usable.
+    }
+  }
+
+  function conversationMessages(conversationId: string): ChatMessage[] {
+    return conversations.value[conversationId] ?? []
+  }
+
+  function appendConversationMessage(conversationId: string, message: ChatMessage) {
+    conversations.value = {
+      ...conversations.value,
+      [conversationId]: [...conversationMessages(conversationId), message],
+    }
+    saveConversations()
+  }
+
+  function clearConversationMessages(conversationId: string) {
+    const next = { ...conversations.value }
+    delete next[conversationId]
+    conversations.value = next
+    saveConversations()
   }
 
   async function loadSystem() {
@@ -209,5 +258,9 @@ export const useRuntimeStore = defineStore('runtime', () => {
     loadCosmos,
     runTask,
     cancelTask,
+    conversations,
+    conversationMessages,
+    appendConversationMessage,
+    clearConversationMessages,
   }
 })

@@ -2,7 +2,6 @@
 import { onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
-import type { ApiMode } from '@/shared/api/service'
 import { useRuntimeStore } from '@/shared/model/runtime-store'
 import StatusBadge from './StatusBadge.vue'
 
@@ -12,18 +11,14 @@ const navigationOpen = ref(false)
 
 const navigation = [
   { name: 'run', label: 'Запуск', hint: 'Новая задача' },
+  { name: 'dialogue', label: 'Диалог', hint: 'Чат с агентом' },
   { name: 'traces', label: 'Трассы', hint: 'Причины и spans' },
   { name: 'hive', label: 'Улей', hint: 'Рабочая память' },
   { name: 'storage', label: 'Хранилище', hint: 'Артефакты' },
   { name: 'cosmos', label: 'Космос', hint: 'Claims и provenance' },
   { name: 'system', label: 'Система', hint: 'Health и очередь' },
+  { name: 'ai-model', label: 'Модель ИИ', hint: 'Архитектура и обучение' },
 ]
-
-function changeMode(event: Event) {
-  const value = (event.target as HTMLSelectElement).value as ApiMode
-  runtime.setMode(value)
-  void runtime.bootstrap()
-}
 
 function closeNavigation() {
   navigationOpen.value = false
@@ -52,13 +47,7 @@ onMounted(() => {
           :label="runtime.system.health.status === 'ok' ? 'система готова' : undefined"
         />
         <span v-else class="muted">проверка состояния…</span>
-        <label v-if="runtime.isModeToggleAvailable" class="mode-switch">
-          <span>источник</span>
-          <select :value="runtime.mode" aria-label="Источник данных" @change="changeMode">
-            <option value="mock">mock</option>
-            <option value="live">live</option>
-          </select>
-        </label>
+        <span class="live-source">источник: live API</span>
       </div>
 
       <button

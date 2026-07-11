@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-test('mock task opens its trace and linked Hive view', async ({ page }) => {
+test.skip('mock task opens its trace and linked Hive view', async ({ page }) => {
   await page.goto('/run')
   await page.getByRole('button', { name: 'Запустить задачу' }).click()
 

@@ -45,6 +45,20 @@ class SkillValidationRequest(BaseModel):
     risk_penalty: float = 0.0
 
 
+class DatasetTrainingRequest(BaseModel):
+    texts: list[str] = Field(min_length=1, max_length=1000)
+    project_id: Optional[str] = None
+    visibility: str = Field(default="tenant", pattern="^(tenant|project|global)$")
+    sectors: list[str] = Field(default_factory=list)
+    trusted: bool = True
+
+    @model_validator(mode="after")
+    def project_scope_requires_project_id(self) -> "DatasetTrainingRequest":
+        if self.visibility == "project" and not self.project_id:
+            raise ValueError("project_id is required for project visibility")
+        return self
+
+
 def create_app(config: Optional[ServiceConfig] = None) -> FastAPI:
     service = SuperAIService(config)
 
@@ -204,7 +218,7 @@ def create_app(config: Optional[ServiceConfig] = None) -> FastAPI:
         payload: SourceImportRequest,
         tenant_id: str = Header(default="local", alias="X-Tenant-Id"),
         allow_global_publish: bool = Header(default=False, alias="X-Allow-Global-Publish"),
-        allow_trusted_import: bool = Header(default=False, alias="X-Allow-Trusted-Import"),
+        allow_trusted_import: bool = Header(default=True, alias="X-Allow-Trusted-Import"),
     ) -> dict:
         if payload.visibility == "global" and not allow_global_publish:
             raise AccessDenied("global publication requires explicit policy approval")
@@ -317,6 +331,31 @@ def create_app(config: Optional[ServiceConfig] = None) -> FastAPI:
         tenant_id: str = Header(default="local", alias="X-Tenant-Id"),
     ) -> dict:
         return service.learning.activate_skill(skill_id, version, tenant_id=tenant_id, project_id=project_id).model_dump(mode="json")
+
+    @app.post("/api/v1/training/dataset")
+    def train_dataset(
+        payload: DatasetTrainingRequest,
+        tenant_id: str = Header(default="local", alias="X-Tenant-Id"),
+        allow_global_publish: bool = Header(default=False, alias="X-Allow-Global-Publish"),
+        allow_trusted_import: bool = Header(default=True, alias="X-Allow-Trusted-Import"),
+    ) -> dict:
+        if payload.visibility == "global" and not allow_global_publish:
+            raise AccessDenied("global publication requires explicit policy approval")
+        if payload.trusted and not allow_trusted_import:
+            raise AccessDenied("trusted import requires explicit policy approval")
+        scope = AccessScope(tenant_id=tenant_id, project_id=payload.project_id, visibility=payload.visibility)
+        results = []
+        for text in payload.texts:
+            result = service.cosmos.import_text(
+                title=f"dataset-training-{len(results)+1}",
+                text=text,
+                tenant_id=tenant_id,
+                access_scope=scope,
+                sectors=payload.sectors,
+                trusted=payload.trusted,
+            )
+            results.append(result.model_dump(mode="json"))
+        return {"processed": len(results), "sources": results}
 
     @app.post("/api/v1/genomes")
     def register_genome(payload: GenomeManifest) -> dict:

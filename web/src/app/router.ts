@@ -12,6 +12,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Запуск' },
   },
   {
+    path: '/dialogue/:conversationId?/:projectId?',
+    name: 'dialogue',
+    component: () => import('@/pages/dialogue/DialoguePage.vue'),
+    meta: { title: 'Диалог' },
+  },
+  {
     path: '/traces/:traceId?',
     name: 'traces',
     component: () => import('@/pages/traces/TracesPage.vue'),
@@ -40,6 +46,12 @@ const routes: RouteRecordRaw[] = [
     name: 'system',
     component: () => import('@/pages/system/SystemPage.vue'),
     meta: { title: 'Система' },
+  },
+  {
+    path: '/ai-model',
+    name: 'ai-model',
+    component: () => import('@/pages/ai-model/AIModelPage.vue'),
+    meta: { title: 'Модель ИИ' },
   },
   {
     path: '/:pathMatch(.*)*',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { useRuntimeStore } from '@/shared/model/runtime-store'
@@ -17,38 +17,10 @@ const form = reactive({
   memoryBytes: 16_384,
 })
 
-const selectedFixture = computed(() =>
-  runtime.fixtureScenarios.find((fixture) => fixture.id === runtime.selectedFixtureId),
-)
-
 const canCancel = computed(
   () => runtime.task && (runtime.task.status === 'queued' || runtime.task.status === 'running'),
 )
 const taskBudget = computed(() => runtime.task?.budget)
-
-function useFixtureInput() {
-  const fixture = selectedFixture.value
-  if (!fixture) {
-    return
-  }
-  form.message = fixture.request.message
-  form.conversationId = fixture.request.conversation_id ?? ''
-  form.projectId = fixture.request.project_id ?? ''
-  form.timeLimitMs = fixture.request.budget.time_ms
-  form.eventLimit = fixture.request.budget.event_limit
-  form.stepLimit = fixture.request.budget.step_limit
-  form.memoryBytes = fixture.request.budget.memory_bytes
-}
-
-watch(
-  () => runtime.selectedFixtureId,
-  () => {
-    if (runtime.mode === 'mock') {
-      useFixtureInput()
-    }
-  },
-  { immediate: true },
-)
 
 async function submit() {
   await runtime.runTask({
@@ -76,13 +48,13 @@ async function submit() {
         <p class="eyebrow">Первый вертикальный срез</p>
         <h1>Запуск задачи</h1>
         <p>
-          Один и тот же контракт отправляется в mock-fixture и будущий live API. Клиент
-          показывает результат, бюджет и переход к полной трассе.
+          Запрос отправляется в локальный live API. Клиент показывает результат,
+          бюджет и переход к полной трассе.
         </p>
       </div>
       <StatusBadge
-        :status="runtime.mode === 'mock' ? 'verified' : 'running'"
-        :label="runtime.mode === 'mock' ? 'mock DTO' : 'live API'"
+        status="running"
+        label="live API"
       />
     </header>
 
@@ -93,19 +65,8 @@ async function submit() {
             <p class="eyebrow">TaskContract request</p>
             <h2>Входные параметры</h2>
           </div>
-          <label v-if="runtime.mode === 'mock'" class="fixture-picker">
-            <span>Сценарий fixture</span>
-            <select v-model="runtime.selectedFixtureId">
-              <option v-for="fixture in runtime.fixtureScenarios" :key="fixture.id" :value="fixture.id">
-                {{ fixture.title }}
-              </option>
-            </select>
-          </label>
         </header>
         <div class="surface__body">
-          <p v-if="runtime.mode === 'mock' && selectedFixture" class="fixture-description">
-            {{ selectedFixture.description }}
-          </p>
           <form class="form-grid" @submit.prevent="submit">
             <div class="field field--full">
               <label for="message">Сообщение пользователя</label>
@@ -116,7 +77,7 @@ async function submit() {
                 autocomplete="off"
                 placeholder="Опишите задачу"
               />
-              <small>Fixture «Ошибка валидации» намеренно отправляет пустое сообщение.</small>
+              <small>Ответ и трасса будут сохранены бэкендом в локальном хранилище.</small>
             </div>
             <div class="field">
               <label for="conversation-id">Conversation ID</label>
@@ -168,15 +129,6 @@ async function submit() {
                   @click="runtime.cancelTask"
                 >
                   Отменить
-                </button>
-                <button
-                  v-if="runtime.mode === 'mock'"
-                  class="button button--quiet"
-                  :disabled="runtime.isRunning"
-                  type="button"
-                  @click="useFixtureInput"
-                >
-                  Вернуть fixture-вход
                 </button>
               </div>
             </div>

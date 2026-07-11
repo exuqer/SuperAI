@@ -43,6 +43,7 @@ export interface TaskService {
   getArtifactMetadata(artifactId: string, projectId?: string): Promise<ArtifactRefDto>
   getCosmosData(projectId?: string): Promise<CosmosDataDto>
   getSystemSnapshot(): Promise<SystemSnapshotDto>
+  trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<{ processed: number; sources: any[] }>
 }
 
 function clone<T>(value: T): T {
@@ -153,6 +154,11 @@ export class MockTaskService implements TaskService {
 
   async getSystemSnapshot(): Promise<SystemSnapshotDto> {
     return parseSystemSnapshotDto(clone(getFixture('success').system))
+  }
+
+  async trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<{ processed: number; sources: any[] }> {
+    // Mock implementation - just return success
+    return { processed: texts.length, sources: texts.map((text, i) => ({ title: `mock-${i}`, text })) }
   }
 }
 
@@ -297,6 +303,14 @@ export class LiveTaskService implements TaskService {
       health,
       meta,
     })
+  }
+
+  async trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<{ processed: number; sources: any[] }> {
+    const payload = { texts, project_id: projectId, visibility: visibility ?? 'tenant', sectors: sectors ?? [], trusted: trusted ?? true }
+    return await this.request('/api/v1/training/dataset', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }) as { processed: number; sources: any[] }
   }
 }
 
