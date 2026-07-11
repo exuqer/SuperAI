@@ -14,12 +14,7 @@ set "FRONTEND_DIR=%ROOT_DIR%web"
 echo 🚀 Запускаю бекенд на порту %BACKEND_PORT%...
 cd /d "%ROOT_DIR%"
 
-where uvicorn >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-  start "superai-backend" cmd /c "uvicorn superai.api:app --host 127.0.0.1 --port %BACKEND_PORT% --reload"
-) else (
-  start "superai-backend" cmd /c "python -m uvicorn superai.api:app --host 127.0.0.1 --port %BACKEND_PORT% --reload"
-)
+start "superai-backend" cmd /c "python -m uvicorn superai.api:app --host 127.0.0.1 --port %BACKEND_PORT%"
 
 echo 🚀 Запускаю фронтенд...
 cd /d "%FRONTEND_DIR%"

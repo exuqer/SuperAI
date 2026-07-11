@@ -24,13 +24,16 @@ trap cleanup EXIT INT TERM
 # ---- Бекенд (Python / uvicorn) ----
 echo "🚀 Запускаю бекенд на порту $BACKEND_PORT..."
 cd "$ROOT_DIR"
-if command -v uvicorn &>/dev/null; then
-  uvicorn superai.api:app --host 127.0.0.1 --port "$BACKEND_PORT" --reload &
-elif command -v superai &>/dev/null; then
-  superai --host 127.0.0.1 --port "$BACKEND_PORT" --reload &
+if command -v python3 &>/dev/null; then
+  PYTHON_BIN=python3
+elif command -v python &>/dev/null; then
+  PYTHON_BIN=python
 else
-  python -m uvicorn superai.api:app --host 127.0.0.1 --port "$BACKEND_PORT" --reload &
+  echo "Python не найден. Установите Python 3 и зависимости проекта."
+  exit 1
 fi
+# Один процесс backend надёжнее для локального SQLite, чем reload-parent.
+"$PYTHON_BIN" -m uvicorn superai.api:app --host 127.0.0.1 --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 # ---- Фронтенд (Vite / Vue) ----

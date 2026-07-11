@@ -8,11 +8,12 @@
 
 ```bash
 python3 -m pip install -e '.[dev]'
-uvicorn superai.api:app --reload
+./dev.sh
 ```
 
-API доступен по `http://127.0.0.1:8000/docs`, а диагностический клиент живёт в
-`web/` и запускается отдельно через Vite.
+API доступен по `http://127.0.0.1:8000/docs`, клиент — по `http://localhost:5173`.
+Скрипт запускает backend и Vite одновременно; backend можно запустить отдельно
+через `python3 -m uvicorn superai.api:app`.
 
 По умолчанию состояние сохраняется в `.superai/`. Его можно переназначить
 переменной `SUPERAI_DATA_DIR`.
