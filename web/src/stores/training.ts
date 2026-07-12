@@ -34,16 +34,15 @@ export const useTrainingStore = defineStore('training', () => {
   const baseUrl = '/api'
 
   async function learn(text: string): Promise<TrainResult> {
-    const body = new URLSearchParams()
-    body.append('text', text)
-    if (currentSessionId.value) {
-      body.append('session_id', currentSessionId.value)
+    const body = {
+      text,
+      ...(currentSessionId.value ? { session_id: currentSessionId.value } : {}),
     }
 
-    const response = await fetch(`${baseUrl}/train`, {
+    const response = await fetch(`${baseUrl}/v1/training/learn`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     })
 
     if (!response.ok) {
@@ -64,7 +63,7 @@ export const useTrainingStore = defineStore('training', () => {
       params.append('session_id', currentSessionId.value)
     }
 
-    const response = await fetch(`${baseUrl}/space?${params}`)
+    const response = await fetch(`${baseUrl}/v1/training/space?${params}`)
     if (!response.ok) {
       throw new Error('Failed to load space')
     }
@@ -73,14 +72,10 @@ export const useTrainingStore = defineStore('training', () => {
 
   async function resetSpace(): Promise<void> {
     const params = new URLSearchParams()
-    if (currentSessionId.value) {
-      params.append('session_id', currentSessionId.value)
-    }
+    if (currentSessionId.value) params.append('session_id', currentSessionId.value)
 
-    const response = await fetch(`${baseUrl}/reset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params,
+    const response = await fetch(`${baseUrl}/v1/training/space?${params}`, {
+      method: 'DELETE',
     })
 
     if (!response.ok) {

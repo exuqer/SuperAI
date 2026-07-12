@@ -33,7 +33,7 @@ else
   exit 1
 fi
 # Один процесс backend надёжнее для локального SQLite, чем reload-parent.
-"$PYTHON_BIN" -m uvicorn superai.api:app --host 127.0.0.1 --port "$BACKEND_PORT" &
+"$PYTHON_BIN" -m uvicorn server.server:app --host 127.0.0.1 --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 # ---- Фронтенд (Vite / Vue) ----
@@ -45,7 +45,7 @@ FRONTEND_PID=$!
 echo ""
 echo "═══════════════════════════════════════════════"
 echo "  Бекенд:  http://127.0.0.1:$BACKEND_PORT"
-echo "  Фронтенд: http://localhost:5173"
+echo "  Фронтенд: http://localhost:3000"
 echo "═══════════════════════════════════════════════"
 echo "  Нажми Ctrl+C чтобы остановить всё."
 echo ""

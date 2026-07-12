@@ -1,5 +1,5 @@
 """FastAPI server for SuperAI"""
-from fastapi import FastAPI, HTTPException, Form, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -80,6 +80,11 @@ async def train(request: TrainRequest):
     return TrainResponse(**result)
 
 
+# План гравитационного обучения использует более явный namespace. Оставляем
+# короткие маршруты выше для обратной совместимости со старыми клиентами.
+app.add_api_route("/api/v1/training/learn", train, methods=["POST"], response_model=TrainResponse)
+
+
 @app.get("/api/space", response_model=SpaceResponse)
 async def get_space(session_id: Optional[str] = Query(None)):
     """Get current word space state."""
@@ -90,14 +95,21 @@ async def get_space(session_id: Optional[str] = Query(None)):
     return SpaceResponse(**result)
 
 
+app.add_api_route("/api/v1/training/space", get_space, methods=["GET"], response_model=SpaceResponse)
+
+
 @app.post("/api/reset", response_model=ResetResponse)
-async def reset_space(session_id: Optional[str] = Form(None)):
+@app.delete("/api/v1/training/space", response_model=ResetResponse)
+async def reset_space(session_id: Optional[str] = Query(None)):
     """Reset (clear) the word space."""
     manager = get_training_manager()
     if session_id:
         manager.set_session(session_id)
     result = manager.reset_space()
     return ResetResponse(**result)
+
+
+app.add_api_route("/api/v1/training/reset", reset_space, methods=["POST"], response_model=ResetResponse)
 
 
 @app.post("/api/sessions", response_model=SessionResponse)

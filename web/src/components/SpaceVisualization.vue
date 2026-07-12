@@ -1,308 +1,78 @@
 <template>
   <div class="space-visualization">
-    <svg
-      ref="svg"
-      class="space-svg"
-      :width="width"
-      :height="height"
-      :viewBox="viewBox"
-      preserveAspectRatio="xMidYMid meet"
-    >
+    <svg class="space-svg" :viewBox="`0 0 ${width} ${height}`" role="img" aria-label="Карта слов">
       <defs>
-        <radialGradient id="word-gradient-low" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
-          <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.9" />
-          <stop offset="70%" stop-color="#3b82f6" stop-opacity="0.3" />
-          <stop offset="100%" stop-color="#3b82f6" stop-opacity="0" />
-        </radialGradient>
-        <radialGradient id="word-gradient-mid" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
-          <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.9" />
-          <stop offset="70%" stop-color="#f59e0b" stop-opacity="0.3" />
-          <stop offset="100%" stop-color="#f59e0b" stop-opacity="0" />
-        </radialGradient>
-        <radialGradient id="word-gradient-high" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
-          <stop offset="0%" stop-color="#ef4444" stop-opacity="0.9" />
-          <stop offset="70%" stop-color="#ef4444" stop-opacity="0.3" />
-          <stop offset="100%" stop-color="#ef4444" stop-opacity="0" />
-        </radialGradient>
+        <pattern id="space-grid" width="44" height="44" patternUnits="userSpaceOnUse"><path d="M 44 0 L 0 0 0 44" fill="none" stroke="#7da3d8" stroke-opacity=".08" stroke-width="1" /></pattern>
+        <radialGradient id="word-low"><stop stop-color="#76a9ff" stop-opacity=".95"/><stop offset=".55" stop-color="#3977e8" stop-opacity=".35"/><stop offset="1" stop-color="#3977e8" stop-opacity="0"/></radialGradient>
+        <radialGradient id="word-mid"><stop stop-color="#ffc961" stop-opacity=".95"/><stop offset=".55" stop-color="#dc851f" stop-opacity=".35"/><stop offset="1" stop-color="#dc851f" stop-opacity="0"/></radialGradient>
+        <radialGradient id="word-high"><stop stop-color="#ff8290" stop-opacity=".98"/><stop offset=".55" stop-color="#d44560" stop-opacity=".4"/><stop offset="1" stop-color="#d44560" stop-opacity="0"/></radialGradient>
+        <filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
       </defs>
-
-      <!-- Connections between words in same phrases -->
-      <g class="connections">
-        <line
-          v-for="(conn, i) in connections"
-          :key="i"
-          :x1="conn.x1"
-          :y1="conn.y1"
-          :x2="conn.x2"
-          :y2="conn.y2"
-          :stroke="conn.color"
-          :stroke-width="conn.width"
-          :stroke-opacity="conn.opacity"
-          stroke-linecap="round"
-        />
+      <rect width="100%" height="100%" fill="#081322" />
+      <rect width="100%" height="100%" fill="url(#space-grid)" />
+      <g v-if="displayedWords.length" class="connections">
+        <line v-for="(conn, i) in connections" :key="i" v-bind="conn" />
       </g>
-
-      <!-- Word nodes -->
-      <g class="nodes">
-        <g
-          v-for="word in words"
-          :key="word.word"
-          class="word-node"
-          :transform="`translate(${word.x}, ${word.y})`"
-        >
-          <circle
-            class="node-gradient"
-            :r="nodeRadius(word.mass)"
-            :fill="gradientId(word.mass)"
-            :filter="massFilter(word.mass)"
-          />
-          <circle
-            class="node-border"
-            :r="nodeRadius(word.mass)"
-            :stroke="nodeColor(word.mass)"
-            stroke-width="1.5"
-            fill="none"
-          />
-          <text
-            class="node-label"
-            :font-size="fontSize(word.mass)"
-            :fill="labelColor(word.mass)"
-            text-anchor="middle"
-            dominant-baseline="middle"
-            :dy="fontSize(word.mass) * 0.1"
-          >
-            {{ word.word }}
-          </text>
+      <g v-if="displayedWords.length" class="nodes">
+        <g v-for="word in displayedWords" :key="word.word" class="word-node" :transform="`translate(${word.x},${word.y})`">
+          <circle :r="haloRadius(word.mass)" :fill="gradientId(word.mass)" class="node-halo" :opacity="haloOpacity(word.mass)" />
+          <circle :r="nodeRadius(word.mass)" :fill="nodeColor(word.mass)" class="node-core" filter="url(#glow)" />
+          <circle :r="nodeRadius(word.mass)" fill="none" stroke="#dceaff" stroke-opacity=".65" />
+          <text class="node-label" text-anchor="middle" dominant-baseline="middle">{{ word.word }}</text>
+          <text class="node-mass" text-anchor="middle" :y="nodeRadius(word.mass) + 16">× {{ word.mass.toFixed(1) }}</text>
         </g>
       </g>
+      <g v-else class="empty-state"><circle :cx="width/2" :cy="height/2" r="54" fill="none" stroke="#6fa4ff" stroke-opacity=".25" stroke-dasharray="4 8"/><text :x="width/2" :y="height/2 - 5" text-anchor="middle">Пространство пусто</text><text :x="width/2" :y="height/2 + 18" text-anchor="middle" class="empty-subtitle">Введите текст слева, чтобы начать</text></g>
     </svg>
-
-    <div class="legend">
-      <div class="legend-item">
-        <div class="legend-color" style="background: linear-gradient(135deg, #3b82f6, #1d4ed8)"></div>
-        <span>Масса ~1.0</span>
-      </div>
-      <div class="legend-item">
-        <div class="legend-color" style="background: linear-gradient(135deg, #f59e0b, #d97706)"></div>
-        <span>Масса ~2-4</span>
-      </div>
-      <div class="legend-item">
-        <div class="legend-color" style="background: linear-gradient(135deg, #ef4444, #dc2626)"></div>
-        <span>Масса 5+</span>
-      </div>
-    </div>
+    <div class="legend"><span><i class="blue"></i>новое</span><span><i class="yellow"></i>повторяется</span><span><i class="red"></i>ядро</span></div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { computed, ref, watch } from 'vue'
+interface Word { word: string; mass: number; x: number; y: number }
+interface Props { words: Word[]; width?: number; height?: number }
+const props = withDefaults(defineProps<Props>(), { width: 1000, height: 700 })
+const displayedWords = ref<Word[]>([])
+let animationFrame = 0
 
-interface Word {
-  word: string
-  mass: number
-  x: number
-  y: number
-}
-
-interface Connection {
-  x1: number
-  y1: number
-  x2: number
-  y2: number
-  color: string
-  width: number
-  opacity: number
-}
-
-interface Props {
-  words: Word[]
-  width?: number
-  height?: number
-}
-
-const props = withDefaults(defineProps<Props>(), {
-  width: 800,
-  height: 500,
-})
-
-const svg = ref<SVGSVGElement | null>(null)
-
-const connections = computed<Connection[]>(() => {
-  const conns: Connection[] = []
-  
-  // Connect words that are close to each other (simulating phrase connections)
-  for (let i = 0; i < props.words.length; i++) {
-    for (let j = i + 1; j < props.words.length; j++) {
-      const w1 = props.words[i]
-      const w2 = props.words[j]
-      const dx = w2.x - w1.x
-      const dy = w2.y - w1.y
-      const dist = Math.sqrt(dx * dx + dy * dy)
-      
-      // Only draw connections for reasonably close words
-      if (dist < 300) {
-        const avgMass = (w1.mass + w2.mass) / 2
-        const opacity = Math.max(0.05, Math.min(0.3, 0.5 - dist / 600))
-        const width = Math.max(0.5, Math.min(2, avgMass * 0.5))
-        
-        conns.push({
-          x1: w1.x,
-          y1: w1.y,
-          x2: w2.x,
-          y2: w2.y,
-          color: avgMass >= 3 ? '#ef4444' : avgMass >= 1.5 ? '#f59e0b' : '#3b82f6',
-          width,
-          opacity,
-        })
-      }
-    }
+function animateWords(next: Word[]) {
+  cancelAnimationFrame(animationFrame)
+  const old = new Map(displayedWords.value.map(w => [w.word, w]))
+  const start = next.map(w => ({ ...w, ...(old.get(w.word) ?? { x: props.width / 2, y: props.height / 2 }) }))
+  if (!displayedWords.value.length) { displayedWords.value = next.map(w => ({ ...w })); return }
+  const started = performance.now()
+  const tick = (now: number) => {
+    const progress = Math.min(1, (now - started) / 900)
+    const eased = 1 - Math.pow(1 - progress, 3)
+    displayedWords.value = next.map((w, index) => ({ ...w, x: start[index].x + (w.x - start[index].x) * eased, y: start[index].y + (w.y - start[index].y) * eased, mass: start[index].mass + (w.mass - start[index].mass) * eased }))
+    if (progress < 1) animationFrame = requestAnimationFrame(tick)
   }
-  return conns
-})
-
-function nodeRadius(mass: number): number {
-  return Math.min(12 + Math.log2(Math.max(mass, 1)) * 6, 30)
+  animationFrame = requestAnimationFrame(tick)
 }
+watch(() => props.words, animateWords, { deep: true, immediate: true })
 
-function fontSize(mass: number): number {
-  return Math.min(10 + Math.log2(Math.max(mass, 1)) * 2, 14)
-}
-
-function nodeColor(mass: number): string {
-  if (mass >= 5) return '#ef4444'
-  if (mass >= 2) return '#f59e0b'
-  return '#3b82f6'
-}
-
-function labelColor(mass: number): string {
-  if (mass >= 5) return '#fff'
-  if (mass >= 2) return '#1f2937'
-  return '#1e3a8a'
-}
-
-function gradientId(mass: number): string {
-  if (mass >= 5) return 'url(#word-gradient-high)'
-  if (mass >= 2) return 'url(#word-gradient-mid)'
-  return 'url(#word-gradient-low)'
-}
-
-function massFilter(mass: number): string {
-  if (mass >= 3) return 'drop-shadow(0 0 8px currentColor)'
-  return 'none'
-}
-
-const viewBox = computed(() => {
-  if (props.words.length === 0) return `0 0 ${props.width} ${props.height}`
-  
-  const padding = 60
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
-  
-  for (const w of props.words) {
-    const r = nodeRadius(w.mass)
-    minX = Math.min(minX, w.x - r)
-    maxX = Math.max(maxX, w.x + r)
-    minY = Math.min(minY, w.y - r)
-    maxY = Math.max(maxY, w.y + r)
+const connections = computed(() => {
+  const lines: Array<Record<string, string | number>> = []
+  for (let i = 0; i < displayedWords.value.length; i++) for (let j = i + 1; j < displayedWords.value.length; j++) {
+    const a = displayedWords.value[i], b = displayedWords.value[j], d = Math.hypot(b.x - a.x, b.y - a.y)
+    if (d < 310) lines.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: d < 180 ? '#76a9ff' : '#7890b6', 'stroke-width': d < 180 ? 1.5 : 1, 'stroke-opacity': Math.max(.08, .38 - d / 900), 'stroke-dasharray': d < 180 ? '0' : '4 8' })
   }
-  
-  if (minX === Infinity) return `0 0 ${props.width} ${props.height}`
-  
-  const width = maxX - minX + padding * 2
-  const height = maxY - minY + padding * 2
-  const cx = (minX + maxX) / 2
-  const cy = (minY + maxY) / 2
-  
-  return `${cx - width / 2} ${cy - height / 2} ${width} ${height}`
+  return lines
 })
-
-function adjustView() {
-  // viewBox is computed automatically
-}
-
-watch(() => props.words, adjustView, { deep: true })
-onMounted(() => {
-  if (props.words.length > 0) adjustView()
-})
+function nodeRadius(mass: number) { return Math.min(15 + Math.log2(Math.max(mass, 1)) * 7, 34) }
+function haloRadius(mass: number) { return Math.min(62 + Math.log2(Math.max(mass, 1)) * 24, 250) }
+function haloOpacity(mass: number) { return Math.min(.62, .25 + Math.log2(Math.max(mass, 1)) * .11) }
+function nodeColor(mass: number) { return mass >= 5 ? '#d44560' : mass >= 2 ? '#d99026' : '#3977e8' }
+function gradientId(mass: number) { return mass >= 5 ? 'url(#word-high)' : mass >= 2 ? 'url(#word-mid)' : 'url(#word-low)' }
 </script>
 
 <style scoped lang="scss">
-.space-visualization {
-  width: 100%;
-  height: 100%;
-  min-height: 500px;
-  background: #fff;
-  border-radius: 8px;
-  overflow: hidden;
-  position: relative;
-}
-
-.space-svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.word-node {
-  cursor: default;
-  transition: transform 0.2s, filter 0.2s;
-}
-
-.word-node:hover {
-  transform: scale(1.1);
-  filter: drop-shadow(0 4px 8px rgba(0,0,0,0.15));
-}
-
-.word-node:hover .node-border {
-  stroke-width: 2;
-}
-
-.connections line {
-  pointer-events: none;
-}
-
-.node-gradient {
-  transition: filter 0.2s;
-}
-
-.node-label {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  font-weight: 500;
-  pointer-events: none;
-  user-select: none;
-  text-shadow: 0 1px 2px rgba(255,255,255,0.8);
-}
-
-.node-label:hover {
-  text-shadow: 0 1px 4px rgba(0,0,0,0.2);
-}
-
-.legend {
-  position: absolute;
-  bottom: 16px;
-  right: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  backdrop-filter: blur(4px);
-  font-size: 11px;
-  color: #3a3f4b;
-  z-index: 10;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.legend-color {
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-}
+.space-visualization { position: relative; width: 100%; height: calc(100% - 3.5rem); min-height: 500px; overflow: hidden; background: #081322; }
+.space-svg { display: block; width: 100%; height: 100%; }
+.connections line { pointer-events: none; transition: x1 .9s, x2 .9s, y1 .9s, y2 .9s; }
+.word-node { cursor: default; transition: filter .2s; } .word-node:hover { filter: brightness(1.2); } .node-halo { transition: r .25s; } .node-core { opacity: .95; }
+.node-label { fill: #f0f6ff; font-size: 13px; font-weight: 750; paint-order: stroke; stroke: #0a1424; stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
+.node-mass { fill: #91a9cd; font-size: 10px; pointer-events: none; } .empty-state text { fill: #c9d8ee; font-size: 15px; font-weight: 700; } .empty-state .empty-subtitle { fill: #71839e; font-size: 12px; font-weight: 400; }
+.legend { position: absolute; right: 1rem; bottom: 1rem; display: flex; flex-wrap: wrap; gap: .75rem; padding: .55rem .7rem; border: 1px solid rgba(168,190,228,.16); border-radius: .6rem; color: #9aaac5; background: rgba(7,16,31,.8); font-size: .7rem; backdrop-filter: blur(8px); } .legend i { display: inline-block; width: .5rem; height: .5rem; margin-right: .3rem; border-radius: 50%; } .blue { background: #3977e8; } .yellow { background: #d99026; } .red { background: #d44560; }
 </style>

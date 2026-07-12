@@ -14,7 +14,7 @@ set "FRONTEND_DIR=%ROOT_DIR%web"
 echo 🚀 Запускаю бекенд на порту %BACKEND_PORT%...
 cd /d "%ROOT_DIR%"
 
-start "superai-backend" cmd /c "python -m uvicorn superai.api:app --host 127.0.0.1 --port %BACKEND_PORT%"
+start "superai-backend" cmd /c "python -m uvicorn server.server:app --host 127.0.0.1 --port %BACKEND_PORT%"
 
 echo 🚀 Запускаю фронтенд...
 cd /d "%FRONTEND_DIR%"
@@ -23,7 +23,7 @@ start "superai-frontend" cmd /c "npm run dev"
 echo.
 echo ═══════════════════════════════════════════════
 echo   Бекенд:  http://127.0.0.1:%BACKEND_PORT%
-echo   Фронтенд: http://localhost:5173
+echo   Фронтенд: http://localhost:3000
 echo ═══════════════════════════════════════════════
 echo   Закрой окна cmd чтобы остановить.
 echo.

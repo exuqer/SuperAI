@@ -7,7 +7,7 @@ name = "superai"
 version = "0.1.0"
 description = "SuperAI - Semantic Space Training with Gravitational Physics"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
@@ -25,11 +25,11 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["semantic_ants*"]
+include = ["server*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py39"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -40,6 +40,21 @@ class TrainingManager:
     def set_session(self, session_id: str):
         """Set current session."""
         self._current_session = session_id
+
+    def _resolve_session(self, session_id: Optional[str] = None) -> str:
+        """Resolve the single persistent workspace used by the training screen.
+
+        The current SQLite schema keeps words globally unique. Reusing an existing
+        session across server restarts therefore avoids a duplicate-word insert
+        when the browser reconnects after a backend restart.
+        """
+        sid = session_id or self._current_session
+        if sid:
+            return sid
+        sessions = list_sessions()
+        sid = sessions[0]["id"] if sessions else self.create_session()
+        self._current_session = sid
+        return sid
     
     def list_sessions(self) -> List[Dict]:
         """List all sessions."""
@@ -54,9 +69,7 @@ class TrainingManager:
     
     def learn(self, text: str, session_id: Optional[str] = None) -> Dict[str, Any]:
         """Train on text, update word space with physics simulation."""
-        sid = session_id or self._current_session
-        if not sid:
-            sid = self.create_session()
+        sid = self._resolve_session(session_id)
         
         start_time = time.time()
         
@@ -157,9 +170,7 @@ class TrainingManager:
     
     def get_space(self, session_id: Optional[str] = None) -> Dict[str, Any]:
         """Get current word space state."""
-        sid = session_id or self._current_session
-        if not sid:
-            return {"words": [], "stats": {"tokens": 0, "total_tokens": 0, "phrases": 0, "edges": 0}}
+        sid = self._resolve_session(session_id)
         
         words_data = get_words(sid)
         word_data = [
@@ -180,9 +191,7 @@ class TrainingManager:
     
     def reset_space(self, session_id: Optional[str] = None) -> Dict[str, Any]:
         """Reset (clear) the word space."""
-        sid = session_id or self._current_session
-        if not sid:
-            return {"success": False, "error": "No session"}
+        sid = self._resolve_session(session_id)
         
         reset_session(sid)
         return {"success": True, "words": [], "stats": {"tokens": 0, "total_tokens": 0, "phrases": 0, "edges": 0}}

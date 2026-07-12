@@ -8,8 +8,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from semantic_ants.tokenizer import tokenize, split_sentences, normalize_text
-from semantic_ants.physics import WordState, PhysicsConfig, run_simulation, place_new_words_around_center
+from server.tokenizer import tokenize, split_sentences, normalize_text
+from server.physics import WordState, PhysicsConfig, run_simulation, place_new_words_around_center
 
 
 def test_tokenize_russian_and_latin():
