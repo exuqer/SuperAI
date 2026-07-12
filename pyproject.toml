@@ -1,29 +1,36 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "superai"
 version = "0.1.0"
-description = "Trace-first local modular AI runtime"
+description = "SuperAI - Semantic Space Training with Gravitational Physics"
 readme = "README.md"
-requires-python = ">=3.9"
-authors = [{ name = "SuperAI" }]
+requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.115",
-  "pydantic>=2.0",
-  "uvicorn[standard]>=0.30",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27"]
-
-[project.scripts]
-superai = "superai.cli:main"
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
+    "ruff>=0.1.0",
+]
 
 [tool.setuptools.packages.find]
-include = ["superai*"]
+where = ["."]
+include = ["semantic_ants*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-q"

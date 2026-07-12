@@ -1,0 +1,51 @@
+@import 'variables';
+
+// Reset
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  font-family: $font-family-base;
+  font-size: $font-size-base;
+  line-height: $line-height-base;
+  color: $text-color;
+  background-color: $bg-color;
+}
+
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+a {
+  color: $primary-color;
+  text-decoration: none;
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
