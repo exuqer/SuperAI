@@ -22,6 +22,7 @@ from .contracts import (
 )
 from .cosmos import Cosmos
 from .database import SqliteDatabase, json_dumps, json_loads
+from .emergence.graph import ActiveGraphBuilder
 from .execution import Atlas, CriticSystem, ExecutionEngine, Planner, TextCodec
 from .hive import HiveManager
 from .learning import ExperienceCompiler, GenomeRegistry
@@ -53,6 +54,7 @@ class SuperAIService:
         self.runtime = CommandRuntime(self.database, self.traces)
         self.hives = HiveManager(self.database, self.store, self.traces)
         self.cosmos = Cosmos(self.database, self.store)
+        self.active_graphs = ActiveGraphBuilder(self.cosmos, self.database, self.traces)
         self.atlas = Atlas(self.database)
         self.atlas.register_builtin_capabilities()
         self.planner = Planner(self.database, self.atlas)
@@ -63,6 +65,7 @@ class SuperAIService:
             critics=CriticSystem(),
             codec=TextCodec(),
             traces=self.traces,
+            active_graph_builder=self.active_graphs,
         )
         self.learning = ExperienceCompiler(self.database, self.store, self.cosmos)
         self.genomes = GenomeRegistry(self.database)

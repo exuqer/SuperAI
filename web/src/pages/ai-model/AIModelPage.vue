@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, defineComponent, h } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, defineComponent, h, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useRuntimeStore } from '@/shared/model/runtime-store'
@@ -38,16 +38,15 @@ const datasetPreview = ref<Array<Record<string, any>>>([])
 const datasetError = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+let visualizationRefreshTimer: number | undefined
 
 const datasetColumns = computed(() => {
   if (datasetPreview.value.length === 0) return []
   return Object.keys(datasetPreview.value[0])
 })
 
-function refreshVisualization() {
-  // Trigger a re-render by updating a dummy state
-  trainingStatus.value = 'Визуализация обновлена'
-  setTimeout(() => { trainingStatus.value = '' }, 1000)
+async function refreshVisualization() {
+  await Promise.all([runtime.loadCosmos(), runtime.loadSystem()])
 }
 
 const cosmosStats = computed(() => ({
@@ -68,6 +67,15 @@ const hiveStats = computed(() => {
 
 const systemHealth = computed(() => runtime.system?.health.status ?? 'unknown')
 
+function trainingResultSummary(result: {
+  processed: number
+  imported_claims: number
+  imported_concepts: number
+  duplicates: number
+}): string {
+  return `Текстов: ${result.processed}; claims: ${result.imported_claims}; concepts: ${result.imported_concepts}; дубликатов: ${result.duplicates}`
+}
+
 async function startTextTraining() {
   if (!trainingText.value.trim() || isTraining.value) return
   
@@ -86,16 +94,17 @@ async function startTextTraining() {
   })
   
   try {
-    trainingStatus.value = 'Отправка текста в backend...'
+    trainingProgress.value = 25
+    trainingStatus.value = 'Извлечение claims и concepts...'
     const result = await api.trainDataset([trainingText.value])
     trainingProgress.value = 100
+    trainingStatus.value = 'Завершено'
     
     trainingHistory.value[0].status = 'completed'
-    trainingHistory.value[0].result = `Обработано текстов: ${result.processed}. Источников добавлено: ${result.sources.length}`
+    trainingHistory.value[0].result = trainingResultSummary(result)
     trainingText.value = ''
     
-    // Trigger cosmos reload
-    await runtime.loadCosmos()
+    await refreshVisualization()
   } catch (error) {
     trainingHistory.value[0].status = 'failed'
     trainingHistory.value[0].result = error instanceof Error ? error.message : 'Ошибка обучения'
@@ -252,16 +261,15 @@ async function startDatasetTraining() {
     }
     
     trainingProgress.value = 25
-    trainingStatus.value = 'Отправка датасета в backend...'
+    trainingStatus.value = 'Извлечение claims и concepts...'
     const result = await api.trainDataset(texts)
     trainingProgress.value = 100
     trainingStatus.value = 'Завершено'
     
     trainingHistory.value[0].status = 'completed'
-    trainingHistory.value[0].result = `Обработано текстов: ${result.processed}. Источников добавлено: ${result.sources.length}`
+    trainingHistory.value[0].result = trainingResultSummary(result)
     
-    // Trigger cosmos reload
-    await runtime.loadCosmos()
+    await refreshVisualization()
   } catch (error) {
     trainingHistory.value[0].status = 'failed'
     trainingHistory.value[0].result = error instanceof Error ? error.message : 'Ошибка обучения на датасете'
@@ -325,8 +333,24 @@ function formatTime(iso: string) {
 }
 
 onMounted(async () => {
-  await runtime.loadCosmos()
-  await runtime.loadSystem()
+  await refreshVisualization()
+})
+
+watch(autoRefresh, (enabled) => {
+  if (visualizationRefreshTimer !== undefined) {
+    window.clearInterval(visualizationRefreshTimer)
+    visualizationRefreshTimer = undefined
+  }
+  if (enabled) {
+    void refreshVisualization()
+    visualizationRefreshTimer = window.setInterval(() => void refreshVisualization(), 5_000)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (visualizationRefreshTimer !== undefined) {
+    window.clearInterval(visualizationRefreshTimer)
+  }
 })
 
 // Component definitions for Architecture and Visualization tabs

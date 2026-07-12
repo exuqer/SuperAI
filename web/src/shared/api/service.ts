@@ -32,6 +32,19 @@ export interface CosmosDataDto {
   claims: ClaimDto[]
 }
 
+export interface TrainingResultDto {
+  processed: number
+  sources: unknown[]
+  imported_claims: number
+  imported_concepts: number
+  duplicates: number
+  visualization: {
+    concept_count: number
+    claim_count: number
+    latest_source_ids: string[]
+  }
+}
+
 export interface TaskService {
   health(): Promise<HealthDto>
   meta(): Promise<MetaDto>
@@ -43,7 +56,7 @@ export interface TaskService {
   getArtifactMetadata(artifactId: string, projectId?: string): Promise<ArtifactRefDto>
   getCosmosData(projectId?: string): Promise<CosmosDataDto>
   getSystemSnapshot(): Promise<SystemSnapshotDto>
-  trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<{ processed: number; sources: any[] }>
+  trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<TrainingResultDto>
 }
 
 function clone<T>(value: T): T {
@@ -156,9 +169,19 @@ export class MockTaskService implements TaskService {
     return parseSystemSnapshotDto(clone(getFixture('success').system))
   }
 
-  async trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<{ processed: number; sources: any[] }> {
-    // Mock implementation - just return success
-    return { processed: texts.length, sources: texts.map((text, i) => ({ title: `mock-${i}`, text })) }
+  async trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<TrainingResultDto> {
+    return {
+      processed: texts.length,
+      sources: texts.map((text, i) => ({ title: `mock-${i}`, text })),
+      imported_claims: texts.length,
+      imported_concepts: texts.length,
+      duplicates: 0,
+      visualization: {
+        concept_count: texts.length,
+        claim_count: texts.length,
+        latest_source_ids: texts.map((_, i) => `mock-${i}`),
+      },
+    }
   }
 }
 
@@ -305,12 +328,12 @@ export class LiveTaskService implements TaskService {
     })
   }
 
-  async trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<{ processed: number; sources: any[] }> {
+  async trainDataset(texts: string[], projectId?: string, visibility?: string, sectors?: string[], trusted?: boolean): Promise<TrainingResultDto> {
     const payload = { texts, project_id: projectId, visibility: visibility ?? 'tenant', sectors: sectors ?? [], trusted: trusted ?? true }
     return await this.request('/api/v1/training/dataset', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }) as { processed: number; sources: any[] }
+    }) as TrainingResultDto
   }
 }
 

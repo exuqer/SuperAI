@@ -51,11 +51,26 @@ def _wait_for_terminal_task(client: TestClient, view: TaskView, *, tenant_id: st
     pytest.fail(f"task {view.task_id} did not reach a terminal state")
 
 
+def _import_context(client: TestClient, tenant_id: str) -> None:
+    response = client.post(
+        "/api/v1/sources",
+        headers={"X-Tenant-Id": tenant_id},
+        json={
+            "title": "Live task context",
+            "text": "Сформируй ответ из разрешённого контекста.",
+            "project_id": "project-live-test",
+            "visibility": "project",
+        },
+    )
+    assert response.status_code == 200
+
+
 def test_live_task_can_be_retrieved_with_its_complete_trace(client: TestClient) -> None:
     health = client.get("/api/v1/health")
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
 
+    _import_context(client, "tenant-live-test")
     submitted = client.post("/api/v1/tasks", json=_submission())
 
     assert submitted.status_code == 202
@@ -122,6 +137,7 @@ def test_live_task_can_be_retrieved_with_its_complete_trace(client: TestClient) 
 
 def test_post_tasks_reuses_one_task_and_trace_for_the_same_idempotency_key(client: TestClient) -> None:
     headers = {"Idempotency-Key": "live-api-idempotency-key"}
+    _import_context(client, "tenant-live-test")
 
     first = client.post("/api/v1/tasks", headers=headers, json=_submission())
     assert first.status_code == 202
@@ -149,6 +165,8 @@ def test_post_tasks_reuses_one_task_and_trace_for_the_same_idempotency_key(clien
 
 def test_idempotency_and_trace_access_are_scoped_to_the_tenant(client: TestClient) -> None:
     headers = {"Idempotency-Key": "shared-key-across-tenants"}
+    _import_context(client, "tenant-a")
+    _import_context(client, "tenant-b")
 
     tenant_a = _wait_for_terminal_task(
         client,

@@ -6,6 +6,11 @@ def test_ack_loss_redelivery_reuses_committed_task_materialization(tmp_path) -> 
     service = SuperAIService(ServiceConfig(tmp_path / "superai-data"))
     service.runtime.stop_worker()
     try:
+        service.cosmos.import_text(
+            title="runtime-context",
+            text="Объясни ограниченный runtime.",
+            tenant_id="local",
+        )
         task = service.submit_task(
             TaskSubmission(message="Объясни ограниченный runtime", conversation_id="redelivery-conversation"),
             idempotency_key="redelivery-key",

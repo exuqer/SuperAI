@@ -17,12 +17,22 @@ from .contracts import (
 )
 from .cosmos import Cosmos
 from .database import SqliteDatabase, json_dumps, json_loads
+from .emergence.hypotheses import create_hypothesis_board
 from .hive import HiveManager
 from .observability import TraceRecorder
+
+if False:  # pragma: no cover - import only for static type checkers
+    from .emergence.graph import ActiveGraphBuilder
 
 
 class PlanningError(RuntimeError):
     pass
+
+
+class InsufficientEvidenceError(PlanningError):
+    """Raised when a task has no permitted source-backed answer."""
+
+    code = "insufficient_evidence"
 
 
 class Atlas:
@@ -204,7 +214,7 @@ class CriticSystem:
 
 
 class TextCodec:
-    """A deliberately deterministic codec; external LLMs are capabilities, not foundations."""
+    """Formats only source-backed answer material."""
 
     def encode(self, contract: TaskContract, hive_id: str, trace_id: str, retrieval: RetrievalResult) -> AnswerEnvelope:
         unique_sources = []
@@ -213,19 +223,15 @@ class TextCodec:
             if item.source.artifact_id not in seen_sources:
                 seen_sources.add(item.source.artifact_id)
                 unique_sources.append(item.source)
-        if retrieval.claims:
-            lines = ["По разрешённым источникам:"]
-            for item in retrieval.claims:
-                lines.append("- " + item.claim.object_value)
-                if item.contradictory_claim_ids:
-                    lines.append("  (Есть альтернативные утверждения: %s.)" % ", ".join(item.contradictory_claim_ids))
-            lines.append("\nИсточники: " + ", ".join(source.artifact_id for source in unique_sources))
-            answer_text = "\n".join(lines)
-        else:
-            answer_text = (
-                "Не удалось сформировать содержательный ответ только из разрешённых источников. "
-                + " ".join(retrieval.gaps or ["Добавьте источник или уточните задачу."])
+        if not retrieval.claims:
+            raise InsufficientEvidenceError(
+                "No permitted source-backed claims match this task; import relevant training material first."
             )
+        answer_text = "\n\n".join(
+            dict.fromkeys(item.claim.object_value.strip() for item in retrieval.claims if item.claim.object_value.strip())
+        )
+        if not answer_text:
+            raise InsufficientEvidenceError("Retrieved claims contain no answer material.")
         return AnswerEnvelope(
             task_id=contract.task_id,
             trace_id=trace_id,
@@ -246,6 +252,7 @@ class ExecutionEngine:
         critics: CriticSystem,
         codec: TextCodec,
         traces: TraceRecorder,
+        active_graph_builder: Optional["ActiveGraphBuilder"] = None,
     ) -> None:
         self.cosmos = cosmos
         self.hives = hives
@@ -253,6 +260,7 @@ class ExecutionEngine:
         self.critics = critics
         self.codec = codec
         self.traces = traces
+        self.active_graph_builder = active_graph_builder
 
     def execute(self, contract: TaskContract, hive_id: str, trace_id: str, context: Optional[Any] = None) -> AnswerEnvelope:
         def checkpoint() -> None:
@@ -273,6 +281,53 @@ class ExecutionEngine:
             output_summary={"claims": len(retrieval.claims), "gaps": retrieval.gaps},
             budget_after=contract.budget,
         )
+
+        if self.active_graph_builder is not None:
+            graph_span = self.traces.start_span(
+                trace_id=trace_id,
+                component="ActiveGraph",
+                operation="PROCESS_ACTIVE_GRAPH",
+                input_summary={"claim_count": len(retrieval.claims)},
+            )
+            graph = self.active_graph_builder.build_initial_graph(
+                contract,
+                hive_id,
+                trace_id=trace_id,
+                retrieval=retrieval,
+                reserve_steps=8,
+            )
+            while graph.step():
+                checkpoint()
+            snapshot_id = graph.persist_snapshot(self.active_graph_builder.database)
+            self.traces.finish_span(
+                graph_span,
+                output_summary={"snapshot_id": snapshot_id, "events": graph.event_count},
+            )
+            board = create_hypothesis_board(
+                task_id=contract.task_id,
+                budget=graph.budget,
+                traces=self.traces,
+                cosmos=self.cosmos,
+                tenant_id=contract.tenant_id,
+                project_id=contract.project_id,
+                trace_id=trace_id,
+            )
+            hypotheses = board.initialize(contract)
+            selected_hypothesis = board.select_best_hypothesis()
+            self.traces.record_event(
+                {
+                    "task_id": contract.task_id,
+                    "trace_id": trace_id,
+                    "kind": "HypothesisBoardCompleted",
+                    "producer": "ExecutionEngine",
+                    "payload": {
+                        "hypothesis_count": len(hypotheses),
+                        "selected_hypothesis_id": (
+                            selected_hypothesis.hypothesis_id if selected_hypothesis is not None else None
+                        ),
+                    },
+                }
+            )
 
         planning_span = self.traces.start_span(
             trace_id=trace_id,

@@ -271,7 +271,7 @@ class CommandRuntime:
             self.traces.fail_span(span, error)
             return self._finish_failure(item, error, terminal=not exc.retryable)
         except Exception as exc:  # errors cross a normalized boundary
-            error = ErrorEnvelope(code="handler_error", message=str(exc), retryable=False)
+            error = ErrorEnvelope(code=getattr(exc, "code", "handler_error"), message=str(exc), retryable=False)
             self.traces.fail_span(span, error)
             return self._finish_failure(item, error, terminal=True)
         self.traces.finish_span(
@@ -338,7 +338,7 @@ class CommandRuntime:
             return self._set_state(item, TaskState.QUEUED, error=error)
         # Budget/contract failures are terminal task failures; an unexpected
         # handler or exhausted retry needs an operator-visible dead letter.
-        state = TaskState.FAILED if error.code in {"budget_exceeded", "cancelled"} else TaskState.DEAD_LETTER
+        state = TaskState.FAILED if error.code in {"budget_exceeded", "cancelled", "insufficient_evidence"} else TaskState.DEAD_LETTER
         return self._set_state(item, state, error=error)
 
     def _set_state(self, item: WorkItem, state: TaskState, *, error: Optional[ErrorEnvelope] = None) -> WorkItem:

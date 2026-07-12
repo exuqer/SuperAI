@@ -1,0 +1,19 @@
+{
+  "manifest_id": "omega-mvp-v1",
+  "name": "ΩE MVP Baseline",
+  "description": "Sequence transformation tasks with hidden rules for ΩE baseline evaluation",
+  "dataset_version": "1.0",
+  "train_split": 0.6,
+  "validation_split": 0.2,
+  "holdout_split": 0.2,
+  "seed": 42,
+  "metrics": ["accuracy", "latency_ms", "cost", "steps"],
+  "task_generator": "sequence_transform",
+  "task_generator_params": {
+    "num_tasks": 50,
+    "sequence_length": 10,
+    "value_range": 20
+  },
+  "git_revision": "79c219a7723b",
+  "created_at": "2026-07-12T13:27:00Z"
+}

@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from .contracts import Budget, DomainEvent, ErrorEnvelope, SpanStatus, TraceSpan, utcnow
+from .contracts import Budget, DomainEvent, ErrorEnvelope, SpanStatus, TraceSpan, new_id, utcnow
 from .database import SqliteDatabase, json_dumps, json_loads
 
 
@@ -99,7 +99,15 @@ class TraceRecorder:
     def fail_span(self, span: TraceSpan, error: ErrorEnvelope) -> TraceSpan:
         return self.finish_span(span, status=SpanStatus.FAILED, error=error)
 
-    def record_event(self, event: DomainEvent) -> None:
+    def record_event(self, event: DomainEvent | Dict[str, Any]) -> None:
+        if isinstance(event, dict):
+            payload = dict(event)
+            payload.setdefault("id", new_id("evt-envelope"))
+            payload.setdefault("event_id", new_id("evt"))
+            payload.setdefault("tenant_id", "local")
+            payload.setdefault("task_id", "system")
+            payload.setdefault("trace_id", "system")
+            event = DomainEvent.model_validate(payload)
         with self.database.transaction() as connection:
             sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM domain_events WHERE trace_id = ?", (event.trace_id,)

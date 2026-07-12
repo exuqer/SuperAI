@@ -381,4 +381,8 @@ def _sentences(text: str) -> list[str]:
     # Markdown headings are retained as source structure but claims refer to
     # bounded sentences, so exact provenance stays inspectable in the archive.
     chunks = re.split(r"(?<=[.!?])\s+|\n+", text)
-    return [re.sub(r"^\s*#+\s*", "", chunk).strip()[:2_000] for chunk in chunks if len(chunk.strip()) >= 12]
+    return [
+        re.sub(r"^\s*#+\s*", "", chunk).strip()[:2_000]
+        for chunk in chunks
+        if len(chunk.strip()) >= 3
+    ]

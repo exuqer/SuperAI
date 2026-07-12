@@ -41,6 +41,11 @@ def test_skill_requires_owned_disjoint_holdout_and_stays_tenant_scoped(tmp_path)
     service = SuperAIService(ServiceConfig(tmp_path / "superai-data"))
     service.runtime.stop_worker()
     try:
+        service.cosmos.import_text(
+            title="report-context",
+            text="Сформируй краткий отчёт из разрешённого контекста.",
+            tenant_id="tenant-a",
+        )
         first = _completed(service, "Сформируй краткий отчёт", "skill-conversation-a")
         second = _completed(service, "Сформируй краткий отчёт", "skill-conversation-b")
         holdout = _completed(service, "Сформируй краткий отчёт", "skill-conversation-holdout")

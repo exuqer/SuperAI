@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
-from .contracts import AccessScope, ErrorEnvelope, GenomeManifest, TaskSubmission
+from .contracts import AccessScope, ErrorEnvelope, GenomeManifest, TaskSubmission, BenchmarkRun
 from .service import ServiceConfig, SuperAIService
 from .storage import AccessDenied, ArtifactNotFound, IntegrityError
 from .hive import CapacityError, HiveTransitionError
@@ -355,7 +355,37 @@ def create_app(config: Optional[ServiceConfig] = None) -> FastAPI:
                 trusted=payload.trusted,
             )
             results.append(result.model_dump(mode="json"))
-        return {"processed": len(results), "sources": results}
+        claims = service.cosmos.list_claims(tenant_id=tenant_id, project_id=payload.project_id, limit=500)
+        concepts = service.cosmos.list_concepts(tenant_id=tenant_id, project_id=payload.project_id, limit=500)
+        return {
+            "processed": len(results),
+            "sources": results,
+            "imported_claims": sum(item["imported_claims"] for item in results),
+            "imported_concepts": sum(item["imported_concepts"] for item in results),
+            "duplicates": sum(1 for item in results if item["duplicate"]),
+            "visualization": {
+                "concept_count": len(concepts),
+                "claim_count": len(claims),
+                "latest_source_ids": [item["source_id"] for item in results],
+            },
+        }
+
+    @app.get("/api/v1/omega/tasks/{task_id}")
+    def omega_task_state(
+        task_id: str,
+        project_id: Optional[str] = Query(default=None),
+        tenant_id: str = Header(default="local", alias="X-Tenant-Id"),
+    ) -> dict:
+        service.task(task_id, tenant_id, project_id, enforce_project=True)
+        snapshot = service.database.one(
+            "SELECT * FROM active_graph_snapshots WHERE task_id = ? AND tenant_id = ? ORDER BY created_at DESC LIMIT 1",
+            (task_id, tenant_id),
+        )
+        hypotheses = service.database.all(
+            "SELECT * FROM hypotheses WHERE task_id = ? AND tenant_id = ? ORDER BY created_at",
+            (task_id, tenant_id),
+        )
+        return {"snapshot": snapshot, "hypotheses": hypotheses}
 
     @app.post("/api/v1/genomes")
     def register_genome(payload: GenomeManifest) -> dict:
@@ -364,6 +394,43 @@ def create_app(config: Optional[ServiceConfig] = None) -> FastAPI:
     @app.get("/api/v1/genomes/{genome_id}/{version}")
     def materialize_genome(genome_id: str, version: str) -> dict:
         return service.genomes.materialize(genome_id, version).model_dump(mode="json")
+
+    # Benchmark endpoints
+    @app.get("/api/v1/benchmarks/{run_id}")
+    def benchmark_run(
+        run_id: str,
+        project_id: Optional[str] = Query(default=None),
+        tenant_id: str = Header(default="local", alias="X-Tenant-Id"),
+    ) -> dict:
+        row = service.database.one(
+            "SELECT * FROM benchmark_runs WHERE run_id = ? AND tenant_id = ?",
+            (run_id, tenant_id),
+        )
+        if not row:
+            raise KeyError("benchmark run not found")
+        if row["project_id"] != project_id:
+            raise AccessDenied("benchmark run belongs to another project")
+        return BenchmarkRun(**row).model_dump(mode="json")
+
+    @app.get("/api/v1/benchmarks")
+    def list_benchmark_runs(
+        project_id: Optional[str] = Query(default=None),
+        mode: Optional[str] = Query(default=None),
+        tenant_id: str = Header(default="local", alias="X-Tenant-Id"),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> list[dict]:
+        query = "SELECT * FROM benchmark_runs WHERE tenant_id = ?"
+        params = [tenant_id]
+        if project_id:
+            query += " AND project_id = ?"
+            params.append(project_id)
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = service.database.all(query, params)
+        return [BenchmarkRun(**row).model_dump(mode="json") for row in rows]
 
     return app
 

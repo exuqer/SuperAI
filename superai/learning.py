@@ -138,7 +138,7 @@ class ExperienceCompiler:
         scope = AccessScope.model_validate(payload["access_scope"])
         imported = self.cosmos.import_text(
             title="compost-%s.md" % compost_id,
-            text=payload["normalized_content"],
+            text="Experience-derived conclusion: " + payload["normalized_content"],
             tenant_id=tenant_id,
             access_scope=scope,
             sectors=["Experience"],

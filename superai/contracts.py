@@ -29,7 +29,7 @@ def new_id(prefix: str) -> str:
 class SchemaModel(BaseModel):
     """Base model which accepts forward-compatible fields at a boundary."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, from_attributes=True)
     schema_version: str = SCHEMA_VERSION
 
     @field_validator("schema_version")
@@ -450,3 +450,210 @@ class TaskView(SchemaModel):
     error: Optional[ErrorEnvelope] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+# ============================================================
+# NEW CONTRACTS FOR ΩE STAGES
+# ============================================================
+
+class NodeType(str, Enum):
+    CONCEPT = "concept"
+    CLAIM = "claim"
+    OBSERVATION = "observation"
+    HYPOTHESIS = "hypothesis"
+    PREDICTION = "prediction"
+    PROCEDURE = "procedure"
+
+
+class GraphNode(SchemaModel):
+    node_id: str = Field(default_factory=lambda: new_id("node"))
+    node_type: NodeType
+    content_ref: str  # reference to claim, hypothesis, concept, etc.
+    status: str = "active"  # active, inhibited, expired
+    activation: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    novelty: float = Field(default=0.0, ge=0.0, le=1.0)
+    utility: float = Field(default=0.0, ge=0.0, le=1.0)
+    provenance_refs: List[str] = Field(default_factory=list)
+    version: int = 1
+
+
+class EdgeType(str, Enum):
+    SEMANTIC = "semantic"
+    EVIDENCE_FOR = "evidence_for"
+    EVIDENCE_AGAINST = "evidence_against"
+    CAUSAL = "causal"
+    TEMPORAL = "temporal"
+    PROCEDURE = "procedure"
+
+
+class GraphEdge(SchemaModel):
+    edge_id: str = Field(default_factory=lambda: new_id("edge"))
+    source_id: str
+    target_id: str
+    edge_type: EdgeType
+    weight: float = Field(default=1.0, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    scope: str = "local"  # local, project, tenant, global
+    provenance_refs: List[str] = Field(default_factory=list)
+    valid_from: Optional[datetime] = None
+    valid_to: Optional[datetime] = None
+    version: int = 1
+
+
+class ActiveGraphSnapshot(SchemaModel):
+    task_id: str
+    hive_id: str
+    tenant_id: str = "local"
+    project_id: Optional[str] = None
+    cosmos_version: str
+    node_ids: List[str] = Field(default_factory=list)
+    edge_ids: List[str] = Field(default_factory=list)
+    frontier: List[str] = Field(default_factory=list)  # node_ids at frontier
+    event_count: int = 0
+    budget_ledger: Dict[str, int] = Field(default_factory=dict)
+    random_seed: int
+
+
+class ResourceBudget(SchemaModel):
+    max_steps: int = 100
+    max_wall_time_ms: int = 30_000
+    max_active_nodes: int = 50
+    max_active_edges: int = 200
+    max_hypotheses: int = 5
+    max_experiments: int = 10
+    exploration_share: float = Field(default=0.3, ge=0.0, le=1.0)
+
+
+class HypothesisStatus(str, Enum):
+    PROPOSED = "proposed"
+    ACTIVE = "active"
+    MERGED = "merged"
+    FALSIFIED = "falsified"
+    SELECTED = "selected"
+    ARCHIVED = "archived"
+
+
+class HypothesisRecord(SchemaModel):
+    hypothesis_id: str = Field(default_factory=lambda: new_id("hyp"))
+    task_id: str
+    tenant_id: str = "local"
+    project_id: Optional[str] = None
+    family_id: str  # group of related hypotheses
+    statement: str
+    assumptions: List[str] = Field(default_factory=list)
+    evidence_for: List[str] = Field(default_factory=list)  # refs to evidence
+    evidence_against: List[str] = Field(default_factory=list)
+    predictions: List[str] = Field(default_factory=list)  # refs to PredictionRecord
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    novelty: float = Field(default=0.0, ge=0.0, le=1.0)
+    allocated_budget: int = 0
+    spent_budget: int = 0
+    status: HypothesisStatus = HypothesisStatus.PROPOSED
+    parent_ids: List[str] = Field(default_factory=list)
+    version: int = Field(default=1, ge=1)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class PredictionRecord(SchemaModel):
+    prediction_id: str = Field(default_factory=lambda: new_id("pred"))
+    hypothesis_id: str
+    experiment_input: Dict[str, Any]
+    expected_output: Dict[str, Any]
+    tolerance: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExperimentStatus(str, Enum):
+    PROPOSED = "proposed"
+    APPROVED = "approved"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class EvidenceStatus(str, Enum):
+    SIMULATED = "simulated"
+    COMPUTED = "computed"
+    OBSERVED = "observed"
+    SOURCE_BACKED = "source_backed"
+    VERIFIED = "verified"
+
+
+class ExperimentRecord(SchemaModel):
+    experiment_id: str = Field(default_factory=lambda: new_id("exp"))
+    task_id: str
+    tenant_id: str = "local"
+    competing_hypothesis_ids: List[str]
+    operation: str
+    input: Dict[str, Any]
+    expected_information_gain: float = Field(default=0.0, ge=0.0, le=1.0)
+    estimated_cost: int = 1
+    risk: float = Field(default=0.0, ge=0.0, le=1.0)
+    result_ref: Optional[str] = None
+    evidence_status: EvidenceStatus = EvidenceStatus.SIMULATED
+    status: ExperimentStatus = ExperimentStatus.PROPOSED
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ConceptCandidateState(str, Enum):
+    CANDIDATE = "candidate"
+    VALIDATING = "validating"
+    VALIDATED = "validated"
+    SHADOW = "shadow"
+    ACTIVE = "active"
+    REJECTED = "rejected"
+    ROLLED_BACK = "rolled_back"
+
+
+class ConceptCandidate(SchemaModel):
+    concept_id: str = Field(default_factory=lambda: new_id("concept_cand"))
+    tenant_id: str = "local"
+    project_id: Optional[str] = None
+    name: str
+    definition_ref: str  # reference to artifact with definition
+    source_subgraph_refs: List[str] = Field(default_factory=list)
+    positive_examples: List[Dict[str, Any]] = Field(default_factory=list)
+    negative_examples: List[Dict[str, Any]] = Field(default_factory=list)
+    train_task_ids: List[str] = Field(default_factory=list)
+    holdout_manifest_ref: str  # reference to holdout dataset manifest
+    metrics: Dict[str, float] = Field(default_factory=dict)
+    state: ConceptCandidateState = ConceptCandidateState.CANDIDATE
+    rollback_target: Optional[str] = None
+    version: int = Field(default=1, ge=1)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ConceptEvaluation(SchemaModel):
+    concept_id: str
+    baseline_run_id: str
+    treatment_run_id: str
+    ablation_run_id: str
+    quality_delta: float = 0.0
+    cost_delta: float = 0.0
+    transfer_delta: float = 0.0
+    accepted: bool = False
+
+
+class BenchmarkRun(SchemaModel):
+    run_id: str = Field(default_factory=lambda: new_id("bench"))
+    task_id: str
+    tenant_id: str = "local"
+    project_id: Optional[str] = None
+    git_revision: str
+    config_hash: str
+    dataset_version: str
+    seed: int
+    latency_ms: float = 0.0
+    cost: float = 0.0
+    quality: float = 0.0
+    status: str = "running"  # running, completed, failed
+    mode: str = "baseline"  # baseline, treatment, holdout, ablation
+    concept_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+
+

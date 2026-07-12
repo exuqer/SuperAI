@@ -53,10 +53,10 @@ async function sendMessage() {
       },
     })
     
-    if (task) {
+    if (task?.answer?.text) {
       runtime.appendConversationMessage(conversationId.value, {
         role: 'assistant',
-        content: task.answer?.text || 'Задача выполнена, но ответа нет.',
+        content: task.answer.text,
         timestamp: new Date().toISOString(),
         taskId: task.id,
         traceId: task.traceId,
@@ -68,7 +68,7 @@ async function sendMessage() {
     } else {
       runtime.appendConversationMessage(conversationId.value, {
         role: 'system',
-        content: `Ошибка: ${runtime.runError?.message || 'Неизвестная ошибка'}`,
+        content: `Ошибка: ${task?.error?.message ?? runtime.runError?.message ?? 'Неизвестная ошибка'}`,
         timestamp: new Date().toISOString(),
       })
     }

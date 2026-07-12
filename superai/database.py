@@ -352,12 +352,174 @@ class SqliteDatabase:
             created_at TEXT NOT NULL,
             PRIMARY KEY(genome_id, version)
         );
+
+        -- ΩE Tables
+        CREATE TABLE IF NOT EXISTS graph_edges (
+            edge_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT,
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            edge_type TEXT NOT NULL,
+            weight REAL NOT NULL,
+            confidence REAL NOT NULL,
+            scope TEXT NOT NULL,
+            provenance_refs_json TEXT NOT NULL,
+            valid_from TEXT,
+            valid_to TEXT,
+            version INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id);
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id);
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_tenant ON graph_edges(tenant_id, project_id);
+
+        CREATE TABLE IF NOT EXISTS active_graph_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            hive_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            cosmos_version TEXT NOT NULL,
+            node_ids_json TEXT NOT NULL,
+            edge_ids_json TEXT NOT NULL,
+            node_types_json TEXT NOT NULL DEFAULT '[]',
+            edge_types_json TEXT NOT NULL DEFAULT '[]',
+            frontier_json TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            budget_ledger_json TEXT NOT NULL,
+            random_seed INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ags_task ON active_graph_snapshots(task_id);
+        CREATE INDEX IF NOT EXISTS idx_ags_hive ON active_graph_snapshots(hive_id);
+
+        CREATE TABLE IF NOT EXISTS hypotheses (
+            hypothesis_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT,
+            family_id TEXT NOT NULL,
+            statement TEXT NOT NULL,
+            assumptions_json TEXT NOT NULL,
+            evidence_for_json TEXT NOT NULL,
+            evidence_against_json TEXT NOT NULL,
+            predictions_json TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            novelty REAL NOT NULL,
+            allocated_budget INTEGER NOT NULL,
+            spent_budget INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            parent_ids_json TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hypotheses_task ON hypotheses(task_id);
+        CREATE INDEX IF NOT EXISTS idx_hypotheses_family ON hypotheses(family_id);
+        CREATE INDEX IF NOT EXISTS idx_hypotheses_tenant ON hypotheses(tenant_id, project_id);
+
+        CREATE TABLE IF NOT EXISTS hypothesis_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            hypothesis_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            description TEXT NOT NULL,
+            weight REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(hypothesis_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_hyp_evidence_hyp ON hypothesis_evidence(hypothesis_id);
+
+        CREATE TABLE IF NOT EXISTS predictions (
+            prediction_id TEXT PRIMARY KEY,
+            hypothesis_id TEXT NOT NULL,
+            experiment_input_json TEXT NOT NULL,
+            expected_output_json TEXT NOT NULL,
+            tolerance_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(hypothesis_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_predictions_hyp ON predictions(hypothesis_id);
+
+        CREATE TABLE IF NOT EXISTS experiments (
+            experiment_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            competing_hypothesis_ids_json TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            expected_information_gain REAL NOT NULL,
+            estimated_cost INTEGER NOT NULL,
+            risk REAL NOT NULL,
+            result_ref TEXT,
+            evidence_status TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_experiments_task ON experiments(task_id);
+        CREATE INDEX IF NOT EXISTS idx_experiments_tenant ON experiments(tenant_id);
+
+        CREATE TABLE IF NOT EXISTS concept_candidates (
+            concept_id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT,
+            name TEXT NOT NULL,
+            definition_ref TEXT NOT NULL,
+            source_subgraph_refs_json TEXT NOT NULL,
+            positive_examples_json TEXT NOT NULL,
+            negative_examples_json TEXT NOT NULL,
+            train_task_ids_json TEXT NOT NULL,
+            holdout_manifest_ref TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            rollback_target TEXT,
+            version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_concept_candidates_tenant ON concept_candidates(tenant_id, project_id);
+        CREATE INDEX IF NOT EXISTS idx_concept_candidates_state ON concept_candidates(state);
+
+        CREATE TABLE IF NOT EXISTS concept_evaluations (
+            concept_id TEXT PRIMARY KEY,
+            baseline_run_id TEXT NOT NULL,
+            treatment_run_id TEXT NOT NULL,
+            ablation_run_id TEXT NOT NULL,
+            quality_delta REAL NOT NULL,
+            cost_delta REAL NOT NULL,
+            transfer_delta REAL NOT NULL,
+            accepted INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(concept_id) REFERENCES concept_candidates(concept_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS benchmark_runs (
+            run_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            project_id TEXT,
+            git_revision TEXT NOT NULL,
+            config_hash TEXT NOT NULL,
+            dataset_version TEXT NOT NULL,
+            seed INTEGER NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            cost REAL NOT NULL,
+            quality REAL NOT NULL,
+            status TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'baseline',
+            concept_id TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_runs_task ON benchmark_runs(task_id);
+        CREATE INDEX IF NOT EXISTS idx_benchmark_runs_tenant ON benchmark_runs(tenant_id, project_id);
         """
         with self._lock:
             self.connection.executescript(schema)
             self._migrate_source_scope_uniqueness()
             self._ensure_skill_scope_columns()
             self._ensure_snapshot_tenant_column()
+            self._ensure_omega_e_tables()
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
                 ("schema_version", "1.0"),
@@ -422,3 +584,221 @@ class SqliteDatabase:
         self.connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_sequence ON snapshots(tenant_id, aggregate_type, aggregate_id, sequence)"
         )
+
+    def _ensure_omega_e_tables(self) -> None:
+        """Ensure ΩE tables exist (idempotent migration)."""
+        # Tables are created in _migrate's main schema block, but this ensures
+        # any missing tables/indices are added for upgrades.
+        tables = self.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        table_names = {row["name"] for row in tables}
+
+        if "graph_edges" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                edge_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                weight REAL NOT NULL,
+                confidence REAL NOT NULL,
+                scope TEXT NOT NULL,
+                provenance_refs_json TEXT NOT NULL,
+                valid_from TEXT,
+                valid_to TEXT,
+                version INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_tenant ON graph_edges(tenant_id, project_id);
+            """)
+
+        if "active_graph_snapshots" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS active_graph_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                hive_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                cosmos_version TEXT NOT NULL,
+                node_ids_json TEXT NOT NULL,
+                edge_ids_json TEXT NOT NULL,
+                node_types_json TEXT NOT NULL DEFAULT '[]',
+                edge_types_json TEXT NOT NULL DEFAULT '[]',
+                frontier_json TEXT NOT NULL,
+                event_count INTEGER NOT NULL,
+                budget_ledger_json TEXT NOT NULL,
+                random_seed INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ags_task ON active_graph_snapshots(task_id);
+            CREATE INDEX IF NOT EXISTS idx_ags_hive ON active_graph_snapshots(hive_id);
+            """)
+        else:
+            snapshot_columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(active_graph_snapshots)")
+            }
+            if "node_types_json" not in snapshot_columns:
+                self.connection.execute(
+                    "ALTER TABLE active_graph_snapshots ADD COLUMN node_types_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "edge_types_json" not in snapshot_columns:
+                self.connection.execute(
+                    "ALTER TABLE active_graph_snapshots ADD COLUMN edge_types_json TEXT NOT NULL DEFAULT '[]'"
+                )
+
+        if "hypotheses" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS hypotheses (
+                hypothesis_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                family_id TEXT NOT NULL,
+                statement TEXT NOT NULL,
+                assumptions_json TEXT NOT NULL,
+                evidence_for_json TEXT NOT NULL,
+                evidence_against_json TEXT NOT NULL,
+                predictions_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                novelty REAL NOT NULL,
+                allocated_budget INTEGER NOT NULL,
+                spent_budget INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                parent_ids_json TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_hypotheses_task ON hypotheses(task_id);
+            CREATE INDEX IF NOT EXISTS idx_hypotheses_family ON hypotheses(family_id);
+            CREATE INDEX IF NOT EXISTS idx_hypotheses_tenant ON hypotheses(tenant_id, project_id);
+            """)
+
+        if "hypothesis_evidence" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS hypothesis_evidence (
+                evidence_id TEXT PRIMARY KEY,
+                hypothesis_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                description TEXT NOT NULL,
+                weight REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(hypothesis_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_hyp_evidence_hyp ON hypothesis_evidence(hypothesis_id);
+            """)
+
+        if "predictions" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS predictions (
+                prediction_id TEXT PRIMARY KEY,
+                hypothesis_id TEXT NOT NULL,
+                experiment_input_json TEXT NOT NULL,
+                expected_output_json TEXT NOT NULL,
+                tolerance_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(hypothesis_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_predictions_hyp ON predictions(hypothesis_id);
+            """)
+
+        if "experiments" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS experiments (
+                experiment_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                competing_hypothesis_ids_json TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                input_json TEXT NOT NULL,
+                expected_information_gain REAL NOT NULL,
+                estimated_cost INTEGER NOT NULL,
+                risk REAL NOT NULL,
+                result_ref TEXT,
+                evidence_status TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_experiments_task ON experiments(task_id);
+            CREATE INDEX IF NOT EXISTS idx_experiments_tenant ON experiments(tenant_id);
+            """)
+
+        if "concept_candidates" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS concept_candidates (
+                concept_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                name TEXT NOT NULL,
+                definition_ref TEXT NOT NULL,
+                source_subgraph_refs_json TEXT NOT NULL,
+                positive_examples_json TEXT NOT NULL,
+                negative_examples_json TEXT NOT NULL,
+                train_task_ids_json TEXT NOT NULL,
+                holdout_manifest_ref TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                rollback_target TEXT,
+                version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_concept_candidates_tenant ON concept_candidates(tenant_id, project_id);
+            CREATE INDEX IF NOT EXISTS idx_concept_candidates_state ON concept_candidates(state);
+            """)
+
+        if "concept_evaluations" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS concept_evaluations (
+                concept_id TEXT PRIMARY KEY,
+                baseline_run_id TEXT NOT NULL,
+                treatment_run_id TEXT NOT NULL,
+                ablation_run_id TEXT NOT NULL,
+                quality_delta REAL NOT NULL,
+                cost_delta REAL NOT NULL,
+                transfer_delta REAL NOT NULL,
+                accepted INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(concept_id) REFERENCES concept_candidates(concept_id) ON DELETE CASCADE
+            );
+            """)
+
+        if "benchmark_runs" not in table_names:
+            self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS benchmark_runs (
+                run_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                git_revision TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                dataset_version TEXT NOT NULL,
+                seed INTEGER NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                cost REAL NOT NULL,
+                quality REAL NOT NULL,
+                status TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'baseline',
+                concept_id TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_benchmark_runs_task ON benchmark_runs(task_id);
+            CREATE INDEX IF NOT EXISTS idx_benchmark_runs_tenant ON benchmark_runs(tenant_id, project_id);
+            """)
+        else:
+            benchmark_columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(benchmark_runs)")
+            }
+            if "mode" not in benchmark_columns:
+                self.connection.execute(
+                    "ALTER TABLE benchmark_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'baseline'"
+                )
+            if "concept_id" not in benchmark_columns:
+                self.connection.execute("ALTER TABLE benchmark_runs ADD COLUMN concept_id TEXT")
