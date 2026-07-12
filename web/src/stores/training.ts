@@ -6,7 +6,13 @@ interface WordData {
   mass: number
   x: number
   y: number
+  frequency: number
+  halo: number
+  permeability: number
+  gravity: number
 }
+
+interface ConnectionData { word_a: string; word_b: string; strength: number; contexts: number }
 
 interface Stats {
   tokens: number
@@ -19,6 +25,7 @@ interface TrainResult {
   success: boolean
   session_id?: string
   words: WordData[]
+  connections: ConnectionData[]
   stats: Stats
   time_ms: number
   error?: string
@@ -26,6 +33,7 @@ interface TrainResult {
 
 interface SpaceResult {
   words: WordData[]
+  connections: ConnectionData[]
   stats: Stats
 }
 

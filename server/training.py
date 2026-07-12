@@ -10,7 +10,8 @@ from .physics import (
 )
 from .database import (
     init_db, create_session, get_session, list_sessions,
-    add_words, add_phrase, get_words, get_phrases,
+    add_words, add_phrase, add_connections, get_words, get_connections,
+    refresh_word_metrics,
     update_words_positions, get_session_stats, reset_session,
     add_training_stats
 )
@@ -108,6 +109,7 @@ class TrainingManager:
                 mass=wd["mass"],
                 x=wd["x"],
                 y=wd["y"],
+                gravity=wd.get("gravity", 1.0),
             )
         
         # Identify new words in this request
@@ -137,6 +139,9 @@ class TrainingManager:
         # Add phrases (sentences) to database
         for sent_tokens in sentence_tokens:
             add_phrase(sid, sent_tokens)
+        add_connections(sid, sentence_tokens)
+        refresh_word_metrics(sid)
+        all_words_data = get_words(sid)
         
         # Record training stats
         stats = get_session_stats(sid)
@@ -150,20 +155,15 @@ class TrainingManager:
         )
         
         # Prepare response
-        word_data = [
-            {
-                "word": ws.word,
-                "mass": ws.mass,
-                "x": ws.x,
-                "y": ws.y,
-            }
-            for ws in all_word_states
-        ]
+        word_data = [dict(w) for w in all_words_data]
+        for item in word_data:
+            item.pop("session_id", None)
         
         return {
             "success": True,
             "session_id": sid,
             "words": word_data,
+            "connections": get_connections(sid),
             "stats": stats,
             "time_ms": int((time.time() - start_time) * 1000),
         }
@@ -174,18 +174,14 @@ class TrainingManager:
         
         words_data = get_words(sid)
         word_data = [
-            {
-                "word": w["word"],
-                "mass": w["mass"],
-                "x": w["x"],
-                "y": w["y"],
-            }
+            dict(w)
             for w in words_data
         ]
         stats = get_session_stats(sid)
         
         return {
             "words": word_data,
+            "connections": get_connections(sid),
             "stats": stats,
         }
     

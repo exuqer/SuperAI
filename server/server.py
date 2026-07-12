@@ -41,6 +41,7 @@ class TrainResponse(BaseModel):
     success: bool
     session_id: Optional[str] = None
     words: List[Dict[str, Any]] = []
+    connections: List[Dict[str, Any]] = []
     stats: Dict[str, int] = {}
     time_ms: int = 0
     error: Optional[str] = None
@@ -48,6 +49,7 @@ class TrainResponse(BaseModel):
 
 class SpaceResponse(BaseModel):
     words: List[Dict[str, Any]] = []
+    connections: List[Dict[str, Any]] = []
     stats: Dict[str, int] = {}
 
 

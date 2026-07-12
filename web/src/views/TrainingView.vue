@@ -39,7 +39,7 @@
           <div><p class="eyebrow">02 / Space</p><h2>Гравитационная карта</h2></div>
           <span class="live-badge"><i></i> live</span>
         </div>
-        <SpaceVisualization :words="words" :width="width" :height="height" />
+        <SpaceVisualization :words="words" :connections="connections" :width="width" :height="height" />
       </section>
     </main>
   </div>
@@ -54,19 +54,20 @@ const store = useTrainingStore()
 const inputText = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
-const words = ref<Array<{ word: string; mass: number; x: number; y: number }>>([])
+const words = ref<Array<{ word: string; mass: number; frequency: number; halo: number; permeability: number; gravity: number; x: number; y: number }>>([])
+const connections = ref<Array<{ word_a: string; word_b: string; strength: number; contexts: number }>>([])
 const stats = ref<{ tokens: number; total_tokens: number; phrases: number; edges: number } | null>(null)
 const width = 1000
 const height = 700
 
 async function loadSpace() {
-  try { const data = await store.getSpace(); words.value = data.words; stats.value = data.stats } catch (e) { errorMessage.value = 'Не удалось загрузить пространство' }
+  try { const data = await store.getSpace(); words.value = data.words; connections.value = data.connections; stats.value = data.stats } catch (e) { errorMessage.value = 'Не удалось загрузить пространство' }
 }
 
 async function handleLearn() {
   if (!inputText.value.trim()) return
   loading.value = true; errorMessage.value = ''
-  try { const result = await store.learn(inputText.value); words.value = result.words; stats.value = result.stats; inputText.value = '' }
+  try { const result = await store.learn(inputText.value); words.value = result.words; connections.value = result.connections; stats.value = result.stats; inputText.value = '' }
   catch (e: any) { errorMessage.value = e.message || 'Ошибка обучения' }
   finally { loading.value = false }
 }
@@ -74,7 +75,7 @@ async function handleLearn() {
 async function handleReset() {
   if (!confirm('Очистить всё пространство слов?')) return
   loading.value = true; errorMessage.value = ''
-  try { await store.resetSpace(); words.value = []; stats.value = { tokens: 0, total_tokens: 0, phrases: 0, edges: 0 } }
+  try { await store.resetSpace(); words.value = []; connections.value = []; stats.value = { tokens: 0, total_tokens: 0, phrases: 0, edges: 0 } }
   catch (e: any) { errorMessage.value = e.message || 'Ошибка сброса' }
   finally { loading.value = false }
 }

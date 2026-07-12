@@ -14,6 +14,7 @@ class WordState:
     y: float = 0.0
     vx: float = 0.0
     vy: float = 0.0
+    gravity: float = 1.0
 
     def distance_to(self, other: "WordState") -> float:
         dx = self.x - other.x
@@ -103,7 +104,9 @@ def apply_gravity(word1: WordState, word2: WordState, config: PhysicsConfig) -> 
     if dist == 0:
         return 0.0, 0.0
 
-    force = config.gravity_constant * word1.mass * word2.mass / (dist * dist)
+    # Gravity is deliberately observable: frequency supplies the baseline and
+    # stable neighbors increase the body's pull.
+    force = config.gravity_constant * math.sqrt(max(word1.gravity, 0.1) * max(word2.gravity, 0.1)) / (dist * dist)
     force = max(config.gravity_min_force, min(config.gravity_max_force, force))
 
     fx = force * dx / dist

@@ -3,6 +3,7 @@ import sqlite3
 import json
 import time
 import uuid
+import math
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
@@ -49,8 +50,29 @@ def init_db():
                 updated_at REAL NOT NULL
             )
         """)
+        # The first prototype only had mass and coordinates. Keep existing local
+        # databases usable while adding the observable learning metrics.
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(words)").fetchall()}
+        for column, definition in {
+            "frequency": "INTEGER NOT NULL DEFAULT 1",
+            "halo": "REAL NOT NULL DEFAULT 0",
+            "permeability": "REAL NOT NULL DEFAULT 0.5",
+            "gravity": "REAL NOT NULL DEFAULT 1.0",
+        }.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE words ADD COLUMN {column} {definition}")
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_words_session ON words(session_id)
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS connections (
+                session_id TEXT NOT NULL,
+                word_a TEXT NOT NULL,
+                word_b TEXT NOT NULL,
+                strength REAL NOT NULL DEFAULT 1.0,
+                contexts INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (session_id, word_a, word_b)
+            )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS phrases (
@@ -114,6 +136,7 @@ def delete_session(session_id: str):
     """Delete a session and all associated data."""
     with get_connection() as conn:
         conn.execute("DELETE FROM words WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM connections WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM phrases WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM training_stats WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -121,7 +144,7 @@ def delete_session(session_id: str):
 
 
 def add_words(session_id: str, words: List[str]) -> Dict[str, int]:
-    """Add words to session, increment mass for existing words."""
+    """Count every occurrence and derive a slowly growing mass from it."""
     now = time.time()
     counts = {}
     with get_connection() as conn:
@@ -136,17 +159,20 @@ def add_words(session_id: str, words: List[str]) -> Dict[str, int]:
             ).fetchone()
             
             if row:
-                # Existing word - increment mass by 0.1 exactly once per request
-                new_mass = row["mass"] + 0.1
+                row_frequency = conn.execute(
+                    "SELECT frequency FROM words WHERE word = ? AND session_id = ?", (word, session_id)
+                ).fetchone()["frequency"]
+                new_frequency = row_frequency + count
+                new_mass = 1.0 + 0.35 * math.log1p(new_frequency - 1)
                 conn.execute(
-                    "UPDATE words SET mass = ?, updated_at = ? WHERE word = ? AND session_id = ?",
-                    (new_mass, now, word, session_id)
+                    "UPDATE words SET frequency = ?, mass = ?, updated_at = ? WHERE word = ? AND session_id = ?",
+                    (new_frequency, new_mass, now, word, session_id)
                 )
             else:
                 # New word - mass 1.0, random position
                 conn.execute(
-                    "INSERT INTO words (word, session_id, mass, x, y, created_at, updated_at) VALUES (?, ?, 1.0, 0.0, 0.0, ?, ?)",
-                    (word, session_id, now, now)
+                    "INSERT INTO words (word, session_id, mass, frequency, x, y, created_at, updated_at) VALUES (?, ?, 1.0, ?, 0.0, 0.0, ?, ?)",
+                    (word, session_id, count, now, now)
                 )
         
         conn.commit()
@@ -182,11 +208,64 @@ def add_phrase(session_id: str, words: List[str]):
         conn.commit()
 
 
+def add_connections(session_id: str, sentences: List[List[str]]):
+    """Strengthen each unique co-occurrence once per sentence."""
+    now = time.time()
+    with get_connection() as conn:
+        for words in sentences:
+            unique = list(dict.fromkeys(words))
+            for i, word_a in enumerate(sorted(unique)):
+                for word_b in sorted(unique)[i + 1:]:
+                    conn.execute(
+                        """INSERT INTO connections (session_id, word_a, word_b, strength, contexts)
+                           VALUES (?, ?, ?, 1.0, 1)
+                           ON CONFLICT(session_id, word_a, word_b) DO UPDATE SET
+                           strength = strength + 1.0, contexts = contexts + 1""",
+                        (session_id, word_a, word_b),
+                    )
+        conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        conn.commit()
+
+
+def get_connections(session_id: str) -> List[Dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT word_a, word_b, strength, contexts FROM connections WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def refresh_word_metrics(session_id: str):
+    """Derive halo, permeability and gravity from simple neighborhood observations."""
+    with get_connection() as conn:
+        words = conn.execute("SELECT word, frequency FROM words WHERE session_id = ?", (session_id,)).fetchall()
+        connections = conn.execute(
+            "SELECT word_a, word_b, strength FROM connections WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        neighbors = {row["word"]: [] for row in words}
+        for edge in connections:
+            neighbors.setdefault(edge["word_a"], []).append(edge["strength"])
+            neighbors.setdefault(edge["word_b"], []).append(edge["strength"])
+        for row in words:
+            strengths = neighbors.get(row["word"], [])
+            halo = min(1.0, len(strengths) / 8.0)
+            # New words remain temporarily permeable; narrow vocabularies are firmer.
+            permeability = min(1.0, 0.5 + len(strengths) / 12.0)
+            quality = sum(min(1.0, value / 3.0) for value in strengths) / max(len(strengths), 1)
+            gravity = min(10.0, math.sqrt(row["frequency"]) * (0.65 + 1.35 * quality))
+            conn.execute(
+                "UPDATE words SET halo = ?, permeability = ?, gravity = ? WHERE word = ? AND session_id = ?",
+                (halo, permeability, gravity, row["word"], session_id),
+            )
+        conn.commit()
+
+
 def get_words(session_id: str) -> List[Dict]:
     """Get all words for a session."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT word, mass, x, y FROM words WHERE session_id = ? ORDER BY mass DESC",
+            "SELECT word, mass, frequency, halo, permeability, gravity, x, y FROM words WHERE session_id = ? ORDER BY mass DESC",
             (session_id,)
         ).fetchall()
         return [dict(row) for row in rows]
@@ -227,23 +306,13 @@ def get_session_stats(session_id: str) -> Dict[str, int]:
             "SELECT COUNT(*) as c FROM phrases WHERE session_id = ?", (session_id,)
         ).fetchone()["c"]
         
-        # Count edges (unique word pairs in phrases)
-        phrase_rows = conn.execute(
-            "SELECT words FROM phrases WHERE session_id = ?", (session_id,)
-        ).fetchall()
-        edges_set = set()
-        for row in phrase_rows:
-            words = json.loads(row["words"])
-            for i in range(len(words)):
-                for j in range(i + 1, len(words)):
-                    pair = tuple(sorted([words[i], words[j]]))
-                    edges_set.add(pair)
+        edges = conn.execute("SELECT COUNT(*) as c FROM connections WHERE session_id = ?", (session_id,)).fetchone()["c"]
         
         return {
             "tokens": tokens,
             "total_tokens": int(total_mass),
             "phrases": phrases,
-            "edges": len(edges_set),
+            "edges": edges,
         }
 
 
@@ -269,6 +338,7 @@ def reset_session(session_id: str):
     now = time.time()
     with get_connection() as conn:
         conn.execute("DELETE FROM words WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM connections WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM phrases WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM training_stats WHERE session_id = ?", (session_id,))
         conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
