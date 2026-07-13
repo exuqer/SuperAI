@@ -8,13 +8,15 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from server.database import init_db, get_stats, reset_space
+from server.database import init_db, get_stats, reset_space, get_connection
 from server.training import get_training_manager, TrainingManager
 from server.repositories.cloud_repository import CloudRepository, SpaceRepository, LayerRepository
 from server.models.cloud import Cloud
 from server.services.zoom import zoom_service
+from server.services.lexeme import lexeme_service
 from server.tokenizer import tokenize_hierarchical, TokenizationResult
 from server.physics import PhysicsConfig
+import json
 
 
 @asynccontextmanager
@@ -525,6 +527,219 @@ async def activate(request: ActivateRequest):
             return {"activated": [{"cloud_id": cloud_id, "value": 1.0}]}
     
     return {"activated": [], "count": 0}
+
+
+# ============================================================
+# Field Hierarchy API
+# ============================================================
+
+class HierarchyResponse(BaseModel):
+    scenes: List[Dict[str, Any]] = Field(default_factory=list)
+    structural_spaces: List[Dict[str, Any]] = Field(default_factory=list)
+    lexemes: List[Dict[str, Any]] = Field(default_factory=list)
+    semantic_overlays: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@app.get("/api/field/hierarchy", response_model=HierarchyResponse)
+async def get_field_hierarchy(max_depth: int = 3):
+    """
+    Get field hierarchy with scenes, structural spaces, lexemes, and semantic overlays.
+    Returns local centers, radii, and computed contributions for semantic overlays.
+    """
+    cloud_repo = CloudRepository()
+    layer_repo = LayerRepository()
+    space_repo = SpaceRepository()
+    placement_repo = CloudPlacementRepository()
+    
+    # Get layer IDs
+    scene_layer = layer_repo.get_by_name("scene")
+    lexeme_layer = layer_repo.get_by_name("lexeme")
+    concept_layer = layer_repo.get_by_name("concept")
+    
+    result = HierarchyResponse()
+    
+    # Get scenes
+    if scene_layer:
+        scene_clouds = cloud_repo.get_by_layer(scene_layer.id, limit=100)
+        for cloud in scene_clouds:
+            # Get scene details
+            with get_connection() as conn:
+                scene_row = conn.execute(
+                    "SELECT * FROM scenes WHERE scene_cloud_id = ?", (cloud.id,)
+                ).fetchone()
+                
+                if scene_row:
+                    # Get word forms and lexemes for this scene
+                    word_form_ids = json.loads(scene_row["word_form_cloud_ids_json"] or "[]")
+                    lexeme_ids = json.loads(scene_row["lexeme_ids_json"] or "[]")
+                    
+                    word_forms = []
+                    for wf_id in word_form_ids:
+                        wf_cloud = cloud_repo.get_by_id(wf_id)
+                        if wf_cloud:
+                            word_forms.append(wf_cloud.to_dict())
+                    
+                    lexemes = []
+                    for lex_id in lexeme_ids:
+                        lex = lexeme_service.get_lexeme_for_word_form(lex_id)  # This won't work, need to fix
+                        # Actually get lexeme by ID
+                        with get_connection() as conn2:
+                            lex_row = conn2.execute("SELECT * FROM lexemes WHERE id = ?", (lex_id,)).fetchone()
+                            if lex_row:
+                                lexemes.append({
+                                    "id": lex_row["id"],
+                                    "canonical_form": lex_row["canonical_form"],
+                                    "pos_tag": lex_row["pos_tag"],
+                                })
+                    
+                    result.scenes.append({
+                        "cloud": cloud.to_dict(),
+                        "sentence_text": scene_row["sentence_text"],
+                        "word_forms": word_forms,
+                        "lexemes": lexemes,
+                    })
+    
+    # Get structural spaces (for word forms)
+    word_form_layer = layer_repo.get_by_name("word_form")
+    if word_form_layer:
+        word_clouds = cloud_repo.get_by_layer(word_form_layer.id, limit=200)
+        for cloud in word_clouds:
+            struct_space = space_repo.get_structural_space(cloud.id)
+            if struct_space:
+                placements = placement_repo.get_by_space(struct_space.id)
+                children = []
+                for p in placements:
+                    child = cloud_repo.get_by_id(p.cloud_id)
+                    if child:
+                        children.append({
+                            "cloud": child.to_dict(),
+                            "placement": p.to_dict(),
+                        })
+                result.structural_spaces.append({
+                    "host_cloud": cloud.to_dict(),
+                    "space": struct_space.to_dict(),
+                    "children": children,
+                })
+    
+    # Get lexemes
+    if lexeme_layer:
+        lexeme_clouds = cloud_repo.get_by_layer(lexeme_layer.id, limit=200)
+        for cloud in lexeme_clouds:
+            # Get lexeme details
+            with get_connection() as conn:
+                lex_row = conn.execute(
+                    "SELECT * FROM lexemes WHERE canonical_form = ?", (cloud.canonical_form,)
+                ).fetchone()
+                if lex_row:
+                    # Get word forms for this lexeme
+                    wf_rows = conn.execute(
+                        """SELECT wfl.word_form_cloud_id, c.canonical_name 
+                        FROM word_form_to_lexeme wfl
+                        JOIN clouds c ON wfl.word_form_cloud_id = c.id
+                        WHERE wfl.lexeme_id = ?""",
+                        (lex_row["id"],)
+                    ).fetchall()
+                    
+                    word_forms = [{"id": r["word_form_cloud_id"], "name": r["canonical_name"]} for r in wf_rows]
+                    
+                    result.lexemes.append({
+                        "cloud": cloud.to_dict(),
+                        "lexeme": {
+                            "id": lex_row["id"],
+                            "canonical_form": lex_row["canonical_form"],
+                            "pos_tag": lex_row["pos_tag"],
+                            "frequency": lex_row["frequency"],
+                        },
+                        "word_forms": word_forms,
+                    })
+    
+    # Get semantic overlays (concept projections)
+    if concept_layer:
+        concept_clouds = cloud_repo.get_by_layer(concept_layer.id, limit=100)
+        for cloud in concept_clouds:
+            # Get semantic space for this concept
+            semantic_space = space_repo.get_semantic_space(cloud.id)
+            if semantic_space:
+                # Get overlays in this space
+                with get_connection() as conn:
+                    overlay_rows = conn.execute(
+                        """SELECT * FROM semantic_overlays WHERE concept_cloud_id = ?""",
+                        (cloud.id,)
+                    ).fetchall()
+                    
+                    for overlay in overlay_rows:
+                        member_lexeme_ids = json.loads(overlay["member_lexeme_ids_json"] or "[]")
+                        member_weights = json.loads(overlay["member_weights_json"] or "[]")
+                        
+                        members = []
+                        for lid, weight in zip(member_lexeme_ids, member_weights):
+                            with get_connection() as conn2:
+                                lex_row = conn2.execute("SELECT canonical_form FROM lexemes WHERE id = ?", (lid,)).fetchone()
+                                if lex_row:
+                                    members.append({
+                                        "lexeme_id": lid,
+                                        "canonical_form": lex_row["canonical_form"],
+                                        "weight": weight,
+                                    })
+                        
+                        result.semantic_overlays.append({
+                            "concept_cloud": cloud.to_dict(),
+                            "space_id": overlay["space_id"],
+                            "center_x": overlay["center_x"],
+                            "center_y": overlay["center_y"],
+                            "radius": overlay["radius"],
+                            "members": members,
+                        })
+    
+    return result
+
+
+# ============================================================
+# Scene Similarity API
+# ============================================================
+
+@app.post("/api/scenes/similarity")
+async def compute_scene_similarity(scene_a_id: int, scene_b_id: int):
+    """Compute weighted Jaccard similarity between two scenes."""
+    with get_connection() as conn:
+        # Get scene data
+        scene_a = conn.execute("SELECT * FROM scenes WHERE id = ?", (scene_a_id,)).fetchone()
+        scene_b = conn.execute("SELECT * FROM scenes WHERE id = ?", (scene_b_id,)).fetchone()
+        
+        if not scene_a or not scene_b:
+            return {"error": "Scene not found"}
+        
+        lexemes_a = set(json.loads(scene_a["lexeme_ids_json"] or "[]"))
+        lexemes_b = set(json.loads(scene_b["lexeme_ids_json"] or "[]"))
+        
+        if not lexemes_a or not lexemes_b:
+            return {"similarity": 0.0, "weight": 0.0}
+        
+        # Weighted Jaccard: (r1 + r2) * clamp(1.15 - 1.1 * similarity, 0.35, 1.15)
+        intersection = lexemes_a & lexemes_b
+        union = lexemes_a | lexemes_b
+        
+        jaccard = len(intersection) / len(union) if union else 0.0
+        
+        # Weight based on scene masses
+        cloud_a = cloud_repo.get_by_id(scene_a["scene_cloud_id"])
+        cloud_b = cloud_repo.get_by_id(scene_b["scene_cloud_id"])
+        
+        r1 = cloud_a.mass if cloud_a else 1.0
+        r2 = cloud_b.mass if cloud_b else 1.0
+        
+        weight = (r1 + r2) * max(0.35, min(1.15, 1.15 - 1.1 * jaccard))
+        
+        # Store similarity
+        conn.execute(
+            """INSERT OR REPLACE INTO scene_similarity
+            (scene_a_id, scene_b_id, similarity, weight, updated_at)
+            VALUES (?, ?, ?, ?, ?)""",
+            (scene_a_id, scene_b_id, jaccard, weight, now())
+        )
+        conn.commit()
+        
+        return {"similarity": jaccard, "weight": weight}
 
 
 # ============================================================

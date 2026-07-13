@@ -32,17 +32,6 @@
         </div>
       </div>
       <div class="top-controls">
-        <div class="mode-toggle">
-          <button 
-            v-for="mode in modeButtons" 
-            :key="mode"
-            :class="{ active: currentMode === mode }"
-            @click="switchMode(mode)"
-            class="mode-btn"
-          >
-            {{ mode === 'structural' ? 'Structural' : 'Semantic' }}
-          </button>
-        </div>
         <div class="live-toggle">
           <label class="toggle-label">
             <input type="checkbox" :checked="liveMode" @change="toggleLive" />
@@ -86,15 +75,13 @@
           <span class="live-badge"><i></i> live</span>
         </div>
         <div class="renderer-container">
-          <NebulaRenderer 
+          <SpaceVisualization 
             ref="rendererRef"
-            :clouds="nebulaClouds"
-            :space-id="currentSpaceId"
-            :mode="currentMode"
-            :debug-mode="debugMode"
+            :concepts="displayedConcepts"
+            :width="rendererWidth"
+            :height="rendererHeight"
             @cloud-select="onCloudSelect"
             @cloud-hover="onCloudHover"
-            @double-click="onDoubleClick"
             @viewport-change="onViewportChange"
             @camera-change="onCameraChange"
           />
@@ -107,16 +94,52 @@
           <button class="close-btn" @click="closeInspector">×</button>
         </div>
         <div class="panel-content">
-          <div v-if="selectedCloud" class="inspector-content">
-            <h3>{{ selectedCloud.token }}</h3>
+          <div v-if="selectedItem" class="inspector-content">
+            <h3>{{ selectedItem.token }}</h3>
             <div class="inspector-grid">
-              <div><span>Mass</span><strong>{{ selectedCloud.mass.toFixed(2) }}</strong></div>
-              <div><span>Density</span><strong>{{ selectedCloud.density.toFixed(2) }}</strong></div>
-              <div><span>Radius</span><strong>{{ selectedCloud.radius.toFixed(1) }}</strong></div>
-              <div><span>Stability</span><strong>{{ selectedCloud.stability.toFixed(2) }}</strong></div>
-              <div><span>Activation</span><strong>{{ selectedCloud.activation.toFixed(2) }}</strong></div>
-              <div><span>Layer</span><strong>{{ selectedCloud.layerId }}</strong></div>
-              <div><span>Type</span><strong>{{ selectedCloud.cloudType }}</strong></div>
+              <div><span>Mass</span><strong>{{ selectedItem.mass.toFixed(2) }}</strong></div>
+              <div><span>Density</span><strong>{{ selectedItem.density.toFixed(2) }}</strong></div>
+              <div><span>Radius</span><strong>{{ selectedItem.radius.toFixed(1) }}</strong></div>
+              <div><span>Stability</span><strong>{{ selectedItem.stability.toFixed(2) }}</strong></div>
+              <div><span>Activation</span><strong>{{ selectedItem.activation.toFixed(2) }}</strong></div>
+              <div><span>Layer</span><strong>{{ selectedItem.layerName || selectedItem.layerId }}</strong></div>
+              <div><span>Type</span><strong>{{ selectedItem.cloudType }}</strong></div>
+            </div>
+            
+            <!-- Lexeme details -->
+            <div v-if="selectedItem.layerName === 'lexeme'" class="inspector-section">
+              <h4>Морфологические формы</h4>
+              <div v-if="selectedItem.word_forms && selectedItem.word_forms.length" class="word-forms-list">
+                <div v-for="wf in selectedItem.word_forms" :key="wf.id" class="word-form-item">
+                  <span class="wf-name">{{ wf.name }}</span>
+                  <span class="wf-id">#{{ wf.id }}</span>
+                </div>
+              </div>
+              <p v-else class="no-data">Нет связанных словоформ</p>
+            </div>
+            
+            <!-- Concept details -->
+            <div v-if="selectedItem.layerName === 'concept'" class="inspector-section">
+              <h4>Смысловые вклады (семантические наложения)</h4>
+              <div v-if="selectedItem.members && selectedItem.members.length" class="concept-members">
+                <div v-for="member in selectedItem.members" :key="member.lexeme_id" class="member-item">
+                  <span class="member-name">{{ member.canonical_form }}</span>
+                  <span class="member-weight">{{ (member.weight * 100).toFixed(1) }}%</span>
+                </div>
+              </div>
+              <p v-else class="no-data">Нет участников понятия</p>
+            </div>
+            
+            <!-- Scene details -->
+            <div v-if="selectedItem.layerName === 'scene'" class="inspector-section">
+              <h4>Структура сцены</h4>
+              <div v-if="selectedItem.word_forms && selectedItem.word_forms.length" class="scene-words">
+                <div v-for="wf in selectedItem.word_forms" :key="wf.id" class="scene-word">
+                  <span class="sw-name">{{ wf.name }}</span>
+                  <span class="sw-lexeme">{{ wf.lexeme || '' }}</span>
+                </div>
+              </div>
+              <p v-else class="no-data">Нет слов в сцене</p>
             </div>
           </div>
           <div v-else class="inspector-empty">
@@ -152,27 +175,24 @@
       </div>
     </footer>
   </div>
-</template>
 
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch } from 'vue'
 import { useTrainingStore } from '@/stores/training'
 import { useNebulaStore } from '@/stores/nebula'
-import NebulaRenderer from '@/components/NebulaRenderer.vue'
+import SpaceVisualization from '@/components/SpaceVisualization.vue'
 
 const trainingStore = useTrainingStore()
 const nebulaStore = useNebulaStore()
 
-const rendererRef = ref<InstanceType<typeof NebulaRenderer> | null>(null)
+const rendererRef = ref<InstanceType<typeof SpaceVisualization> | null>(null)
 
 const inputText = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
 
 // Computed from nebula store
-const nebulaClouds = computed(() => nebulaStore.clouds)
 const currentSpaceId = computed(() => nebulaStore.currentSpaceId)
-const currentMode = computed(() => nebulaStore.currentMode)
 const breadcrumb = computed(() => nebulaStore.breadcrumb)
 const debugMode = computed(() => nebulaStore.debugMode)
 const liveMode = computed(() => nebulaStore.liveMode)
@@ -184,6 +204,36 @@ const cameraZoom = computed(() => nebulaStore.camera.zoom)
 const currentLayer = computed(() => nebulaStore.currentSpace?.layerId ?? 0)
 
 const stats = computed(() => nebulaStore.stats)
+
+// Displayed concepts for SpaceVisualization
+const displayedConcepts = ref<any[]>([])
+
+// Renderer dimensions
+const rendererWidth = ref(1000)
+const rendererHeight = ref(700)
+
+// Selected item for inspector
+const selectedItem = ref<any>(null)
+
+// Fetch hierarchy data from API
+async function fetchHierarchy() {
+  try {
+    const response = await fetch('/api/field/hierarchy?max_depth=3')
+    if (response.ok) {
+      const data = await response.json()
+      // Combine all layers for display
+      const allItems = [
+        ...(data.scenes || []).map((s: any) => ({ ...s.cloud, layer: 'scene', token: s.cloud.canonical_name || s.sentence_text })),
+        ...(data.structural_spaces || []).flatMap((ss: any) => ss.children.map((c: any) => ({ ...c.cloud, layer: 'word_form', token: c.cloud.canonical_name }))),
+        ...(data.lexemes || []).map((l: any) => ({ ...l.cloud, layer: 'lexeme', token: l.lexeme.canonical_form, word_forms: l.word_forms })),
+        ...(data.semantic_overlays || []).map((o: any) => ({ ...o.concept_cloud, layer: 'concept', token: o.concept_name, center_x: o.center_x, center_y: o.center_y, radius: o.radius, members: o.members })),
+      ]
+      displayedConcepts.value = allItems
+    }
+  } catch (error) {
+    console.error('Failed to fetch hierarchy:', error)
+  }
+}
 
 async function loadSpace() {
   nebulaStore.setLoading(true)
@@ -213,6 +263,7 @@ async function loadSpace() {
     }))
     nebulaStore.setClouds(clouds)
     nebulaStore.setCurrentSpace(null)
+    await fetchHierarchy()
   } catch (error: any) {
     nebulaStore.setError(error.message || 'Не удалось загрузить пространство')
   } finally {
@@ -248,6 +299,7 @@ async function handleLearn() {
     }))
     nebulaStore.setClouds(clouds)
     inputText.value = ''
+    await fetchHierarchy()
   } catch (error: any) {
     nebulaStore.setError(error.message || 'Ошибка обучения')
   } finally {
@@ -262,6 +314,7 @@ async function handleReset() {
   try {
     await trainingStore.resetSpace()
     nebulaStore.reset()
+    displayedConcepts.value = []
   } catch (error: any) {
     nebulaStore.setError(error.message || 'Ошибка сброса')
   } finally {
@@ -270,30 +323,24 @@ async function handleReset() {
 }
 
 function onCloudSelect(cloud: any) {
+  selectedItem.value = cloud
   nebulaStore.selectCloud(cloud)
+  nebulaStore.setInspectorOpen(true)
 }
 
 function onCloudHover(clouds: any[]) {
   nebulaStore.setHoveredClouds(clouds.map(c => c.id))
 }
 
-function onDoubleClick(_cloud: any) {
-  // Handled by renderer with animation
-}
-
 function onViewportChange(viewport: any) {
   nebulaStore.updateViewport(viewport)
+  rendererWidth.value = viewport.width
+  rendererHeight.value = viewport.height
 }
 
 function onCameraChange(nextCamera: { x: number; y: number; zoom: number }) {
   nebulaStore.updateCamera(nextCamera.x, nextCamera.y, nextCamera.zoom)
 }
-
-function switchMode(mode: 'structural' | 'semantic') {
-  nebulaStore.setCurrentSpace(nebulaStore.currentSpaceId, mode)
-}
-
-const modeButtons = ['structural', 'semantic'] as const
 
 function toggleLive() {
   nebulaStore.setLiveMode(!liveMode.value)
@@ -306,18 +353,19 @@ function toggleTrainingPanel() {
 function closeInspector() {
   nebulaStore.setInspectorOpen(false)
   nebulaStore.selectCloud(null)
+  selectedItem.value = null
 }
 
 function zoomIn() {
-  rendererRef.value?.zoomBy(1.2)
+  rendererRef.value?.zoomBy?.(1.2)
 }
 
 function zoomOut() {
-  rendererRef.value?.zoomBy(1 / 1.2)
+  rendererRef.value?.zoomBy?.(1 / 1.2)
 }
 
 function resetView() {
-  rendererRef.value?.resetView()
+  rendererRef.value?.resetView?.()
 }
 
 function togglePause() {
@@ -350,8 +398,12 @@ const physicsSpeed = computed({
   set: (val) => nebulaStore.setPhysicsConfig({ speed: val })
 })
 
+// Watch for hierarchy updates
+watch(() => nebulaStore.clouds, () => {
+  fetchHierarchy()
+}, { deep: true })
+
 onMounted(loadSpace)
-</script>
 
 <style scoped lang="scss">
 .training-view { display: flex; flex-direction: column; min-height: 100vh; color: #eef4ff; }

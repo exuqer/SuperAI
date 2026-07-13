@@ -31,7 +31,7 @@ def test_init_db():
     global _test_db_path
     with test_get_connection() as conn:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        if version >= 3:
+        if version >= 4:
             return
         
         if version < 3:
@@ -218,14 +218,146 @@ def test_init_db():
         conn.execute("CREATE INDEX idx_cond_hash ON condensation_candidates(signature_hash)")
         conn.execute("CREATE INDEX idx_cond_status ON condensation_candidates(status)")
         
-        # Insert default layers
+        # LEXEMES - Normalized word forms with morphological info
+        conn.execute("""
+            CREATE TABLE lexemes (
+                id INTEGER PRIMARY KEY,
+                canonical_form TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT 'ru',
+                pos_tag TEXT,
+                features_json TEXT NOT NULL DEFAULT '{}',
+                frequency INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX idx_lexemes_form_lang ON lexemes(canonical_form, language)")
+        conn.execute("CREATE INDEX idx_lexemes_freq ON lexemes(frequency DESC)")
+        
+        # WORD_FORM_TO_LEXEME - Links word forms to their lexeme
+        conn.execute("""
+            CREATE TABLE word_form_to_lexeme (
+                word_form_cloud_id INTEGER NOT NULL,
+                lexeme_id INTEGER NOT NULL,
+                is_canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (word_form_cloud_id, lexeme_id),
+                FOREIGN KEY (word_form_cloud_id) REFERENCES clouds(id),
+                FOREIGN KEY (lexeme_id) REFERENCES lexemes(id)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_wf2lex_lexeme ON word_form_to_lexeme(lexeme_id)")
+        
+        # CONTEXT_VECTORS - PPMI-weighted context vectors for lexemes
+        conn.execute("""
+            CREATE TABLE context_vectors (
+                lexeme_id INTEGER NOT NULL,
+                context_lexeme_id INTEGER NOT NULL,
+                weight REAL NOT NULL,
+                count INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (lexeme_id, context_lexeme_id),
+                FOREIGN KEY (lexeme_id) REFERENCES lexemes(id),
+                FOREIGN KEY (context_lexeme_id) REFERENCES lexemes(id)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_ctx_vec_lexeme ON context_vectors(lexeme_id)")
+        conn.execute("CREATE INDEX idx_ctx_vec_context ON context_vectors(context_lexeme_id)")
+        conn.execute("CREATE INDEX idx_ctx_vec_weight ON context_vectors(weight DESC)")
+        
+        # CONCEPT_CENTROIDS - Stable concept centroids from context vectors
+        conn.execute("""
+            CREATE TABLE concept_centroids (
+                id INTEGER PRIMARY KEY,
+                concept_cloud_id INTEGER NOT NULL,
+                centroid_vector_json TEXT NOT NULL,
+                member_lexeme_ids_json TEXT NOT NULL,
+                stability REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (concept_cloud_id) REFERENCES clouds(id)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_centroid_concept ON concept_centroids(concept_cloud_id)")
+        
+        # LEXEME_CONCEPT_MEMBERSHIP - Fuzzy membership of lexemes in concepts
+        conn.execute("""
+            CREATE TABLE lexeme_concept_membership (
+                lexeme_id INTEGER NOT NULL,
+                concept_cloud_id INTEGER NOT NULL,
+                membership REAL NOT NULL,
+                centrality REAL NOT NULL DEFAULT 0.0,
+                context_coverage REAL NOT NULL DEFAULT 0.0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (lexeme_id, concept_cloud_id),
+                FOREIGN KEY (lexeme_id) REFERENCES lexemes(id),
+                FOREIGN KEY (concept_cloud_id) REFERENCES clouds(id)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_lcm_concept ON lexeme_concept_membership(concept_cloud_id)")
+        conn.execute("CREATE INDEX idx_lcm_membership ON lexeme_concept_membership(membership DESC)")
+        
+        # SCENES - Ordered sequences of word forms (sentences)
+        conn.execute("""
+            CREATE TABLE scenes (
+                id INTEGER PRIMARY KEY,
+                scene_cloud_id INTEGER NOT NULL,
+                sentence_text TEXT NOT NULL,
+                word_form_cloud_ids_json TEXT NOT NULL,
+                lexeme_ids_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (scene_cloud_id) REFERENCES clouds(id)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_scenes_cloud ON scenes(scene_cloud_id)")
+        
+        # SCENE_SIMILARITY - Weighted Jaccard similarity between scenes
+        conn.execute("""
+            CREATE TABLE scene_similarity (
+                scene_a_id INTEGER NOT NULL,
+                scene_b_id INTEGER NOT NULL,
+                similarity REAL NOT NULL,
+                weight REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (scene_a_id, scene_b_id),
+                FOREIGN KEY (scene_a_id) REFERENCES scenes(id),
+                FOREIGN KEY (scene_b_id) REFERENCES scenes(id)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_scene_sim_a ON scene_similarity(scene_a_id)")
+        conn.execute("CREATE INDEX idx_scene_sim_b ON scene_similarity(scene_b_id)")
+        conn.execute("CREATE INDEX idx_scene_sim_score ON scene_similarity(similarity DESC)")
+        
+        # SEMANTIC_OVERLAYS - Concept projections in semantic spaces
+        conn.execute("""
+            CREATE TABLE semantic_overlays (
+                id INTEGER PRIMARY KEY,
+                concept_cloud_id INTEGER NOT NULL,
+                space_id INTEGER NOT NULL,
+                center_x REAL NOT NULL,
+                center_y REAL NOT NULL,
+                radius REAL NOT NULL,
+                member_lexeme_ids_json TEXT NOT NULL,
+                member_weights_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (concept_cloud_id) REFERENCES clouds(id),
+                FOREIGN KEY (space_id) REFERENCES spaces(id)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_overlay_concept ON semantic_overlays(concept_cloud_id)")
+        conn.execute("CREATE INDEX idx_overlay_space ON semantic_overlays(space_id)")
+        
+        # Insert default layers (including lexeme layer)
         default_layers = [
             (0, "signal", 0, 0.001, "signal", "{}"),
             (1, "character", 1, 0.01, "character", "{}"),
             (2, "word_form", 2, 0.1, "word_form", "{}"),
-            (3, "concept", 3, 1.0, "concept", "{}"),
-            (4, "scene", 4, 10.0, "scene", "{}"),
-            (5, "context", 5, 100.0, "context", "{}"),
+            (3, "lexeme", 3, 0.5, "lexeme", "{}"),
+            (4, "concept", 4, 1.0, "concept", "{}"),
+            (5, "scene", 5, 10.0, "scene", "{}"),
+            (6, "context", 6, 100.0, "context", "{}"),
         ]
         now = "2024-01-01T00:00:00"
         for order, name, idx, scale, ltype, cfg in default_layers:
@@ -236,7 +368,7 @@ def test_init_db():
                 (name, idx, scale, ltype, cfg, now)
             )
         
-        conn.execute("PRAGMA user_version = 3")
+        conn.execute("PRAGMA user_version = 4")
         conn.commit()
 
 
@@ -277,14 +409,13 @@ repo_module.get_connection = patched_get_connection
 # ============================================================
 
 @pytest.fixture(autouse=True)
-def setup_db():
+def setup_db(tmp_path):
     """Setup fresh database for each test."""
     global _test_db_path
     
-    with tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False) as f:
-        temp_path = f.name
+    temp_path = tmp_path / "state.sqlite"
     
-    _test_db_path = temp_path
+    _test_db_path = str(temp_path)
     test_init_db()
     
     yield

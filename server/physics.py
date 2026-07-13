@@ -3,7 +3,7 @@
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 from server.models.cloud import Cloud, CloudPlacement
 from server.repositories.cloud_repository import CloudPlacementRepository
@@ -249,7 +249,7 @@ def run_simulation(
     concepts: List[ConceptState],
     sentences: Sequence[Sequence[str]],
     config: PhysicsConfig,
-    context_position: Tuple[float, float] | None = None,
+    context_position: Optional[Tuple[float, float]] = None,
 ) -> Tuple[float, float]:
     by_token = {concept.token: concept for concept in concepts}
     context = context_position or compute_center(concepts)

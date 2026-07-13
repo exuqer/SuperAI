@@ -2,12 +2,12 @@
 
 import time
 import uuid
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from server.database import init_db, get_stats, reset_space, get_connection
+from server.database import init_db, get_stats, reset_space, get_connection, now
 from server.tokenizer import tokenize_hierarchical, TokenizationResult, WordToken, CharacterToken
+import json
 from server.repositories.cloud_repository import (
     CloudRepository, CloudPlacementRepository, StructuralComponentRepository,
     LayerRepository, SpaceRepository,
@@ -16,6 +16,7 @@ from server.models.cloud import Cloud, CloudPlacement, StructuralComponent
 from server.models.space import Space, Layer
 from server.services.condensation import condensation_service
 from server.services.activation import ActivationManager, compute_activation_from_text, record_activation_event, update_coactivation_stats
+from server.services.lexeme import lexeme_service
 from server.physics import LocalSpacePhysics, create_space_physics, PhysicsConfig
 
 
@@ -30,8 +31,9 @@ class TrainingConfig:
     physics_ticks_per_step: int = 5
     enable_character_layer: bool = True
     enable_word_form_layer: bool = True
+    enable_lexeme_layer: bool = True
     enable_concept_layer: bool = True
-    enable_scene_layer: bool = False
+    enable_scene_layer: bool = True
 
 
 class TrainingManager:
@@ -67,7 +69,7 @@ class TrainingManager:
     
     def _load_layer_ids(self) -> None:
         """Load layer IDs from database."""
-        for name in ["signal", "character", "word_form", "concept", "scene", "context"]:
+        for name in ["signal", "character", "word_form", "lexeme", "concept", "scene", "context"]:
             layer = self.layer_repo.get_by_name(name)
             if layer:
                 self.layer_ids[name] = layer.id
@@ -86,7 +88,8 @@ class TrainingManager:
     def learn(self, text: str) -> Dict[str, Any]:
         """
         Main learning entry point.
-        Processes text through all enabled layers.
+        Processes text through all enabled layers:
+        signal -> character -> word_form -> lexeme -> concept -> scene -> context
         """
         started = time.time()
         
@@ -126,9 +129,18 @@ class TrainingManager:
             if self.config.enable_word_form_layer:
                 self._learn_word_forms(sentence, context_id, results)
             
-            # Learn concepts from word forms (if enabled)
-            if self.config.enable_concept_layer:
-                self._learn_concepts(sentence, context_id, results)
+            # Learn lexemes and accumulate context (if enabled)
+            sentence_lexeme_ids = []
+            if self.config.enable_lexeme_layer:
+                sentence_lexeme_ids = self._learn_lexemes(sentence, context_id, results)
+            
+            # Learn concepts from lexeme context vectors (if enabled)
+            if self.config.enable_concept_layer and sentence_lexeme_ids:
+                self._learn_concepts(sentence_lexeme_ids, context_id, results)
+            
+            # Create scene from word forms (if enabled)
+            if self.config.enable_scene_layer:
+                self._create_scene(sentence, context_id, results)
             
             # Run local physics for active spaces
             self._run_physics_for_active_spaces(results)
@@ -245,60 +257,206 @@ class TrainingManager:
                 )
                 self.sequence_counter += 1
     
-    def _learn_concepts(self, sentence: "SentenceTokens", context_id: str, results: Dict) -> None:
-        """Learn concept clouds from word form co-occurrence."""
+    def _learn_lexemes(self, sentence: "SentenceTokens", context_id: str, results: Dict) -> List[int]:
+        """
+        Learn lexemes from word forms and accumulate context vectors.
+        Returns list of lexeme IDs for this sentence.
+        """
         word_layer_id = self.get_layer_id("word_form")
+        lexeme_layer_id = self.get_layer_id("lexeme")
+        
+        if not word_layer_id or not lexeme_layer_id:
+            return []
+        
+        sentence_lexeme_ids = []
+        
+        for word in sentence.tokens:
+            # Get word form cloud
+            word_cloud = self.cloud_repo.get_by_canonical_name(word_layer_id, word.normalized)
+            if not word_cloud:
+                continue
+            
+            # Get or create lexeme for this word form
+            lexeme = lexeme_service.get_or_create_lexeme(word.normalized)
+            sentence_lexeme_ids.append(lexeme.id)
+            
+            # Link word form to lexeme
+            lexeme_service.link_word_form_to_lexeme(word_cloud.id, lexeme.id, is_canonical=True)
+            
+            # Create or get lexeme cloud in lexeme layer
+            lexeme_cloud = self.cloud_repo.get_by_canonical_name(lexeme_layer_id, lexeme.canonical_form)
+            if not lexeme_cloud:
+                lexeme_cloud = self.cloud_repo.create(Cloud(
+                    layer_id=lexeme_layer_id,
+                    cloud_type="lexeme",
+                    canonical_name=lexeme.canonical_form,
+                    mass=1.0,
+                    density=1.0,
+                    stability=0.2,
+                    observation_count=1,
+                ))
+                results["created_clouds"].append({
+                    "id": lexeme_cloud.id, "name": lexeme_cloud.canonical_name, "layer": "lexeme"
+                })
+            else:
+                self.cloud_repo.increment_observation(lexeme_cloud.id, mass_delta=0.1, stability_delta=0.01)
+                results["strengthened_clouds"].append({
+                    "id": lexeme_cloud.id, "name": lexeme_cloud.canonical_name, "layer": "lexeme"
+                })
+            
+            self._ensure_global_space_and_placement(lexeme_cloud, lexeme_layer_id)
+            
+            # Activate lexeme
+            self.activation_manager.activate_cloud(lexeme_cloud, 0.9)
+            record_activation_event(
+                self.session_id, lexeme_cloud.id, None, lexeme_layer_id, 0.9,
+                self.sequence_counter, context_id
+            )
+            self.sequence_counter += 1
+        
+        # Accumulate context vectors for this sentence
+        if len(sentence_lexeme_ids) >= 2:
+            lexeme_service.accumulate_context(sentence_lexeme_ids)
+        
+        return sentence_lexeme_ids
+    
+    def _learn_concepts(self, sentence_lexeme_ids: List[int], context_id: str, results: Dict) -> None:
+        """Learn concept clouds from lexeme context vectors."""
         concept_layer_id = self.get_layer_id("concept")
         
-        if not word_layer_id or not concept_layer_id:
+        if not concept_layer_id:
             return
         
-        # Get word form clouds for this sentence
+        if len(sentence_lexeme_ids) < 2:
+            return
+        
+        # Find or create concept from lexemes with similar context vectors
+        concept_cloud_id = lexeme_service.find_or_create_concept(
+            sentence_lexeme_ids,
+            min_contexts=3,
+            similarity_threshold=0.72,
+            merge_threshold=0.85,
+            unify_threshold=0.92
+        )
+        
+        if concept_cloud_id:
+            concept_cloud = self.cloud_repo.get_by_id(concept_cloud_id)
+            if concept_cloud:
+                if concept_cloud.id not in [c["id"] for c in results["created_clouds"]]:
+                    results["created_clouds"].append({
+                        "id": concept_cloud.id, "name": concept_cloud.canonical_name, "layer": "concept"
+                    })
+                    # Ensure concept has semantic space
+                    self._ensure_semantic_space(concept_cloud, concept_layer_id)
+                else:
+                    results["strengthened_clouds"].append({
+                        "id": concept_cloud.id, "name": concept_cloud.canonical_name, "layer": "concept"
+                    })
+                
+                # Activate concept
+                self.activation_manager.activate_cloud(concept_cloud, 0.95)
+                record_activation_event(
+                    self.session_id, concept_cloud.id, None, concept_layer_id, 0.95,
+                    self.sequence_counter, context_id
+                )
+                self.sequence_counter += 1
+    
+    def _create_scene(self, sentence: "SentenceTokens", context_id: str, results: Dict) -> None:
+        """Create scene cloud from ordered word forms in a sentence."""
+        word_layer_id = self.get_layer_id("word_form")
+        scene_layer_id = self.get_layer_id("scene")
+        
+        if not word_layer_id or not scene_layer_id:
+            return
+        
+        # Get word form clouds in order
         word_clouds = []
+        word_form_ids = []
+        lexeme_ids = []
+        
         for word in sentence.tokens:
             cloud = self.cloud_repo.get_by_canonical_name(word_layer_id, word.normalized)
             if cloud:
                 word_clouds.append(cloud)
-                # Activate word form
-                self.activation_manager.activate_cloud(cloud, 0.8)
-                record_activation_event(
-                    self.session_id, cloud.id, None, word_layer_id, 0.8,
-                    self.sequence_counter, context_id
-                )
-                self.sequence_counter += 1
+                word_form_ids.append(cloud.id)
+                # Get lexeme for this word form
+                lexeme = lexeme_service.get_lexeme_for_word_form(cloud.id)
+                if lexeme:
+                    lexeme_ids.append(lexeme.id)
         
         if len(word_clouds) < 2:
             return
         
-        # Create concept from co-occurring word forms
-        concept_name = "_".join(sorted([c.canonical_name for c in word_clouds[:3]]))
+        # Create scene cloud
+        scene_name = " ".join([c.canonical_name for c in word_clouds[:5]])
+        if len(word_clouds) > 5:
+            scene_name += "..."
         
-        concept_cloud = condensation_service.create_concept_from_word_forms(
-            [c.id for c in word_clouds],
-            concept_name,
-            context_window=context_id,
-            min_observations=self.config.min_concept_observations
-        )
-        
-        if concept_cloud:
-            if concept_cloud.id not in [c["id"] for c in results["created_clouds"]]:
-                results["created_clouds"].append({
-                    "id": concept_cloud.id, "name": concept_cloud.canonical_name, "layer": "concept"
-                })
-                # Ensure concept has semantic space
-                self._ensure_semantic_space(concept_cloud, concept_layer_id)
-            else:
-                results["strengthened_clouds"].append({
-                    "id": concept_cloud.id, "name": concept_cloud.canonical_name, "layer": "concept"
-                })
+        # Check if similar scene exists
+        with get_connection() as conn:
+            existing = conn.execute(
+                """SELECT s.*, c.canonical_name FROM scenes s
+                JOIN clouds c ON s.scene_cloud_id = c.id
+                WHERE c.layer_id = ?""",
+                (scene_layer_id,)
+            ).fetchall()
             
-            # Activate concept
-            self.activation_manager.activate_cloud(concept_cloud, 0.9)
-            record_activation_event(
-                self.session_id, concept_cloud.id, None, concept_layer_id, 0.9,
-                self.sequence_counter, context_id
-            )
-            self.sequence_counter += 1
+            # Check if scene with same name already exists
+            scene_cloud = None
+            for row in existing:
+                if row["canonical_name"] == scene_name:
+                    scene_cloud = self.cloud_repo.get_by_id(row["scene_cloud_id"])
+                    break
+            
+            if not scene_cloud:
+                # Create new scene cloud
+                scene_cloud = self.cloud_repo.create(Cloud(
+                    layer_id=scene_layer_id,
+                    cloud_type="scene",
+                    canonical_name=scene_name,
+                    mass=2.0,
+                    density=1.0,
+                    radius=40.0,
+                    stability=0.4,
+                    observation_count=1,
+                ))
+                
+                # Store scene with ordered word forms and lexemes
+                conn.execute(
+                    """INSERT INTO scenes
+                    (scene_cloud_id, sentence_text, word_form_cloud_ids_json, lexeme_ids_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
+                    (scene_cloud.id, sentence.text, 
+                     json.dumps(word_form_ids, separators=(",", ":")),
+                     json.dumps(lexeme_ids, separators=(",", ":")),
+                     now(), now())
+                )
+            else:
+                # Update existing scene
+                conn.execute(
+                    """UPDATE scenes SET
+                    sentence_text = ?, word_form_cloud_ids_json = ?, lexeme_ids_json = ?, updated_at = ?
+                    WHERE scene_cloud_id = ?""",
+                    (sentence.text, 
+                     json.dumps(word_form_ids, separators=(",", ":")),
+                     json.dumps(lexeme_ids, separators=(",", ":")),
+                     now(), scene_cloud.id)
+                )
+            conn.commit()
+        
+        results["created_clouds"].append({
+            "id": scene_cloud.id, "name": scene_cloud.canonical_name, "layer": "scene"
+        })
+        
+        self._ensure_global_space_and_placement(scene_cloud, scene_layer_id)
+        
+        # Activate scene
+        self.activation_manager.activate_cloud(scene_cloud, 0.8)
+        record_activation_event(
+            self.session_id, scene_cloud.id, None, scene_layer_id, 0.8,
+            self.sequence_counter, context_id
+        )
+        self.sequence_counter += 1
     
     def _create_structural_links(self, parent: "Cloud", children: List["Cloud"]) -> None:
         """Create structural components linking parent to children."""

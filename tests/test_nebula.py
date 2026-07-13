@@ -74,9 +74,9 @@ def test_layers_created():
     layer_repo = LayerRepository()
     layers = layer_repo.get_all_ordered()
     
-    assert len(layers) == 6
+    assert len(layers) == 7
     names = [l.name for l in layers]
-    assert names == ["signal", "character", "word_form", "concept", "scene", "context"]
+    assert names == ["signal", "character", "word_form", "lexeme", "concept", "scene", "context"]
     
     # Check order_index
     for i, layer in enumerate(layers):

@@ -13,6 +13,7 @@ export interface Cloud {
   stability: number
   activation: number
   layerId: number
+  layerName: string  // signal, character, word_form, lexeme, concept, scene, context
   cloudType: string
   color: string
   seed: number
@@ -20,6 +21,11 @@ export interface Cloud {
   velocityY: number
   velocityZ: number
   fixed: boolean
+  // Semantic overlay fields
+  center_x?: number
+  center_y?: number
+  members?: Array<{lexeme_id: number; canonical_form: string; weight: number}>
+  concept_name?: string
 }
 
 export interface SpaceInfo {
