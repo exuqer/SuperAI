@@ -1,215 +1,92 @@
-"""Training module for SuperAI - handles learning with physics simulation"""
-import time
-import uuid
-from itertools import combinations
-from typing import List, Dict, Any, Optional, Set
+"""Training manager for the relation-free concept field."""
 
-from .tokenizer import tokenize, split_sentences
-from .physics import (
-    WordState, PhysicsConfig, 
-    place_new_words_around_center, run_simulation
-)
-from .database import (
-    init_db, create_session, get_session, list_sessions,
-    add_words, add_phrase, add_connections, get_words, get_connections,
-    refresh_word_metrics,
-    update_words_positions, get_session_stats, reset_session,
-    add_training_stats
-)
+import time
+from collections import Counter
+from typing import Any, Dict, List, Optional
+
+from .database import ensure_concepts, get_concepts, get_stats, init_db, reset_space, update_concepts
+from .physics import ConceptState, PhysicsConfig, compute_center, concept_radius, place_new_concepts, run_simulation
+from .tokenizer import split_sentences, tokenize
 
 
 class TrainingManager:
-    """Manages training sessions and learning process."""
-    
     def __init__(self, config: Optional[PhysicsConfig] = None):
         self.config = config or PhysicsConfig()
         init_db()
-        self._current_session: Optional[str] = None
-    
-    def create_session(self, name: str = "Обучение") -> str:
-        """Create a new training session."""
-        session_id = create_session(name)
-        self._current_session = session_id
-        return session_id
-    
-    def get_session(self, session_id: Optional[str] = None) -> Optional[Dict]:
-        """Get session info."""
-        sid = session_id or self._current_session
-        if not sid:
-            return None
-        return get_session(sid)
-    
-    def set_session(self, session_id: str):
-        """Set current session."""
-        self._current_session = session_id
 
-    def _resolve_session(self, session_id: Optional[str] = None) -> str:
-        """Resolve the single persistent workspace used by the training screen.
-
-        The current SQLite schema keeps words globally unique. Reusing an existing
-        session across server restarts therefore avoids a duplicate-word insert
-        when the browser reconnects after a backend restart.
-        """
-        sid = session_id or self._current_session
-        if sid:
-            return sid
-        sessions = list_sessions()
-        sid = sessions[0]["id"] if sessions else self.create_session()
-        self._current_session = sid
-        return sid
-    
-    def list_sessions(self) -> List[Dict]:
-        """List all sessions."""
-        return list_sessions()
-    
-    def delete_session(self, session_id: str):
-        """Delete a session."""
-        from .database import delete_session
-        delete_session(session_id)
-        if self._current_session == session_id:
-            self._current_session = None
-    
-    def learn(self, text: str, session_id: Optional[str] = None) -> Dict[str, Any]:
-        """Train on text, update word space with physics simulation."""
-        sid = self._resolve_session(session_id)
-        
-        start_time = time.time()
-        
-        # Tokenize and split into sentences
-        sentences = split_sentences(text)
-        all_tokens = []
-        sentence_tokens = []
-        
-        for sentence in sentences:
-            tokens = tokenize(sentence)
-            if tokens:
-                sentence_tokens.append(tokens)
-                all_tokens.extend(tokens)
-        
-        if not all_tokens:
-            return {"success": False, "error": "No valid tokens found"}
-        
-        # Track unique words in this request
-        unique_in_request: Set[str] = set(all_tokens)
-        
-        # Get existing words before this request
-        existing_words_data = get_words(sid)
-        existing_words_set = {w["word"] for w in existing_words_data}
-        
-        # Add words to database (increments mass for existing)
-        word_counts = add_words(sid, all_tokens)
-        
-        # Get all words with current state
-        all_words_data = get_words(sid)
-        
-        # Create WordState objects
-        word_states: Dict[str, WordState] = {}
-        for wd in all_words_data:
-            word_states[wd["word"]] = WordState(
-                word=wd["word"],
-                mass=wd["mass"],
-                x=wd["x"],
-                y=wd["y"],
-                gravity=wd.get("gravity", 1.0),
-                halo=wd.get("halo", 0.0),
-                permeability=wd.get("permeability", 0.35),
+    def _states(self) -> List[ConceptState]:
+        return [
+            ConceptState(
+                id=int(item["id"]),
+                token=item["token"],
+                position=item["position"],
+                mass=float(item["mass"]),
+                radius=concept_radius(float(item["mass"])),
             )
-        
-        # Identify new words in this request
-        new_words_list = [word_states[w] for w in unique_in_request if w not in existing_words_set]
-        existing_words_list = [word_states[w] for w in unique_in_request if w in existing_words_set]
-        
-        # Place new words around center of known words from the sentences
-        # Use words from the sentences that already exist
-        known_in_sentences = [ws for ws in existing_words_list]
-        place_new_words_around_center(new_words_list, known_in_sentences, self.config)
-        
-        # Build phrase groups for physics (each sentence is a phrase group)
-        phrase_groups: List[List[WordState]] = []
-        for sent_tokens in sentence_tokens:
-            group = [word_states[tok] for tok in sent_tokens if tok in word_states]
-            if len(group) >= 2:
-                phrase_groups.append(group)
-        
-        # Run physics simulation using only observed co-occurrence pairs.
-        connection_strengths = {
-            tuple(sorted((edge["word_a"], edge["word_b"]))): edge["strength"]
-            for edge in get_connections(sid)
-        }
-        for sent_tokens in sentence_tokens:
-            for a, b in combinations(sorted(set(sent_tokens)), 2):
-                key = (a, b)
-                connection_strengths[key] = connection_strengths.get(key, 0.0) + 1.0
-        all_word_states = list(word_states.values())
-        run_simulation(all_word_states, phrase_groups, self.config, connection_strengths)
-        
-        # Update positions in database
-        positions = {ws.word: (ws.x, ws.y) for ws in all_word_states}
-        update_words_positions(sid, positions)
-        
-        # Add phrases (sentences) to database
-        for sent_tokens in sentence_tokens:
-            add_phrase(sid, sent_tokens)
-        add_connections(sid, sentence_tokens)
-        refresh_word_metrics(sid)
-        all_words_data = get_words(sid)
-        
-        # Record training stats
-        stats = get_session_stats(sid)
-        add_training_stats(
-            session_id=sid,
-            epoch=1,  # Simplified - could track epoch properly
-            tokens=stats["tokens"],
-            edges=stats["edges"],
-            phrases=stats["phrases"],
-            loss=None
-        )
-        
-        # Prepare response
-        word_data = [dict(w) for w in all_words_data]
-        for item in word_data:
-            item.pop("session_id", None)
-        
+            for item in get_concepts()
+        ]
+
+    @staticmethod
+    def _serialize(states: List[ConceptState]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": state.id,
+                "token": state.token,
+                "position": [round(float(state.position[0]), 4), round(float(state.position[1]), 4)],
+                "mass": round(float(state.mass), 4),
+                "radius": round(float(concept_radius(state.mass)), 4),
+                "activation": round(float(state.activation), 4),
+            }
+            for state in sorted(states, key=lambda item: (-item.mass, item.id))
+        ]
+
+    def learn(self, text: str) -> Dict[str, Any]:
+        started = time.time()
+        raw_sentences = split_sentences(text)
+        sentences = [tokenize(sentence) for sentence in raw_sentences]
+        sentences = [sentence for sentence in sentences if sentence]
+        tokens = [token for sentence in sentences for token in sentence]
+        if not tokens:
+            return {"success": False, "concepts": [], "stats": get_stats(), "time_ms": 0, "error": "No valid tokens found"}
+
+        current_states = self._states()
+        center = compute_center(current_states)
+        existing_tokens = {state.token for state in current_states}
+        ensure_concepts(list(dict.fromkeys(tokens)), center)
+        states = self._states()
+        new_states = [state for state in states if state.token not in existing_tokens]
+        known_states = [state for state in states if state.token in existing_tokens]
+        place_new_concepts(new_states, known_states, self.config)
+
+        counts = Counter(tokens)
+        total_tokens = max(1, len(tokens))
+        for state in states:
+            state.activation = counts.get(state.token, 0) / total_tokens
+
+        active_states = [state for state in states if state.activation > 0]
+        context_position = compute_center(active_states)
+        run_simulation(states, sentences, self.config, context_position)
+        update_concepts((state.id, state.position, state.mass) for state in states)
+
         return {
             "success": True,
-            "session_id": sid,
-            "words": word_data,
-            "connections": get_connections(sid),
-            "stats": stats,
-            "time_ms": int((time.time() - start_time) * 1000),
+            "concepts": self._serialize(states),
+            "stats": {**get_stats(), "tokens": len(tokens)},
+            "time_ms": int((time.time() - started) * 1000),
         }
-    
-    def get_space(self, session_id: Optional[str] = None) -> Dict[str, Any]:
-        """Get current word space state."""
-        sid = self._resolve_session(session_id)
-        
-        words_data = get_words(sid)
-        word_data = [
-            dict(w)
-            for w in words_data
-        ]
-        stats = get_session_stats(sid)
-        
-        return {
-            "words": word_data,
-            "connections": get_connections(sid),
-            "stats": stats,
-        }
-    
-    def reset_space(self, session_id: Optional[str] = None) -> Dict[str, Any]:
-        """Reset (clear) the word space."""
-        sid = self._resolve_session(session_id)
-        
-        reset_session(sid)
-        return {"success": True, "words": [], "stats": {"tokens": 0, "total_tokens": 0, "phrases": 0, "edges": 0}}
+
+    def get_space(self) -> Dict[str, Any]:
+        return {"concepts": self._serialize(self._states()), "stats": get_stats()}
+
+    def reset_space(self) -> Dict[str, Any]:
+        reset_space()
+        return {"success": True, "concepts": [], "stats": {"concepts": 0, "total_mass": 0, "tokens": 0}}
 
 
-# Global instance
 _training_manager: Optional[TrainingManager] = None
 
 
 def get_training_manager() -> TrainingManager:
-    """Get or create global training manager."""
     global _training_manager
     if _training_manager is None:
         _training_manager = TrainingManager()

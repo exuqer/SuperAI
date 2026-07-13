@@ -4,15 +4,15 @@
       <div class="brand-line">
         <div class="brand-mark">S</div>
         <div>
-          <p class="eyebrow">Gravity learning lab</p>
-          <h1>SuperAI <span>/ Обучение</span></h1>
+          <p class="eyebrow">Concept field lab</p>
+          <h1>SuperAI <span>/ Пространство понятий</span></h1>
         </div>
       </div>
-      <p class="subtitle">Смысловое пространство, где слова сближаются через повторение.</p>
+      <p class="subtitle">Понятия существуют как области плотности в непрерывном гравитационном поле.</p>
       <div class="stats-bar">
-        <span class="stat"><strong>{{ stats?.tokens ?? 0 }}</strong> слов</span>
-        <span class="stat"><strong>{{ stats?.edges ?? 0 }}</strong> связей</span>
-        <span class="stat"><strong>{{ stats?.phrases ?? 0 }}</strong> фраз</span>
+        <span class="stat"><strong>{{ stats.concepts }}</strong> понятий</span>
+        <span class="stat"><strong>{{ stats.total_mass.toFixed(1) }}</strong> масса</span>
+        <span class="stat"><strong>{{ stats.tokens }}</strong> токенов</span>
       </div>
     </header>
 
@@ -23,11 +23,11 @@
           <span class="status-dot" :class="{ active: loading }"></span>
         </div>
         <label for="input-text">Введите фразу или несколько предложений</label>
-        <textarea id="input-text" v-model="inputText" placeholder="Например: ИИ изучает мир. Мир изучает ИИ." rows="8" @keydown.meta.enter="handleLearn" @keydown.ctrl.enter="handleLearn" />
+        <textarea id="input-text" v-model="inputText" placeholder="Например: Кот ест рыбу. Рыба ест кота." rows="8" @keydown.meta.enter="handleLearn" @keydown.ctrl.enter="handleLearn" />
         <p class="hint">⌘ / Ctrl + Enter — запустить обучение</p>
         <div class="input-actions">
           <button class="btn btn-primary" @click="handleLearn" :disabled="loading || !inputText.trim()">
-            <span v-if="loading" class="spinner"></span>{{ loading ? 'Считаю пространство…' : 'Обучить модель' }}
+            <span v-if="loading" class="spinner"></span>{{ loading ? 'Считаю поле…' : 'Обучить модель' }}
           </button>
           <button class="btn btn-danger" @click="handleReset" :disabled="loading">Очистить</button>
         </div>
@@ -36,17 +36,17 @@
 
       <section class="panel visualization-panel">
         <div class="panel-heading visualization-heading">
-          <div><p class="eyebrow">02 / Space</p><h2>Гравитационная карта</h2></div>
+          <div><p class="eyebrow">02 / Field</p><h2>Градиентное поле</h2></div>
           <span class="live-badge"><i></i> live</span>
         </div>
-        <SpaceVisualization :words="words" :connections="connections" :width="width" :height="height" />
+        <SpaceVisualization :concepts="concepts" :width="width" :height="height" />
       </section>
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useTrainingStore } from '@/stores/training'
 import SpaceVisualization from '@/components/SpaceVisualization.vue'
 
@@ -54,30 +54,50 @@ const store = useTrainingStore()
 const inputText = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
-const words = ref<Array<{ word: string; mass: number; frequency: number; halo: number; permeability: number; gravity: number; x: number; y: number }>>([])
-const connections = ref<Array<{ word_a: string; word_b: string; strength: number; contexts: number }>>([])
-const stats = ref<{ tokens: number; total_tokens: number; phrases: number; edges: number } | null>(null)
+const concepts = ref(store.concepts)
+const stats = ref(store.stats)
 const width = 1600
 const height = 1000
 
 async function loadSpace() {
-  try { const data = await store.getSpace(); words.value = data.words; connections.value = data.connections; stats.value = data.stats } catch (e) { errorMessage.value = 'Не удалось загрузить пространство' }
+  try {
+    const result = await store.getSpace()
+    concepts.value = result.concepts
+    stats.value = result.stats
+  } catch {
+    errorMessage.value = 'Не удалось загрузить пространство'
+  }
 }
 
 async function handleLearn() {
   if (!inputText.value.trim()) return
-  loading.value = true; errorMessage.value = ''
-  try { const result = await store.learn(inputText.value); words.value = result.words; connections.value = result.connections; stats.value = result.stats; inputText.value = '' }
-  catch (e: any) { errorMessage.value = e.message || 'Ошибка обучения' }
-  finally { loading.value = false }
+  loading.value = true
+  errorMessage.value = ''
+  try {
+    const result = await store.learn(inputText.value)
+    concepts.value = result.concepts
+    stats.value = result.stats
+    inputText.value = ''
+  } catch (error: any) {
+    errorMessage.value = error.message || 'Ошибка обучения'
+  } finally {
+    loading.value = false
+  }
 }
 
 async function handleReset() {
-  if (!confirm('Очистить всё пространство слов?')) return
-  loading.value = true; errorMessage.value = ''
-  try { await store.resetSpace(); words.value = []; connections.value = []; stats.value = { tokens: 0, total_tokens: 0, phrases: 0, edges: 0 } }
-  catch (e: any) { errorMessage.value = e.message || 'Ошибка сброса' }
-  finally { loading.value = false }
+  if (!confirm('Очистить всё пространство понятий?')) return
+  loading.value = true
+  errorMessage.value = ''
+  try {
+    const result = await store.resetSpace()
+    concepts.value = result.concepts
+    stats.value = result.stats
+  } catch (error: any) {
+    errorMessage.value = error.message || 'Ошибка сброса'
+  } finally {
+    loading.value = false
+  }
 }
 
 onMounted(loadSpace)

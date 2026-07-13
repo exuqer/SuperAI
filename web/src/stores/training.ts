@@ -1,105 +1,80 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-interface WordData {
-  word: string
+export interface ConceptData {
+  id: number
+  token: string
+  position: number[]
   mass: number
-  x: number
-  y: number
-  frequency: number
-  halo: number
-  permeability: number
-  gravity: number
+  radius: number
+  activation: number
 }
 
-interface ConnectionData { word_a: string; word_b: string; strength: number; contexts: number }
-
-interface Stats {
+export interface Stats {
+  concepts: number
+  total_mass: number
   tokens: number
-  total_tokens: number
-  phrases: number
-  edges: number
 }
 
-interface TrainResult {
+export interface TrainResult {
   success: boolean
-  session_id?: string
-  words: WordData[]
-  connections: ConnectionData[]
+  concepts: ConceptData[]
   stats: Stats
   time_ms: number
   error?: string
 }
 
-interface SpaceResult {
-  words: WordData[]
-  connections: ConnectionData[]
+export interface SpaceResult {
+  concepts: ConceptData[]
   stats: Stats
 }
 
 export const useTrainingStore = defineStore('training', () => {
-  const currentSessionId = ref<string | null>(null)
   const baseUrl = '/api'
+  const concepts = ref<ConceptData[]>([])
+  const stats = ref<Stats>({ concepts: 0, total_mass: 0, tokens: 0 })
 
   async function learn(text: string): Promise<TrainResult> {
-    const body = {
-      text,
-      ...(currentSessionId.value ? { session_id: currentSessionId.value } : {}),
-    }
-
     const response = await fetch(`${baseUrl}/v1/training/learn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ text }),
     })
 
     if (!response.ok) {
-      const err = await response.json()
-      throw new Error(err.detail || 'Training failed')
+      const error = await response.json()
+      throw new Error(error.detail || 'Training failed')
     }
 
-    const result = await response.json()
-    if (result.session_id) {
-      currentSessionId.value = result.session_id
-    }
+    const result = await response.json() as TrainResult
+    concepts.value = result.concepts
+    stats.value = result.stats
     return result
   }
 
   async function getSpace(): Promise<SpaceResult> {
-    const params = new URLSearchParams()
-    if (currentSessionId.value) {
-      params.append('session_id', currentSessionId.value)
-    }
-
-    const response = await fetch(`${baseUrl}/v1/training/space?${params}`)
-    if (!response.ok) {
-      throw new Error('Failed to load space')
-    }
-    return response.json()
+    const response = await fetch(`${baseUrl}/v1/training/space`)
+    if (!response.ok) throw new Error('Failed to load space')
+    const result = await response.json() as SpaceResult
+    concepts.value = result.concepts
+    stats.value = result.stats
+    return result
   }
 
-  async function resetSpace(): Promise<void> {
-    const params = new URLSearchParams()
-    if (currentSessionId.value) params.append('session_id', currentSessionId.value)
-
-    const response = await fetch(`${baseUrl}/v1/training/space?${params}`, {
-      method: 'DELETE',
-    })
-
-    if (!response.ok) {
-      throw new Error('Failed to reset space')
-    }
+  async function resetSpace(): Promise<ResetResult> {
+    const response = await fetch(`${baseUrl}/v1/training/space`, { method: 'DELETE' })
+    if (!response.ok) throw new Error('Failed to reset space')
+    const result = await response.json() as ResetResult
+    concepts.value = result.concepts
+    stats.value = result.stats
+    return result
   }
 
-  function setSession(sessionId: string) {
-    currentSessionId.value = sessionId
-  }
-
-  return {
-    currentSessionId,
-    learn,
-    getSpace,
-    resetSpace,
-    setSession,
-  }
+  return { concepts, stats, learn, getSpace, resetSpace }
 })
+
+interface ResetResult {
+  success: boolean
+  concepts: ConceptData[]
+  stats: Stats
+}

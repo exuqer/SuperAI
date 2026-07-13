@@ -1,42 +1,40 @@
-"""Tests for SuperAI training module"""
-import pytest
-import tempfile
-import os
+"""Tests for the relation-free concept field."""
+
+import sqlite3
 from pathlib import Path
 
-# Add the semantic_ants to path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
+from fastapi.testclient import TestClient
 
-from server.tokenizer import tokenize, split_sentences, normalize_text
-from server.physics import WordState, PhysicsConfig, run_simulation, place_new_words_around_center
+from server import database
+from server.database import get_concepts, init_db
+from server.physics import ConceptState, PhysicsConfig, concept_radius, run_physics_step, run_simulation
+from server.tokenizer import normalize_text, split_sentences, tokenize
+from server.training import TrainingManager
+from server import training as training_module
+from server.server import app
+
+
+@pytest.fixture
+def isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "state.sqlite")
+    monkeypatch.setattr(training_module, "_training_manager", None)
+    init_db()
+    return tmp_path / "state.sqlite"
 
 
 def test_tokenize_russian_and_latin():
-    """Test tokenization of Russian and Latin words."""
-    text = "Привет, как дела? Hello world!"
-    tokens = tokenize(text)
-    assert "привет" in tokens
-    assert "как" in tokens
-    assert "дела" in tokens
-    assert "hello" in tokens
-    assert "world" in tokens
+    tokens = tokenize("Привет, как дела? Hello world!")
+    assert tokens == ["привет", "как", "дела", "hello", "world"]
 
 
 def test_tokenize_ignores_punctuation():
-    """Test that punctuation is filtered out."""
-    text = "Привет! Как дела? Всё отлично."
-    tokens = tokenize(text)
-    assert "!" not in tokens
-    assert "?" not in tokens
-    assert "." not in tokens
-    assert "," not in tokens
+    tokens = tokenize("Привет! Как дела? Всё отлично.")
+    assert all(token.isalpha() for token in tokens)
 
 
 def test_split_sentences():
-    """Test sentence splitting."""
-    text = "Привет. Как дела? Всё отлично!"
-    sentences = split_sentences(text)
+    sentences = split_sentences("Привет. Как дела? Всё отлично!")
     assert len(sentences) == 3
     assert "Привет" in sentences[0]
     assert "Как дела" in sentences[1]
@@ -44,66 +42,100 @@ def test_split_sentences():
 
 
 def test_normalize_text():
-    """Test text normalization."""
     assert normalize_text("  Привет   мир  ") == "Привет мир"
     assert normalize_text("\n\r\tПривет\nмир\t") == "Привет мир"
     assert normalize_text("") == ""
 
 
-def test_physics_word_state():
-    """Test WordState physics calculations."""
-    w1 = WordState(word="test1", mass=1.0, x=100, y=100)
-    w2 = WordState(word="test2", mass=2.0, x=200, y=200)
-    
-    dist = w1.distance_to(w2)
-    assert dist > 0
-    assert abs(dist - 141.42) < 0.1
+def test_concept_state_and_radius():
+    concept = ConceptState(id=1, token="тест", position=[100, 100], mass=1.0)
+    assert concept.distance_to(ConceptState(id=2, token="два", position=[200, 200])) == pytest.approx(141.42, abs=0.1)
+    assert concept.radius == pytest.approx(concept_radius(1.0))
 
 
-def test_physics_simulation_runs():
-    """Test that physics simulation runs without errors."""
-    config = PhysicsConfig(steps=5)
-    words = [
-        WordState(word="word1", mass=1.0, x=100, y=100),
-        WordState(word="word2", mass=2.0, x=200, y=200),
-        WordState(word="word3", mass=1.5, x=300, y=100),
+def test_global_field_moves_objects_without_context_pairs():
+    config = PhysicsConfig(steps=1)
+    concepts = [
+        ConceptState(id=1, token="один", position=[300, 500], mass=1.0),
+        ConceptState(id=2, token="два", position=[500, 500], mass=1.0),
     ]
-    phrase_groups = [words[:2]]  # First two words in a phrase
-    
-    run_simulation(words, phrase_groups, config)
-    
-    # Check that positions were updated
-    for w in words:
-        assert w.x != 0 or w.y != 0
-        assert abs(w.x) < 2000  # Within bounds
-        assert abs(w.y) < 2000
+    before = [concept.position[:] for concept in concepts]
+    run_physics_step(concepts, [], config)
+    assert concepts[0].position[0] > before[0][0]
+    assert concepts[1].position[0] < before[1][0]
 
 
-def test_place_new_words_around_center():
-    """Test placing new words around center."""
-    config = PhysicsConfig()
-    existing = [
-        WordState(word="e1", mass=1.0, x=400, y=300),
-        WordState(word="e2", mass=1.0, x=600, y=400),
+def test_training_creates_unique_concepts_and_persists_only_field(isolated_database):
+    manager = TrainingManager(PhysicsConfig(steps=4))
+    result = manager.learn("Кот кот ест рыбу")
+    assert result["success"] is True
+    assert {concept["token"] for concept in result["concepts"]} == {"кот", "ест", "рыбу"}
+    assert all(concept["mass"] == pytest.approx(1.0) for concept in result["concepts"])
+    assert all(len(concept["position"]) == 2 for concept in result["concepts"])
+    assert all(concept["radius"] <= 250 for concept in result["concepts"])
+
+    tables = {
+        row[0]
+        for row in sqlite3.connect(isolated_database).execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert tables == {"concepts"}
+
+
+def test_existing_mass_increments_once_per_request(isolated_database):
+    manager = TrainingManager(PhysicsConfig(steps=2))
+    manager.learn("кот ест рыбу")
+    result = manager.learn("кот кот ест")
+    masses = {concept["token"]: concept["mass"] for concept in result["concepts"]}
+    assert masses["кот"] == pytest.approx(1.1)
+    assert masses["ест"] == pytest.approx(1.1)
+    assert masses["рыбу"] == pytest.approx(1.0)
+
+
+def test_word_order_changes_trajectory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first_db = tmp_path / "first.sqlite"
+    monkeypatch.setattr(database, "DB_PATH", first_db)
+    init_db()
+    first = TrainingManager(PhysicsConfig(steps=5)).learn("кот ест рыбу")
+    first_positions = {concept["token"]: concept["position"] for concept in first["concepts"]}
+
+    second_db = tmp_path / "second.sqlite"
+    monkeypatch.setattr(database, "DB_PATH", second_db)
+    init_db()
+    second = TrainingManager(PhysicsConfig(steps=5)).learn("рыбу ест кот")
+    second_positions = {concept["token"]: concept["position"] for concept in second["concepts"]}
+
+    assert first_positions != second_positions
+
+
+def test_simulation_is_finite_and_bounded():
+    config = PhysicsConfig(steps=10)
+    concepts = [
+        ConceptState(id=1, token="а", position=[0, 0], mass=1),
+        ConceptState(id=2, token="б", position=[1600, 1000], mass=100000),
     ]
-    new_words = [
-        WordState(word="n1", mass=1.0, x=0, y=0),
-        WordState(word="n2", mass=1.0, x=0, y=0),
-    ]
-    
-    place_new_words_around_center(new_words, existing, config)
-    
-    # New words should be placed around the center of existing words
-    for w in new_words:
-        assert w.x > 0 and w.x < 1000
-        assert w.y > 0 and w.y < 700
+    run_simulation(concepts, [["а", "б"]], config)
+    for concept in concepts:
+        assert all(abs(value) < 1e9 for value in concept.position + concept.velocity)
+        assert config.boundary_margin <= concept.position[0] <= config.width - config.boundary_margin
+        assert config.boundary_margin <= concept.position[1] <= config.height - config.boundary_margin
 
 
-def test_mass_increment():
-    """Test that existing word mass increments by 0.1."""
-    # This test is more of an integration test - we test it through the database
-    pass
+def test_reset_removes_all_concepts(isolated_database):
+    manager = TrainingManager(PhysicsConfig(steps=2))
+    manager.learn("кот ест рыбу")
+    result = manager.reset_space()
+    assert result["concepts"] == []
+    assert get_concepts() == []
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_api_has_no_relation_fields(isolated_database):
+    with TestClient(app) as client:
+        response = client.post("/api/v1/training/learn", json={"text": "кот ест рыбу"})
+    assert response.status_code == 200
+    payload = response.json()
+    forbidden = {"connections", "edges", "neighbors", "phrases", "frequency", "gravity", "halo"}
+    assert not forbidden.intersection(payload)
+    assert not forbidden.intersection(payload["concepts"][0])
+    assert set(payload["stats"]) == {"concepts", "total_mass", "tokens"}

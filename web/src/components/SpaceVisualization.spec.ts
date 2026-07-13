@@ -6,7 +6,7 @@ describe('SpaceVisualization', () => {
   it('renders without crashing when no words', () => {
     const wrapper = mount(SpaceVisualization, {
       props: {
-        words: [],
+        concepts: [],
         width: 800,
         height: 500,
       },
@@ -15,25 +15,26 @@ describe('SpaceVisualization', () => {
   })
 
   it('renders word nodes when words provided', () => {
-    const words = [
-      { word: 'test', mass: 1.0, x: 100, y: 100 },
-      { word: 'hello', mass: 2.0, x: 200, y: 200 },
+    const concepts = [
+      { id: 1, token: 'test', mass: 1.0, radius: 34, activation: 1, position: [100, 100] },
+      { id: 2, token: 'hello', mass: 2.0, radius: 39, activation: 1, position: [200, 200] },
     ]
     const wrapper = mount(SpaceVisualization, {
       props: {
-        words,
+        concepts,
         width: 800,
         height: 500,
       },
     })
-    const nodes = wrapper.findAll('.word-node')
+    const nodes = wrapper.findAll('.concept-node')
     expect(nodes).toHaveLength(2)
+    expect(wrapper.findAll('line')).toHaveLength(0)
   })
 
   it('shows legend', () => {
     const wrapper = mount(SpaceVisualization, {
       props: {
-        words: [],
+        concepts: [],
         width: 800,
         height: 500,
       },
