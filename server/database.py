@@ -58,9 +58,15 @@ def init_db():
             "halo": "REAL NOT NULL DEFAULT 0",
             "permeability": "REAL NOT NULL DEFAULT 0.5",
             "gravity": "REAL NOT NULL DEFAULT 1.0",
+            "unique_neighbors": "INTEGER NOT NULL DEFAULT 0",
+            "observations": "INTEGER NOT NULL DEFAULT 0",
+            "distinct_sentences": "INTEGER NOT NULL DEFAULT 0",
+            "distinct_contexts": "INTEGER NOT NULL DEFAULT 0",
+            "confidence": "REAL NOT NULL DEFAULT 0.0",
         }.items():
             if column not in existing_columns:
                 conn.execute(f"ALTER TABLE words ADD COLUMN {column} {definition}")
+        conn.execute("UPDATE words SET mass = CAST(frequency AS REAL)")
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_words_session ON words(session_id)
         """)
@@ -163,16 +169,16 @@ def add_words(session_id: str, words: List[str]) -> Dict[str, int]:
                     "SELECT frequency FROM words WHERE word = ? AND session_id = ?", (word, session_id)
                 ).fetchone()["frequency"]
                 new_frequency = row_frequency + count
-                new_mass = 1.0 + 0.35 * math.log1p(new_frequency - 1)
+                new_mass = float(new_frequency)
                 conn.execute(
                     "UPDATE words SET frequency = ?, mass = ?, updated_at = ? WHERE word = ? AND session_id = ?",
                     (new_frequency, new_mass, now, word, session_id)
                 )
             else:
-                # New word - mass 1.0, random position
+                # New word - mass equals its observed frequency.
                 conn.execute(
-                    "INSERT INTO words (word, session_id, mass, frequency, x, y, created_at, updated_at) VALUES (?, ?, 1.0, ?, 0.0, 0.0, ?, ?)",
-                    (word, session_id, count, now, now)
+                    "INSERT INTO words (word, session_id, mass, frequency, x, y, created_at, updated_at) VALUES (?, ?, ?, ?, 0.0, 0.0, ?, ?)",
+                    (word, session_id, float(count), count, now, now)
                 )
         
         conn.commit()
@@ -241,22 +247,40 @@ def refresh_word_metrics(session_id: str):
     with get_connection() as conn:
         words = conn.execute("SELECT word, frequency FROM words WHERE session_id = ?", (session_id,)).fetchall()
         connections = conn.execute(
-            "SELECT word_a, word_b, strength FROM connections WHERE session_id = ?", (session_id,)
+            "SELECT word_a, word_b, strength, contexts FROM connections WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        phrases = conn.execute(
+            "SELECT words, count FROM phrases WHERE session_id = ?", (session_id,)
         ).fetchall()
         neighbors = {row["word"]: [] for row in words}
+        observations = {row["word"]: 0 for row in words}
+        distinct_sentences = {row["word"]: 0 for row in words}
         for edge in connections:
-            neighbors.setdefault(edge["word_a"], []).append(edge["strength"])
-            neighbors.setdefault(edge["word_b"], []).append(edge["strength"])
+            neighbors.setdefault(edge["word_a"], []).append((edge["strength"], edge["contexts"]))
+            neighbors.setdefault(edge["word_b"], []).append((edge["strength"], edge["contexts"]))
+        for phrase in phrases:
+            phrase_words = set(json.loads(phrase["words"]))
+            for word in phrase_words:
+                observations[word] = observations.get(word, 0) + phrase["count"]
+                distinct_sentences[word] = distinct_sentences.get(word, 0) + 1
         for row in words:
             strengths = neighbors.get(row["word"], [])
-            halo = min(1.0, len(strengths) / 8.0)
-            # New words remain temporarily permeable; narrow vocabularies are firmer.
-            permeability = min(1.0, 0.5 + len(strengths) / 12.0)
-            quality = sum(min(1.0, value / 3.0) for value in strengths) / max(len(strengths), 1)
-            gravity = min(10.0, math.sqrt(row["frequency"]) * (0.65 + 1.35 * quality))
+            unique_neighbors = len(strengths)
+            word_observations = observations.get(row["word"], 0)
+            word_contexts = distinct_sentences.get(row["word"], 0)
+            confidence = min(1.0, word_observations / 10.0)
+            halo_signal = min(1.0, word_contexts / 8.0)
+            halo = float(word_contexts)
+            # Diversity is independent from frequency and connection strength.
+            computed_permeability = 0.1 + 0.8 * halo_signal
+            permeability = 0.35 * (1.0 - confidence) + computed_permeability * confidence
+            best = sorted((value for value, _ in strengths), reverse=True)[:3]
+            average_strength = sum(best) / len(best) if best else 0.0
+            computed_gravity = float(row["frequency"]) * average_strength
+            gravity = 1.0 * (1.0 - confidence) + computed_gravity * confidence
             conn.execute(
-                "UPDATE words SET halo = ?, permeability = ?, gravity = ? WHERE word = ? AND session_id = ?",
-                (halo, permeability, gravity, row["word"], session_id),
+                "UPDATE words SET halo = ?, permeability = ?, gravity = ?, unique_neighbors = ?, observations = ?, distinct_sentences = ?, distinct_contexts = ?, confidence = ? WHERE word = ? AND session_id = ?",
+                (halo, permeability, gravity, unique_neighbors, word_observations, word_contexts, word_contexts, confidence, row["word"], session_id),
             )
         conn.commit()
 
@@ -265,7 +289,7 @@ def get_words(session_id: str) -> List[Dict]:
     """Get all words for a session."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT word, mass, frequency, halo, permeability, gravity, x, y FROM words WHERE session_id = ? ORDER BY mass DESC",
+            "SELECT word, mass, frequency, halo, permeability, gravity, unique_neighbors, observations, distinct_sentences, distinct_contexts, confidence, x, y FROM words WHERE session_id = ? ORDER BY mass DESC",
             (session_id,)
         ).fetchall()
         return [dict(row) for row in rows]

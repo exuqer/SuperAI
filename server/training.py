@@ -1,6 +1,7 @@
 """Training module for SuperAI - handles learning with physics simulation"""
 import time
 import uuid
+from itertools import combinations
 from typing import List, Dict, Any, Optional, Set
 
 from .tokenizer import tokenize, split_sentences
@@ -96,7 +97,7 @@ class TrainingManager:
         existing_words_set = {w["word"] for w in existing_words_data}
         
         # Add words to database (increments mass for existing)
-        word_counts = add_words(sid, list(unique_in_request))
+        word_counts = add_words(sid, all_tokens)
         
         # Get all words with current state
         all_words_data = get_words(sid)
@@ -110,6 +111,8 @@ class TrainingManager:
                 x=wd["x"],
                 y=wd["y"],
                 gravity=wd.get("gravity", 1.0),
+                halo=wd.get("halo", 0.0),
+                permeability=wd.get("permeability", 0.35),
             )
         
         # Identify new words in this request
@@ -128,9 +131,17 @@ class TrainingManager:
             if len(group) >= 2:
                 phrase_groups.append(group)
         
-        # Run physics simulation
+        # Run physics simulation using only observed co-occurrence pairs.
+        connection_strengths = {
+            tuple(sorted((edge["word_a"], edge["word_b"]))): edge["strength"]
+            for edge in get_connections(sid)
+        }
+        for sent_tokens in sentence_tokens:
+            for a, b in combinations(sorted(set(sent_tokens)), 2):
+                key = (a, b)
+                connection_strengths[key] = connection_strengths.get(key, 0.0) + 1.0
         all_word_states = list(word_states.values())
-        run_simulation(all_word_states, phrase_groups, self.config)
+        run_simulation(all_word_states, phrase_groups, self.config, connection_strengths)
         
         # Update positions in database
         positions = {ws.word: (ws.x, ws.y) for ws in all_word_states}

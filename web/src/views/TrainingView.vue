@@ -57,8 +57,8 @@ const errorMessage = ref('')
 const words = ref<Array<{ word: string; mass: number; frequency: number; halo: number; permeability: number; gravity: number; x: number; y: number }>>([])
 const connections = ref<Array<{ word_a: string; word_b: string; strength: number; contexts: number }>>([])
 const stats = ref<{ tokens: number; total_tokens: number; phrases: number; edges: number } | null>(null)
-const width = 1000
-const height = 700
+const width = 1600
+const height = 1000
 
 async function loadSpace() {
   try { const data = await store.getSpace(); words.value = data.words; connections.value = data.connections; stats.value = data.stats } catch (e) { errorMessage.value = 'Не удалось загрузить пространство' }

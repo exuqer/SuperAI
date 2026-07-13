@@ -15,6 +15,8 @@ class WordState:
     vx: float = 0.0
     vy: float = 0.0
     gravity: float = 1.0
+    halo: float = 0.0
+    permeability: float = 0.35
 
     def distance_to(self, other: "WordState") -> float:
         dx = self.x - other.x
@@ -25,7 +27,7 @@ class WordState:
         self.vx += fx / self.mass
         self.vy += fy / self.mass
 
-    def step(self, damping: float = 0.82, bounds: Tuple[float, float] = (1000, 700)):
+    def step(self, damping: float = 0.82, bounds: Tuple[float, float] = (1000, 700), margin: float = 50.0):
         # Apply damping
         self.vx *= damping
         self.vy *= damping
@@ -34,7 +36,6 @@ class WordState:
         self.y += self.vy
         # Clamp to bounds
         width, height = bounds
-        margin = 50
         self.x = max(margin, min(width - margin, self.x))
         self.y = max(margin, min(height - margin, self.y))
 
@@ -42,20 +43,18 @@ class WordState:
 @dataclass
 class PhysicsConfig:
     """Physics simulation configuration"""
-    width: float = 1000.0
-    height: float = 700.0
-    gravity_constant: float = 6000.0
+    width: float = 1600.0
+    height: float = 1000.0
+    gravity_constant: float = 1800.0
     gravity_min_distance: float = 32.0
     gravity_min_force: float = 0.02
     gravity_max_force: float = 12.0
-    phrase_impulse_factor: float = 0.015
-    phrase_impulse_max: float = 7.0
-    phrase_target_distance: float = 110.0
-    repulsion_distance: float = 88.0
-    repulsion_max_force: float = 20.0
+    repulsion_distance: float = 380.0
+    repulsion_max_force: float = 44.0
     damping: float = 0.82
     steps: int = 60
-    boundary_margin: float = 50.0
+    boundary_margin: float = 220.0
+    core_radius: float = 24.0
 
 
 def compute_center(words: List[WordState]) -> Tuple[float, float]:
@@ -84,7 +83,7 @@ def place_new_words_around_center(
     # Place new words at average distance from center
     if existing_words:
         avg_dist = sum(math.hypot(w.x - cx, w.y - cy) for w in existing_words) / len(existing_words)
-        avg_dist = max(avg_dist, 80.0)
+        avg_dist = max(avg_dist, 280.0)
     else:
         avg_dist = 150.0
 
@@ -92,6 +91,12 @@ def place_new_words_around_center(
         angle = (2 * math.pi * i) / max(len(new_words), 1) + random.uniform(-0.2, 0.2)
         word.x = cx + avg_dist * math.cos(angle)
         word.y = cy + avg_dist * math.sin(angle)
+
+
+def halo_field(word: WordState, distance: float, config: PhysicsConfig) -> float:
+    halo_radius = max(config.core_radius + 16.0, config.core_radius + 16.0 + word.halo * 6.0)
+    distance_from_core = max(0.0, distance - config.core_radius)
+    return math.exp(-distance_from_core / halo_radius)
 
 
 def apply_gravity(word1: WordState, word2: WordState, config: PhysicsConfig) -> Tuple[float, float]:
@@ -104,9 +109,9 @@ def apply_gravity(word1: WordState, word2: WordState, config: PhysicsConfig) -> 
     if dist == 0:
         return 0.0, 0.0
 
-    # Gravity is deliberately observable: frequency supplies the baseline and
-    # stable neighbors increase the body's pull.
+    # The halo controls the range of the field; gravity controls its strength.
     force = config.gravity_constant * math.sqrt(max(word1.gravity, 0.1) * max(word2.gravity, 0.1)) / (dist * dist)
+    force *= halo_field(word1, dist, config) * halo_field(word2, dist, config)
     force = max(config.gravity_min_force, min(config.gravity_max_force, force))
 
     fx = force * dx / dist
@@ -122,8 +127,9 @@ def apply_phrase_impulse(word1: WordState, word2: WordState, config: PhysicsConf
     if dist == 0:
         return 0.0, 0.0
 
-    # Impulse = min(7, 0.015 * m1 * m2 * max(dist - 110, 0))
+    # Phrase attraction is bounded and attenuated by both halos.
     impulse_magnitude = config.phrase_impulse_factor * word1.mass * word2.mass * max(dist - config.phrase_target_distance, 0)
+    impulse_magnitude *= halo_field(word1, dist, config) * halo_field(word2, dist, config)
     impulse_magnitude = min(config.phrase_impulse_max, impulse_magnitude)
 
     fx = impulse_magnitude * dx / dist
@@ -151,29 +157,27 @@ def apply_repulsion(word1: WordState, word2: WordState, config: PhysicsConfig) -
     return fx, fy
 
 
-def run_physics_step(words: List[WordState], phrase_groups: List[List[WordState]], config: PhysicsConfig) -> None:
+def run_physics_step(words: List[WordState], phrase_groups: List[List[WordState]], config: PhysicsConfig, connection_strengths: Dict[Tuple[str, str], float] | None = None) -> None:
     """Run one step of physics simulation."""
     # Reset velocities for this step
     for word in words:
         word.vx = 0.0
         word.vy = 0.0
 
-    # Apply gravity between all pairs
+    connection_strengths = connection_strengths or {}
+    # Gravity exists only for observed connections. Unrelated vocabulary stays
+    # in separate local structures instead of collapsing into one cloud.
     for i in range(len(words)):
         for j in range(i + 1, len(words)):
+            key = tuple(sorted((words[i].word, words[j].word)))
+            if key not in connection_strengths:
+                continue
+            strength = max(0.0, min(1.0, connection_strengths[key] / 3.0))
             fx, fy = apply_gravity(words[i], words[j], config)
+            fx *= strength
+            fy *= strength
             words[i].apply_force(fx, fy)
             words[j].apply_force(-fx, -fy)
-
-    # Apply phrase impulses
-    for group in phrase_groups:
-        if len(group) < 2:
-            continue
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                fx, fy = apply_phrase_impulse(group[i], group[j], config)
-                group[i].apply_force(fx, fy)
-                group[j].apply_force(-fx, -fy)
 
     # Apply repulsion between all pairs
     for i in range(len(words)):
@@ -184,10 +188,10 @@ def run_physics_step(words: List[WordState], phrase_groups: List[List[WordState]
 
     # Step positions
     for word in words:
-        word.step(config.damping, (config.width, config.height))
+        word.step(config.damping, (config.width, config.height), config.boundary_margin)
 
 
-def run_simulation(words: List[WordState], phrase_groups: List[List[WordState]], config: PhysicsConfig) -> None:
+def run_simulation(words: List[WordState], phrase_groups: List[List[WordState]], config: PhysicsConfig, connection_strengths: Dict[Tuple[str, str], float] | None = None) -> None:
     """Run full physics simulation for configured steps."""
     for _ in range(config.steps):
-        run_physics_step(words, phrase_groups, config)
+        run_physics_step(words, phrase_groups, config, connection_strengths)
