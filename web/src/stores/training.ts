@@ -34,6 +34,17 @@ export const useTrainingStore = defineStore('training', () => {
   const concepts = ref<ConceptData[]>([])
   const stats = ref<Stats>({ concepts: 0, total_mass: 0, tokens: 0 })
 
+  async function responseError(response: Response, fallback: string): Promise<Error> {
+    const body = await response.text()
+    if (!body) return new Error(fallback)
+    try {
+      const payload = JSON.parse(body) as { detail?: string; error?: string }
+      return new Error(payload.detail || payload.error || fallback)
+    } catch {
+      return new Error(body.replace(/\s+/g, ' ').trim() || fallback)
+    }
+  }
+
   async function learn(text: string): Promise<TrainResult> {
     const response = await fetch(`${baseUrl}/v1/training/learn`, {
       method: 'POST',
@@ -42,8 +53,7 @@ export const useTrainingStore = defineStore('training', () => {
     })
 
     if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.detail || 'Training failed')
+      throw await responseError(response, 'Training failed')
     }
 
     const result = await response.json() as TrainResult
@@ -54,7 +64,7 @@ export const useTrainingStore = defineStore('training', () => {
 
   async function getSpace(): Promise<SpaceResult> {
     const response = await fetch(`${baseUrl}/v1/training/space`)
-    if (!response.ok) throw new Error('Failed to load space')
+    if (!response.ok) throw await responseError(response, 'Failed to load space')
     const result = await response.json() as SpaceResult
     concepts.value = result.concepts
     stats.value = result.stats
@@ -63,7 +73,7 @@ export const useTrainingStore = defineStore('training', () => {
 
   async function resetSpace(): Promise<ResetResult> {
     const response = await fetch(`${baseUrl}/v1/training/space`, { method: 'DELETE' })
-    if (!response.ok) throw new Error('Failed to reset space')
+    if (!response.ok) throw await responseError(response, 'Failed to reset space')
     const result = await response.json() as ResetResult
     concepts.value = result.concepts
     stats.value = result.stats

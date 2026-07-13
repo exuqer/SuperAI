@@ -1,53 +1,44 @@
-"""Persistent storage for the recursive nebula system."""
+"""Pytest configuration - patches database before any server imports."""
 
-import json
+import pytest
+import tempfile
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+# ============================================================
+# Test database setup - MUST run before server imports
+# ============================================================
 
-DB_PATH = Path(".superai/state.sqlite")
-SCHEMA_VERSION = 3
-
-
-def get_db_path() -> Path:
-    path = Path(DB_PATH) if isinstance(DB_PATH, str) else DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
+_test_db_path = None
 
 @contextmanager
-def get_connection():
-    conn = sqlite3.connect(get_db_path())
+def test_get_connection():
+    """Test-specific connection using temp database."""
+    global _test_db_path
+    if _test_db_path is None:
+        raise RuntimeError("Test database not initialized")
+    conn = sqlite3.connect(_test_db_path)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
     finally:
         conn.close()
 
-
-def init_db() -> None:
-    """Initialize database with new nebula schema."""
-    with get_connection() as conn:
+def test_init_db():
+    """Initialize test database with nebula schema."""
+    global _test_db_path
+    with test_get_connection() as conn:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        if version >= SCHEMA_VERSION and _current_schema_is_complete(conn):
-            return
-
-        if version >= SCHEMA_VERSION:
-            _migrate_current_schema(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            conn.commit()
+        if version >= 3:
             return
         
-        # Drop old tables if version < 3
         if version < 3:
             for table in ("concepts", "sessions", "words", "connections", "phrases", "training_stats"):
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
         
-        # ============================================================
-        # LAYERS - Scale layers
-        # ============================================================
+        # LAYERS
         conn.execute("""
             CREATE TABLE layers (
                 id INTEGER PRIMARY KEY,
@@ -61,9 +52,7 @@ def init_db() -> None:
         """)
         conn.execute("CREATE INDEX idx_layers_order ON layers(order_index)")
         
-        # ============================================================
-        # CLOUDS - Global nebula entities
-        # ============================================================
+        # CLOUDS
         conn.execute("""
             CREATE TABLE clouds (
                 id INTEGER PRIMARY KEY,
@@ -90,9 +79,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX idx_clouds_activated ON clouds(last_activated_at DESC)")
         conn.execute("CREATE UNIQUE INDEX idx_clouds_layer_name ON clouds(layer_id, canonical_name)")
         
-        # ============================================================
-        # SPACES - Local spaces inside host clouds
-        # ============================================================
+        # SPACES
         conn.execute("""
             CREATE TABLE spaces (
                 id INTEGER PRIMARY KEY,
@@ -112,9 +99,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX idx_spaces_layer ON spaces(layer_id)")
         conn.execute("CREATE INDEX idx_spaces_mode ON spaces(mode)")
         
-        # ============================================================
-        # CLOUD_PLACEMENTS - Local appearance of cloud in a space
-        # ============================================================
+        # CLOUD_PLACEMENTS
         conn.execute("""
             CREATE TABLE cloud_placements (
                 id INTEGER PRIMARY KEY,
@@ -142,9 +127,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX idx_placements_density ON cloud_placements(density DESC)")
         conn.execute("CREATE INDEX idx_placements_spatial ON cloud_placements(x, y)")
         
-        # ============================================================
-        # STRUCTURAL_COMPONENTS - Internal composition (technical, not semantic)
-        # ============================================================
+        # STRUCTURAL_COMPONENTS
         conn.execute("""
             CREATE TABLE structural_components (
                 id INTEGER PRIMARY KEY,
@@ -165,9 +148,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX idx_struct_child ON structural_components(child_cloud_id)")
         conn.execute("CREATE INDEX idx_struct_order ON structural_components(parent_cloud_id, position_index)")
         
-        # ============================================================
-        # ACTIVATION_EVENTS - Temporal activation log
-        # ============================================================
+        # ACTIVATION_EVENTS
         conn.execute("""
             CREATE TABLE activation_events (
                 id INTEGER PRIMARY KEY,
@@ -191,9 +172,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX idx_activation_time ON activation_events(timestamp)")
         conn.execute("CREATE INDEX idx_activation_context ON activation_events(context_window_id)")
         
-        # ============================================================
-        # COACTIVATION_STATS - Joint activation statistics (for physics)
-        # ============================================================
+        # COACTIVATION_STATS
         conn.execute("""
             CREATE TABLE coactivation_stats (
                 cloud_a_id INTEGER NOT NULL,
@@ -214,9 +193,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX idx_coact_layer ON coactivation_stats(layer_id)")
         conn.execute("CREATE INDEX idx_coact_score ON coactivation_stats(weighted_score DESC)")
         
-        # ============================================================
-        # CONDENSATION_CANDIDATES - Accumulating configurations for condensation
-        # ============================================================
+        # CONDENSATION_CANDIDATES
         conn.execute("""
             CREATE TABLE condensation_candidates (
                 id INTEGER PRIMARY KEY,
@@ -229,6 +206,8 @@ def init_db() -> None:
                 proposed_cloud_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'pending',
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY (source_layer_id) REFERENCES layers(id),
                 FOREIGN KEY (target_layer_id) REFERENCES layers(id),
                 FOREIGN KEY (proposed_cloud_id) REFERENCES clouds(id)
@@ -239,9 +218,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX idx_cond_hash ON condensation_candidates(signature_hash)")
         conn.execute("CREATE INDEX idx_cond_status ON condensation_candidates(status)")
         
-        # ============================================================
         # Insert default layers
-        # ============================================================
         default_layers = [
             (0, "signal", 0, 0.001, "signal", "{}"),
             (1, "character", 1, 0.01, "character", "{}"),
@@ -259,157 +236,60 @@ def init_db() -> None:
                 (name, idx, scale, ltype, cfg, now)
             )
         
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version = 3")
         conn.commit()
 
 
-def _current_schema_is_complete(conn: sqlite3.Connection) -> bool:
-    required_tables = {
-        "layers",
-        "clouds",
-        "spaces",
-        "cloud_placements",
-        "structural_components",
-        "activation_events",
-        "coactivation_stats",
-        "condensation_candidates",
-    }
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table'"
-    ).fetchall()
-    if not required_tables.issubset({row[0] for row in rows}):
-        return False
+# ============================================================
+# Patch server.database module
+# ============================================================
+import server.database as db_module
 
-    columns = {
-        row[1] for row in conn.execute(
-            "PRAGMA table_info(condensation_candidates)"
-        ).fetchall()
-    }
-    return {"created_at", "updated_at"}.issubset(columns)
+@contextmanager
+def patched_get_connection():
+    with test_get_connection() as conn:
+        yield conn
 
+def patched_get_db_path():
+    global _test_db_path
+    if _test_db_path is None:
+        raise RuntimeError("Test database not initialized")
+    return Path(_test_db_path)
 
-def _migrate_current_schema(conn: sqlite3.Connection) -> None:
-    """Apply additive migrations to databases created by an earlier MVP build."""
-    columns = {
-        row[1] for row in conn.execute(
-            "PRAGMA table_info(condensation_candidates)"
-        ).fetchall()
-    }
-    if "created_at" not in columns:
-        conn.execute("ALTER TABLE condensation_candidates ADD COLUMN created_at TEXT")
-        conn.execute(
-            "UPDATE condensation_candidates SET created_at = COALESCE(created_at, datetime('now'))"
-        )
-    if "updated_at" not in columns:
-        conn.execute("ALTER TABLE condensation_candidates ADD COLUMN updated_at TEXT")
-        conn.execute(
-            "UPDATE condensation_candidates SET updated_at = COALESCE(updated_at, datetime('now'))"
-        )
+def patched_init_db():
+    test_init_db()
 
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cond_created ON condensation_candidates(created_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cond_updated ON condensation_candidates(updated_at)")
+# Apply patches
+db_module.get_connection = patched_get_connection
+db_module.get_db_path = patched_get_db_path
+db_module.init_db = patched_init_db
 
 
 # ============================================================
-# Legacy compatibility functions (for gradual migration)
+# Also patch repository modules that import database functions
+# ============================================================
+import server.repositories.cloud_repository as repo_module
+repo_module.get_connection = patched_get_connection
+
+
+# ============================================================
+# Fixture
 # ============================================================
 
-def _unique_tokens(tokens: Iterable[str]) -> List[str]:
-    return list(dict.fromkeys(token for token in tokens if token))
-
-
-def ensure_concepts(tokens: Sequence[str], initial_position: Tuple[float, float]) -> None:
-    """Legacy: ensure concepts exist. Maps to character/word_form layers."""
-    # This is kept for backward compatibility during migration
-    # New code should use CloudRepository directly
-    unique_tokens = _unique_tokens(tokens)
-    if not unique_tokens:
-        return
+@pytest.fixture(autouse=True)
+def setup_db():
+    """Setup fresh database for each test."""
+    global _test_db_path
     
-    encoded_position = json.dumps(list(initial_position), separators=(",", ":"))
-    with get_connection() as conn:
-        for token in unique_tokens:
-            # Try to find in word_form layer first
-            layer_row = conn.execute("SELECT id FROM layers WHERE name = 'word_form'").fetchone()
-            if layer_row:
-                layer_id = layer_row["id"]
-                row = conn.execute(
-                    "SELECT id FROM clouds WHERE layer_id = ? AND canonical_name = ?",
-                    (layer_id, token)
-                ).fetchone()
-                if row:
-                    conn.execute(
-                        "UPDATE clouds SET mass = mass + 0.1, observation_count = observation_count + 1 WHERE id = ?",
-                        (row["id"],)
-                    )
-                else:
-                    conn.execute(
-                        """INSERT INTO clouds 
-                        (layer_id, cloud_type, canonical_name, mass, density, radius, stability, activation, 
-                         observation_count, created_at, updated_at, metadata_json)
-                        VALUES (?, 'word', ?, 1.0, 1.0, 10.0, 0.1, 0.0, 1, ?, ?, '{}')""",
-                        (layer_id, token, encoded_position, now(), now())
-                    )
-        conn.commit()
-
-
-def get_concepts() -> List[Dict]:
-    """Legacy: get all concepts. Returns word_form clouds for compatibility."""
-    with get_connection() as conn:
-        layer_row = conn.execute("SELECT id FROM layers WHERE name = 'word_form'").fetchone()
-        if not layer_row:
-            return []
-        rows = conn.execute(
-            "SELECT id, canonical_name, metadata_json, mass FROM clouds WHERE layer_id = ? ORDER BY mass DESC",
-            (layer_row["id"],)
-        ).fetchall()
-    concepts = []
-    for row in rows:
-        metadata = json.loads(row["metadata_json"] or "{}")
-        position = metadata.get("position", [400.0, 300.0])
-        concepts.append({
-            "id": int(row["id"]),
-            "token": row["canonical_name"],
-            "position": [float(v) for v in position],
-            "mass": float(row["mass"]),
-        })
-    return concepts
-
-
-def update_concepts(concepts: Iterable[Tuple[int, Sequence[float], float]]) -> None:
-    """Legacy: update concept positions and masses."""
-    with get_connection() as conn:
-        for concept_id, position, mass in concepts:
-            metadata_json = json.dumps({"position": list(position)}, separators=(",", ":"))
-            conn.execute(
-                "UPDATE clouds SET mass = ?, metadata_json = ?, updated_at = ? WHERE id = ?",
-                (float(mass), metadata_json, now(), int(concept_id))
-            )
-        conn.commit()
-
-
-def get_stats() -> Dict[str, float | int]:
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) AS concepts, COALESCE(SUM(mass), 0) AS total_mass FROM clouds"
-        ).fetchone()
-    concepts = int(row["concepts"])
-    total_mass = round(float(row["total_mass"]), 3)
-    return {"concepts": concepts, "total_mass": total_mass, "tokens": concepts}
-
-
-def reset_space() -> None:
-    with get_connection() as conn:
-        conn.execute("DELETE FROM cloud_placements")
-        conn.execute("DELETE FROM structural_components")
-        conn.execute("DELETE FROM activation_events")
-        conn.execute("DELETE FROM coactivation_stats")
-        conn.execute("DELETE FROM condensation_candidates")
-        conn.execute("DELETE FROM spaces")
-        conn.execute("DELETE FROM clouds")
-        conn.commit()
-
-
-def now() -> str:
-    from datetime import datetime
-    return datetime.utcnow().isoformat()
+    with tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False) as f:
+        temp_path = f.name
+    
+    _test_db_path = temp_path
+    test_init_db()
+    
+    yield
+    
+    # Cleanup
+    _test_db_path = None
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
