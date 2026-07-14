@@ -120,11 +120,17 @@ export const useNebulaStore = defineStore('nebula', () => {
     })
   })
   
-  const stats = computed(() => ({
-    concepts: clouds.value.length,
-    total_mass: clouds.value.reduce((sum, c) => sum + c.mass, 0),
-    tokens: new Set(clouds.value.map(c => c.token)).size
-  }))
+  const stats = computed(() => {
+    const currentLayer = currentSpace.value?.layerId ?? 0
+    const current = clouds.value.filter(cloud => cloud.layerId === currentLayer)
+    return {
+      concepts: current.length,
+      total_mass: current.reduce((sum, cloud) => sum + cloud.mass, 0),
+      tokens: new Set(current.map(cloud => cloud.token)).size,
+      internal_count: clouds.value.length,
+      internal_mass: clouds.value.reduce((sum, cloud) => sum + cloud.mass, 0),
+    }
+  })
   
   // Actions
   function setClouds(newClouds: Cloud[]) {

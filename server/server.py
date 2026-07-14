@@ -3,6 +3,8 @@
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 import uuid
+import asyncio
+import os
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,13 +12,18 @@ from pydantic import BaseModel, Field
 
 from server.database import init_db, get_stats, reset_space, get_connection
 from server.training import get_training_manager, TrainingManager
-from server.repositories.cloud_repository import CloudRepository, SpaceRepository, LayerRepository
+from server.repositories.cloud_repository import CloudRepository, SpaceRepository, LayerRepository, StructuralComponentRepository
 from server.models.cloud import Cloud
 from server.services.zoom import zoom_service
 from server.services.lexeme import lexeme_service
 from server.tokenizer import tokenize_hierarchical, TokenizationResult
 from server.physics import PhysicsConfig
 import json
+from server.services.chat_session import chat_service
+from server.v2.hive import V2HiveService
+from server.v2.repository import V2Repository
+from server.v2.training import TrainingPipelineV2
+from server.v2.validation import ModelInvariantValidator
 
 
 @asynccontextmanager
@@ -39,6 +46,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def model_schema_version() -> str:
+    value = os.getenv("MODEL_SCHEMA_VERSION", "v2").casefold()
+    return value if value in {"v1", "v2"} else "v1"
 
 
 # ============================================================
@@ -134,13 +146,224 @@ class ZoomOutRequest(BaseModel):
     session_id: str
 
 
+class ChatMessageRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+class ChatSessionResponse(BaseModel):
+    session: Dict[str, Any]
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    hive: List[Dict[str, Any]] = Field(default_factory=list)
+    turn: Optional[Dict[str, Any]] = None
+    swarm: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HiveCreateRequest(BaseModel):
+    max_cells: int = Field(default=24, ge=1, le=128)
+
+
+class HiveQueryRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
 # ============================================================
 # Health & Legacy Endpoints
 # ============================================================
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.3.0"}
+    return {"status": "ok", "version": "0.3.0", "model_schema_version": model_schema_version()}
+
+
+# ============================================================
+# Normalized Cloud / Space / Placement V2 API
+# ============================================================
+
+@app.post("/api/v2/training/learn")
+async def train_v2(request: TrainRequest):
+    return TrainingPipelineV2().train(request.text)
+
+
+@app.get("/api/v2/field")
+async def get_field_v2():
+    repository = V2Repository()
+    with repository.transaction() as conn:
+        space = repository.ensure_space(conn, "global_field", seed=1337)
+    return repository.normalized_space(int(space["id"]))
+
+
+@app.get("/api/v2/clouds/{cloud_id}")
+async def get_cloud_v2(cloud_id: int):
+    cloud = V2Repository().get_cloud(cloud_id)
+    if not cloud:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="cloud not found")
+    return {"cloud": cloud}
+
+
+@app.get("/api/v2/clouds/{cloud_id}/structure")
+async def get_cloud_structure_v2(cloud_id: int):
+    repository = V2Repository()
+    with repository.transaction() as conn:
+        cloud = conn.execute("SELECT * FROM v2_clouds WHERE id = ?", (cloud_id,)).fetchone()
+        if not cloud:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="cloud not found")
+        components = [dict(row) for row in conn.execute(
+            """SELECT sc.*, child.canonical_name AS child_name, child.cloud_type AS child_type
+            FROM v2_structural_components sc JOIN v2_clouds child ON child.id = sc.child_cloud_id
+            WHERE sc.parent_cloud_id = ? ORDER BY sc.component_index""", (cloud_id,)
+        ).fetchall()]
+    return {"cloud": dict(cloud), "structural_components": components}
+
+
+@app.get("/api/v2/spaces/{space_id}")
+async def get_space_v2(space_id: int):
+    try:
+        return V2Repository().normalized_space(space_id)
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="space not found")
+
+
+@app.get("/api/v2/scenes/{scene_id}")
+async def get_scene_v2(scene_id: int):
+    repository = V2Repository()
+    with repository.transaction() as conn:
+        scene = conn.execute("SELECT * FROM v2_scenes WHERE cloud_id = ?", (scene_id,)).fetchone()
+        if not scene:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="scene not found")
+        components = [dict(row) for row in conn.execute(
+            """SELECT sc.*, wf.canonical_name AS word_form, lx.canonical_name AS lexeme
+            FROM v2_scene_components sc
+            JOIN v2_clouds wf ON wf.id = sc.word_form_cloud_id
+            JOIN v2_clouds lx ON lx.id = sc.lexeme_cloud_id
+            WHERE sc.scene_cloud_id = ? ORDER BY sc.token_index""", (scene_id,)
+        ).fetchall()]
+    return {"scene": dict(scene), "scene_components": components}
+
+
+@app.post("/api/v2/hives")
+async def create_hive_v2(request: HiveCreateRequest):
+    return V2HiveService().create(request.max_cells)
+
+
+@app.post("/api/v2/hives/{hive_id}/query/preview")
+async def preview_hive_query_v2(hive_id: str, request: HiveQueryRequest):
+    try:
+        return V2HiveService().preview(hive_id, request.text)
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="hive not found")
+
+
+@app.post("/api/v2/hives/{hive_id}/query")
+async def query_hive_v2(hive_id: str, request: HiveQueryRequest):
+    try:
+        return V2HiveService().query(hive_id, request.text)
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="hive not found")
+
+
+@app.get("/api/v2/hives/{hive_id}")
+async def get_hive_v2(hive_id: str):
+    try:
+        return V2HiveService().get_hive(hive_id)
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="hive not found")
+
+
+@app.get("/api/v2/hives/{hive_id}/resonance-events")
+async def get_hive_resonance_events_v2(hive_id: str):
+    try:
+        return {"events": V2HiveService().service.events(hive_id)}
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="hive not found")
+
+
+@app.get("/api/v2/hives/{hive_id}/search-decisions")
+async def get_hive_search_decisions_v2(hive_id: str):
+    try:
+        return {"decisions": V2HiveService().service.decisions(hive_id)}
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="hive not found")
+
+
+@app.get("/api/v2/hives/{hive_id}/cells/{cell_id}/matches")
+async def get_hive_cell_matches_v2(hive_id: str, cell_id: str):
+    try:
+        return {"matches": V2HiveService().service.matches(hive_id, cell_id)}
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="hive not found")
+
+
+@app.get("/api/v2/debug/invariants")
+async def get_v2_invariants():
+    return ModelInvariantValidator().validate()
+
+
+@app.post("/api/chat/sessions", response_model=ChatSessionResponse)
+async def create_chat_session():
+    return ChatSessionResponse(**chat_service.create_session())
+
+
+@app.get("/api/chat/sessions/{session_id}", response_model=ChatSessionResponse)
+async def get_chat_session(session_id: str):
+    try:
+        return ChatSessionResponse(**chat_service.get_state(session_id))
+    except KeyError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="chat session not found")
+
+
+@app.post("/api/chat/sessions/{session_id}/messages")
+async def send_chat_message(session_id: str, request: ChatMessageRequest):
+    try:
+        return chat_service.start_message(session_id, request.text)
+    except (KeyError, ValueError):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="invalid chat session or message")
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+async def delete_chat_session(session_id: str):
+    chat_service.reset(session_id)
+    return {"success": True}
+
+
+@app.get("/api/chat/components")
+async def inspect_chat_component(token: str = Query(..., min_length=1)):
+    """Resolve a hive composition component to its real field hierarchy."""
+    cloud_repo = CloudRepository()
+    layer_repo = LayerRepository()
+    component_repo = StructuralComponentRepository()
+    matches: List[Dict[str, Any]] = []
+    selected = None
+    for layer_name in ("word_form", "lexeme", "concept", "scene"):
+        layer = layer_repo.get_by_name(layer_name)
+        if not layer:
+            continue
+        cloud = cloud_repo.get_by_canonical_name(layer.id, token.casefold())
+        if not cloud:
+            continue
+        item = {"id": cloud.id, "label": cloud.canonical_name, "layer": layer_name, "type": cloud.cloud_type, "mass": cloud.mass, "activation": cloud.activation}
+        matches.append(item)
+        if selected is None or layer_name == "word_form":
+            selected = cloud
+    children: List[Dict[str, Any]] = []
+    if selected:
+        for component in component_repo.get_children(selected.id):
+            child = cloud_repo.get_by_id(component.child_cloud_id)
+            if child:
+                child_layer = layer_repo.get_by_id(child.layer_id)
+                children.append({"id": child.id, "label": child.canonical_name, "layer": child_layer.name if child_layer else "", "weight": component.weight, "position": component.position_index})
+    return {"token": token, "matches": matches, "selected": next((item for item in matches if selected and item["id"] == selected.id), None), "children": children}
 
 
 @app.post("/api/train", response_model=TrainResponse)
@@ -912,6 +1135,31 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+@app.websocket("/ws/chat/{session_id}")
+async def websocket_chat(websocket: WebSocket, session_id: str):
+    """Stream the actual bee algorithm and hive deposits for one chat session."""
+    try:
+        state = chat_service.get_state(session_id)
+    except KeyError:
+        await websocket.close(code=4404)
+        return
+    await websocket.accept()
+    async def listener(_session_id: str, event: Dict[str, Any]) -> None:
+        await websocket.send_json(event)
+
+    chat_service.subscribe(session_id, listener)
+    try:
+        await websocket.send_json({"type": "session_state", "sequence": 0, "payload": state})
+        while True:
+            message = await websocket.receive_json()
+            if message.get("type") == "state":
+                await websocket.send_json({"type": "session_state", "sequence": 0, "payload": chat_service.get_state(session_id)})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        chat_service.unsubscribe(session_id, listener)
 
 
 @app.websocket("/ws/simulation")

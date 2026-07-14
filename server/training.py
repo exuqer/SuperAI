@@ -771,6 +771,8 @@ class TrainingManager:
     def reset_space(self) -> Dict[str, Any]:
         """Reset all learning."""
         reset_space()
+        from server.v2.migration import clear_model_v2
+        clear_model_v2()
         return {"success": True, "concepts": [], "stats": {"concepts": 0, "total_mass": 0, "tokens": 0}}
 
 

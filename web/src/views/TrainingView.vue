@@ -7,12 +7,12 @@
           <p class="eyebrow">Concept field lab</p>
           <h1>SuperAI <span>/ Пространство понятий</span></h1>
         </div>
+        <RouterLink class="chat-link" to="/">Чат и улей</RouterLink>
       </div>
       <p class="subtitle">Понятия существуют как области плотности в непрерывном гравитационном поле.</p>
       <div class="stats-bar">
-        <span class="stat"><strong>{{ stats.concepts }}</strong> понятий</span>
-        <span class="stat"><strong>{{ stats.total_mass.toFixed(1) }}</strong> масса</span>
-        <span class="stat"><strong>{{ stats.tokens }}</strong> токенов</span>
+        <span class="stat">слой: <strong>{{ stats.concepts }}</strong> объектов · <strong>{{ stats.total_mass.toFixed(1) }}</strong> масса</span>
+        <span class="stat">внутри: <strong>{{ stats.internal_count }}</strong> объектов · <strong>{{ stats.internal_mass.toFixed(1) }}</strong> масса</span>
       </div>
     </header>
 
@@ -65,6 +65,17 @@
             <button class="btn btn-danger" @click="handleReset" :disabled="loading">Очистить</button>
           </div>
           <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
+          <section class="server-data-section" aria-labelledby="server-data-title">
+            <div class="server-data-heading">
+              <div>
+                <p class="eyebrow">04 / Server data</p>
+                <h3 id="server-data-title">Данные на сервере</h3>
+              </div>
+              <span class="server-data-format">JSON</span>
+            </div>
+            <p class="server-data-caption">Текущее содержимое ответов API после обучения.</p>
+            <pre class="server-data" aria-label="Данные, полученные с сервера">{{ serverDataJson }}</pre>
+          </section>
         </div>
         <div v-else class="collapsed-label">Ввод</div>
       </aside>
@@ -215,6 +226,11 @@ const rendererHeight = ref(700)
 
 // Selected item for inspector
 const selectedItem = ref<any>(null)
+const serverData = ref<{ space: any; hierarchy: any }>({
+  space: null,
+  hierarchy: { scenes: [], structural_spaces: [], lexemes: [], semantic_overlays: [] },
+})
+const serverDataJson = computed(() => JSON.stringify(serverData.value, null, 2))
 
 // Fetch hierarchy data from API
 async function fetchHierarchy() {
@@ -223,11 +239,14 @@ async function fetchHierarchy() {
     if (response.ok) {
       const data = await response.json()
       hierarchyData.value = data
+      serverData.value = { ...serverData.value, hierarchy: data }
       displayedConcepts.value = []
+      return data
     }
   } catch (error) {
     console.error('Failed to fetch hierarchy:', error)
   }
+  return null
 }
 
 async function loadSpace() {
@@ -259,7 +278,8 @@ async function loadSpace() {
     }))
     nebulaStore.setClouds(clouds)
     nebulaStore.setCurrentSpace(null)
-    await fetchHierarchy()
+    const hierarchy = await fetchHierarchy()
+    serverData.value = { space: result, hierarchy: hierarchy ?? serverData.value.hierarchy }
   } catch (error: any) {
     nebulaStore.setError(error.message || 'Не удалось загрузить пространство')
   } finally {
@@ -296,7 +316,8 @@ async function handleLearn() {
     }))
     nebulaStore.setClouds(clouds)
     inputText.value = ''
-    await fetchHierarchy()
+    const hierarchy = await fetchHierarchy()
+    serverData.value = { space: result, hierarchy: hierarchy ?? serverData.value.hierarchy }
   } catch (error: any) {
     nebulaStore.setError(error.message || 'Ошибка обучения')
   } finally {
@@ -309,10 +330,11 @@ async function handleReset() {
   nebulaStore.setLoading(true)
   nebulaStore.clearError()
   try {
-    await trainingStore.resetSpace()
+    const result = await trainingStore.resetSpace()
     nebulaStore.reset()
     displayedConcepts.value = []
     hierarchyData.value = { scenes: [], semantic_overlays: [] }
+    serverData.value = { space: result, hierarchy: hierarchyData.value }
   } catch (error: any) {
     nebulaStore.setError(error.message || 'Ошибка сброса')
   } finally {
@@ -408,6 +430,8 @@ onMounted(loadSpace)
 .training-view { display: flex; flex-direction: column; min-height: 100vh; color: #eef4ff; }
 .header { display: grid; gap: .7rem; padding: 2.1rem clamp(1.1rem, 4vw, 3rem) 1.35rem; border-bottom: 1px solid rgba(168,190,228,.14); background: rgba(9,17,31,.55); }
 .brand-line { display: flex; align-items: center; gap: .85rem; }
+.chat-link { margin-left: auto; padding: .5rem .75rem; border: 1px solid rgba(118,232,204,.35); border-radius: .55rem; color: #76e8cc; text-decoration: none; font-size: .78rem; font-weight: 700; }
+.chat-link:hover { color: #061325; background: #76e8cc; }
 .brand-mark { display: grid; place-items: center; width: 2.55rem; height: 2.55rem; border-radius: .75rem; color: #061325; background: linear-gradient(135deg,#76e8cc,#6fa4ff); font-weight: 900; font-size: 1.3rem; }
 .eyebrow { margin: 0 0 .25rem; color: #83b9ff; font-size: .68rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 h1, h2, h3, p { margin-top: 0; } h1 { margin-bottom: 0; font-size: clamp(1.5rem,3vw,2rem); letter-spacing: -.04em; } h1 span { color: #8fa2c1; font-weight: 500; } h2 { margin: 0; font-size: 1rem; }
@@ -448,6 +472,12 @@ h1, h2, h3, p { margin-top: 0; } h1 { margin-bottom: 0; font-size: clamp(1.5rem,
 label { display: block; margin-bottom: .45rem; color: #d5e0f3; font-size: .8rem; font-weight: 650; }
 textarea { width: 100%; min-height: 11rem; resize: vertical; border: 1px solid rgba(168,190,228,.25); border-radius: .65rem; color: #eff5ff; background: rgba(5,14,29,.72); padding: .8rem; line-height: 1.5; } textarea::placeholder { color: #71839e; }
 .hint { margin: .45rem 0 1rem; color: #71839e; font-size: .72rem; } .input-actions { display: flex; gap: .6rem; } .btn { flex: 1; min-height: 2.65rem; border: 0; border-radius: .65rem; color: #f6f9ff; font-weight: 700; cursor: pointer; transition: .15s; } .btn:disabled { opacity: .5; cursor: not-allowed; } .btn-primary { background: #2366dd; } .btn-primary:hover:not(:disabled) { background: #3478ef; } .btn-danger { background: #963c50; } .btn-danger:hover:not(:disabled) { background: #b94c61; }
+.server-data-section { margin-top: 1.35rem; padding-top: 1.1rem; border-top: 1px solid rgba(168,190,228,.14); }
+.server-data-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .6rem; }
+.server-data-heading h3 { margin: 0; font-size: .95rem; }
+.server-data-format { padding: .2rem .4rem; border: 1px solid rgba(118,232,204,.25); border-radius: .35rem; color: #76e8cc; font-size: .62rem; font-weight: 800; letter-spacing: .08em; }
+.server-data-caption { margin: .55rem 0 .7rem; color: #8196b8; font-size: .7rem; line-height: 1.4; }
+.server-data { max-height: 22rem; margin: 0; overflow: auto; padding: .75rem; border: 1px solid rgba(168,190,228,.2); border-radius: .55rem; color: #b9d2f4; background: rgba(5,14,29,.82); font: .65rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .spinner { display: inline-block; width: .9rem; height: .9rem; margin-right: .4rem; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 .status-dot, .live-badge i { display: inline-block; width: .55rem; height: .55rem; border-radius: 50%; background: #53627a; } .status-dot.active, .live-badge i { background: #76e8cc; box-shadow: 0 0 10px #76e8cc; } .live-badge { color: #76e8cc; font-size: .72rem; } .live-badge i { margin-right: .35rem; }
 .error-message { margin: .8rem 0 0; padding: .65rem .75rem; border: 1px solid rgba(255,126,139,.4); border-radius: .55rem; color: #ffd2d9; background: rgba(126,33,51,.3); font-size: .78rem; }

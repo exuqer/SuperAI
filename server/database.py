@@ -28,25 +28,79 @@ def get_connection():
 
 
 def init_db() -> None:
-    """Initialize database with new nebula schema."""
+    """Initialize the legacy schema without destructively replacing stored data."""
     with get_connection() as conn:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-
-        if version != SCHEMA_VERSION:
-            conn.execute("PRAGMA foreign_keys = OFF")
-            tables = conn.execute(
-                """SELECT name FROM sqlite_master
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"""
-            ).fetchall()
-            for table in tables:
-                name = str(table["name"]).replace('"', '""')
-                conn.execute(f'DROP TABLE IF EXISTS "{name}"')
 
         _ensure_base_tables(conn)
         _add_lexeme_tables(conn)
         _add_lexeme_layer(conn)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        _add_chat_tables(conn)
+        if version < SCHEMA_VERSION:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
+
+
+def _add_chat_tables(conn: sqlite3.Connection) -> None:
+    """Persistent chat sessions, swarm turns, events and working-memory cells."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            turn_index INTEGER NOT NULL DEFAULT 0,
+            max_cells INTEGER NOT NULL DEFAULT 24
+        );
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+            text TEXT NOT NULL,
+            turn_index INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, turn_index);
+        CREATE TABLE IF NOT EXISTS swarm_turns (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            iteration INTEGER NOT NULL DEFAULT 0,
+            goal_json TEXT NOT NULL DEFAULT '{}',
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_swarm_turns_session ON swarm_turns(session_id, created_at);
+        CREATE TABLE IF NOT EXISTS swarm_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            UNIQUE(turn_id, sequence),
+            FOREIGN KEY (turn_id) REFERENCES swarm_turns(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS hive_cells (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            composition_json TEXT NOT NULL DEFAULT '{}',
+            x REAL NOT NULL DEFAULT 0.0,
+            y REAL NOT NULL DEFAULT 0.0,
+            gravity REAL NOT NULL DEFAULT 0.0,
+            visits INTEGER NOT NULL DEFAULT 0,
+            source_id TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_hive_cells_session ON hive_cells(session_id, gravity DESC);
+        """
+    )
 
 
 def _ensure_base_tables(conn: sqlite3.Connection) -> None:

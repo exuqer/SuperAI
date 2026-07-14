@@ -18,12 +18,12 @@ start "superai-backend" cmd /c "python -m uvicorn server.server:app --host 127.0
 
 echo 🚀 Запускаю фронтенд...
 cd /d "%FRONTEND_DIR%"
-start "superai-frontend" cmd /c "npm run dev"
+start "superai-frontend" cmd /c "npm run dev:frontend"
 
 echo.
 echo ═══════════════════════════════════════════════
 echo   Бекенд:  http://127.0.0.1:%BACKEND_PORT%
-echo   Фронтенд: http://localhost:3000
+echo   Фронтенд: http://localhost:3010
 echo ═══════════════════════════════════════════════
 echo   Закрой окна cmd чтобы остановить.
 echo.

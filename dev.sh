@@ -39,13 +39,13 @@ BACKEND_PID=$!
 # ---- Фронтенд (Vite / Vue) ----
 echo "🚀 Запускаю фронтенд..."
 cd "$FRONTEND_DIR"
-npm run dev &
+npm run dev:frontend &
 FRONTEND_PID=$!
 
 echo ""
 echo "═══════════════════════════════════════════════"
 echo "  Бекенд:  http://127.0.0.1:$BACKEND_PORT"
-echo "  Фронтенд: http://localhost:3000"
+echo "  Фронтенд: http://localhost:3010"
 echo "═══════════════════════════════════════════════"
 echo "  Нажми Ctrl+C чтобы остановить всё."
 echo ""

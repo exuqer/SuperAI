@@ -46,6 +46,16 @@
 
       <rect width="100%" height="100%" fill="#071321" />
       <g :transform="worldTransform">
+        <g class="parent-space-halos" :opacity="parentHaloOpacity">
+          <circle
+            v-for="scene in scenes"
+            :key="`halo:${scene.id}`"
+            :cx="scene.x"
+            :cy="scene.y"
+            :r="scene.radius * 1.38"
+            fill="url(#scene-nebula)"
+          />
+        </g>
         <g class="scene-layer" :opacity="sceneOpacity">
           <g
             v-for="scene in scenes"
@@ -59,8 +69,17 @@
             @click.stop="select(scene)"
           >
             <circle :r="scene.radius" fill="url(#scene-nebula)" />
-            <circle class="mass-center" :r="Math.max(5, Math.min(13, 4 + Math.sqrt(scene.mass) * 2))" />
-            <text v-if="sceneLabelOpacity > 0.03" :opacity="sceneLabelOpacity" text-anchor="middle" :y="-scene.radius * .18">
+            <circle
+              v-for="lobe in cloudLobes(scene)"
+              :key="lobe.key"
+              :cx="lobe.x * scene.radius"
+              :cy="lobe.y * scene.radius"
+              :r="lobe.radius * scene.radius"
+              fill="url(#scene-nebula)"
+              :opacity="lobe.opacity"
+            />
+            <circle class="mass-center" :opacity="topCoreOpacity" :r="Math.max(5, Math.min(13, 4 + Math.sqrt(scene.mass) * 2))" />
+            <text v-if="sceneLabelOpacity > 0.03" :opacity="sceneLabelOpacity" text-anchor="middle" :y="-scene.radius * .18" :style="{ fontSize: labelSize(13) }">
               {{ scene.token }}
             </text>
           </g>
@@ -79,7 +98,17 @@
             @click.stop="select(concept)"
           >
             <circle :r="concept.radius" fill="url(#concept-nebula)" />
-            <text v-if="semanticLabelOpacity > .03" :opacity="semanticLabelOpacity" text-anchor="middle" :y="-concept.radius * .38">
+            <circle
+              v-for="lobe in cloudLobes(concept)"
+              :key="lobe.key"
+              :cx="lobe.x * concept.radius"
+              :cy="lobe.y * concept.radius"
+              :r="lobe.radius * concept.radius"
+              fill="url(#concept-nebula)"
+              :opacity="lobe.opacity"
+            />
+            <circle class="semantic-center" :opacity="topCoreOpacity" :r="Math.max(2.5, Math.min(6, 2 + Math.sqrt(concept.mass) * .8))" />
+            <text v-if="semanticLabelOpacity > .03" :opacity="semanticLabelOpacity" text-anchor="middle" :y="-concept.radius * .38" :style="{ fontSize: labelSize(11) }">
               {{ concept.token }}
             </text>
           </g>
@@ -91,15 +120,15 @@
             :key="word.key"
             class="word-node"
             :class="{ selected: selectedKey === `word_form:${word.key}` }"
-            :transform="`translate(${word.x} ${word.y})`"
+            :transform="nodeTransform(wordPosition(word))"
             @pointerenter="hover(word)"
             @pointerleave="hover(null)"
             @pointerdown.stop
             @click.stop="select(word)"
           >
             <circle :r="word.radius * 1.75" fill="url(#word-nebula)" />
-            <circle class="word-center" :r="Math.max(3.2, Math.min(8, 2.5 + Math.sqrt(word.mass)))" />
-            <text :opacity="wordLabelOpacity" text-anchor="middle" :y="-word.radius * .54">{{ word.token }}</text>
+            <circle class="word-center" :opacity="wordCoreOpacity" :r="Math.max(3.2, Math.min(8, 2.5 + Math.sqrt(word.mass)))" />
+            <text :opacity="wordLabelOpacity" text-anchor="middle" :y="-word.radius * .54" :style="{ fontSize: labelSize(12) }">{{ word.token }}</text>
           </g>
         </g>
 
@@ -108,14 +137,14 @@
             v-for="character in mergedCharacters"
             :key="character.key"
             class="character-node"
-            :transform="`translate(${character.x} ${character.y})`"
+            :transform="nodeTransform(characterPosition(character))"
             @pointerenter="hover(character)"
             @pointerleave="hover(null)"
             @pointerdown.stop
             @click.stop="select(character)"
           >
             <circle :r="Math.max(5, character.radius * 1.8)" fill="url(#character-nebula)" />
-            <text text-anchor="middle" dominant-baseline="central">{{ character.token }}</text>
+            <text :opacity="characterLabelOpacity" text-anchor="middle" dominant-baseline="central" :style="{ fontSize: labelSize(8) }">{{ character.token }}</text>
           </g>
         </g>
 
@@ -129,7 +158,7 @@
             @click.stop="select(concept)"
           >
             <circle :r="concept.radius" fill="url(#concept-nebula)" />
-            <text text-anchor="middle">{{ concept.token }}</text>
+            <text :opacity="semanticLabelOpacity" text-anchor="middle" :style="{ fontSize: labelSize(11) }">{{ concept.token }}</text>
           </g>
         </g>
       </g>
@@ -147,12 +176,12 @@
       <span><i class="concept-swatch"></i>понятие</span>
       <span><i class="character-swatch"></i>буква</span>
     </div>
-    <div class="lod-indicator">{{ lodLabel }} · {{ Math.round(zoom * 100) }}%</div>
+    <div class="lod-indicator">{{ lodLabel }} · depth {{ semanticDepth.toFixed(2) }} · mix {{ Math.round(levelMix * 100) }}% · {{ Math.round(zoom * 100) }}%</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 interface CharacterItem {
   id: number
@@ -263,6 +292,7 @@ const isPanning = ref(false)
 const panStart = ref({ x: 0, y: 0 })
 const panOrigin = ref({ x: 0, y: 0 })
 const selectedKey = ref('')
+const selectedItem = ref<any | null>(null)
 let resizeObserver: ResizeObserver | null = null
 
 const scenes = computed(() => props.hierarchy.scenes ?? [])
@@ -272,7 +302,7 @@ const worldTransform = computed(() =>
 )
 
 const fallbackConcepts = computed(() => props.concepts
-  .filter(item => !item.layer || item.layer === 'concept')
+  .filter(item => (!item.layer || item.layer === 'concept') && item.cloud_type !== 'character')
   .map(item => ({
     ...item,
     x: item.x ?? item.position?.[0] ?? props.width / 2,
@@ -327,19 +357,82 @@ function smoothstep(edge0: number, edge1: number, value: number) {
   return t * t * (3 - 2 * t)
 }
 
-const sceneOpacity = computed(() => Math.max(.09, 1 - smoothstep(1.15, 2.8, zoom.value)))
-const sceneLabelOpacity = computed(() => 1 - smoothstep(1, 2.2, zoom.value))
-const wordOpacity = computed(() => smoothstep(.75, 1.65, zoom.value) * (1 - .72 * smoothstep(6, 9, zoom.value)))
-const wordLabelOpacity = computed(() => smoothstep(1.05, 1.8, zoom.value) * (1 - smoothstep(6, 9, zoom.value)))
-const semanticOpacity = computed(() => .2 + .6 * smoothstep(.55, 1.4, zoom.value) * (1 - .7 * smoothstep(4.5, 8, zoom.value)))
-const semanticLabelOpacity = computed(() => smoothstep(.8, 1.5, zoom.value) * (1 - smoothstep(4, 7, zoom.value)))
-const characterOpacity = computed(() => smoothstep(4, 7, zoom.value))
+const layerDepth = { scene: 0, concept: 1, word_form: 2, character: 3 }
+const layerVisibilityRanges = {
+  scene: { enter: 0, exitStart: .72, exitEnd: 1.42 },
+  concept: { enterStart: .62, enterEnd: 1.22, exitStart: 1.62, exitEnd: 2.18 },
+  word_form: { enterStart: 1.35, enterEnd: 1.92, exitStart: 2.36, exitEnd: 2.82 },
+  character: { enterStart: 2.3, enterEnd: 2.9, exitEnd: 3 },
+}
+const semanticDepth = computed(() => Math.max(0, Math.min(3, Math.log2(zoom.value) + 1)))
+const levelMix = computed(() => {
+  const lower = Math.floor(semanticDepth.value)
+  return smoothstep(lower + .28, lower + .72, semanticDepth.value)
+})
+const sceneOpacity = computed(() => 1 - smoothstep(layerVisibilityRanges.scene.exitStart, layerVisibilityRanges.scene.exitEnd, semanticDepth.value) * .92)
+const sceneLabelOpacity = computed(() => 1 - smoothstep(.48, 1.03, semanticDepth.value))
+const semanticOpacity = computed(() => smoothstep(layerVisibilityRanges.concept.enterStart, layerVisibilityRanges.concept.enterEnd, semanticDepth.value) * (1 - smoothstep(layerVisibilityRanges.concept.exitStart, layerVisibilityRanges.concept.exitEnd, semanticDepth.value) * .88))
+const semanticLabelOpacity = computed(() => smoothstep(.92, 1.38, semanticDepth.value) * (1 - smoothstep(1.52, 1.9, semanticDepth.value)))
+const wordOpacity = computed(() => smoothstep(layerVisibilityRanges.word_form.enterStart, layerVisibilityRanges.word_form.enterEnd, semanticDepth.value) * (1 - smoothstep(layerVisibilityRanges.word_form.exitStart, layerVisibilityRanges.word_form.exitEnd, semanticDepth.value) * .9))
+const wordLabelOpacity = computed(() => smoothstep(1.68, 2.12, semanticDepth.value) * (1 - smoothstep(2.3, 2.62, semanticDepth.value)))
+const characterOpacity = computed(() => smoothstep(layerVisibilityRanges.character.enterStart, layerVisibilityRanges.character.enterEnd, semanticDepth.value))
+const characterLabelOpacity = computed(() => smoothstep(2.56, 2.92, semanticDepth.value))
+const parentHaloOpacity = computed(() => .18 + .48 * smoothstep(.78, 1.48, semanticDepth.value) * (1 - smoothstep(2.2, 2.9, semanticDepth.value)))
+const wordCoreOpacity = computed(() => .48 - .18 * smoothstep(1.6, 2.8, semanticDepth.value))
+const topCoreOpacity = computed(() => .34 - .08 * smoothstep(.5, 1.8, semanticDepth.value))
 const lodLabel = computed(() => {
-  if (zoom.value < 1.15) return 'Предложения'
-  if (zoom.value < 4) return 'Слова и понятия'
-  if (zoom.value < 7) return 'Структура слов'
+  if (semanticDepth.value < .9) return 'Предложения'
+  if (semanticDepth.value < 1.8) return 'Понятия'
+  if (semanticDepth.value < 2.5) return 'Слова'
   return 'Буквы'
 })
+
+const labelSize = (base: number) => `${Math.max(8, Math.min(base, base / Math.max(.72, zoom.value)))}px`
+
+function nodeTransform(point: { x: number; y: number }) {
+  return `translate(${point.x} ${point.y})`
+}
+
+function cloudLobes(item: { id: number; mass?: number; density?: number; members?: unknown[] }) {
+  const count = 2 + ((item.members?.length ?? Math.round(item.mass ?? 1)) % 3)
+  const seed = item.id * 17 + (item.members?.length ?? 0) * 31
+  return Array.from({ length: count }, (_, index) => {
+    const angle = ((seed + index * 137) % 360) * Math.PI / 180
+    const distance = .28 + (((seed + index * 29) % 31) / 100)
+    return {
+      key: `${item.id}:${index}`,
+      x: Math.cos(angle) * distance,
+      y: Math.sin(angle) * distance,
+      radius: .18 + (((seed + index * 11) % 17) / 100),
+      opacity: .12 + Math.min(.2, (item.density ?? .5) * .12) + index * .018,
+    }
+  })
+}
+
+function parentSceneForWord(word: WordItem) {
+  return scenes.value.find(scene => (scene.words ?? []).some(candidate => candidate.key === word.key))
+}
+
+function parentWordForCharacter(character: CharacterItem) {
+  return mergedWords.value.find(word => word.characters.some(candidate => candidate.key === character.key))
+}
+
+function wordPosition(word: WordItem) {
+  const parent = parentSceneForWord(word)
+  const reveal = smoothstep(.92, 1.78, semanticDepth.value)
+  const target = { x: word.x, y: word.y }
+  if (!parent) return target
+  return { x: parent.x + (target.x - parent.x) * reveal, y: parent.y + (target.y - parent.y) * reveal }
+}
+
+function characterPosition(character: CharacterItem) {
+  const parent = parentWordForCharacter(character)
+  const reveal = smoothstep(2.02, 2.78, semanticDepth.value)
+  const target = { x: character.x, y: character.y }
+  if (!parent) return target
+  const origin = wordPosition(parent)
+  return { x: origin.x + (target.x - origin.x) * reveal, y: origin.y + (target.y - origin.y) * reveal }
+}
 
 function itemKey(item: any) {
   if (item.layer === 'word_form') return `word_form:${item.key}`
@@ -347,9 +440,33 @@ function itemKey(item: any) {
 }
 
 function select(item: any) {
+  selectedItem.value = item
   selectedKey.value = itemKey(item)
   emit('cloud-select', item)
 }
+
+function clearSelection() {
+  selectedItem.value = null
+  selectedKey.value = ''
+  emit('cloud-select', null)
+}
+
+function promoteSelection(nextDepth: number) {
+  const item = selectedItem.value
+  if (!item) return
+  const itemLayer = item.layer ?? item.cloud_type
+  const itemDepth = layerDepth[itemLayer as keyof typeof layerDepth]
+  if (itemDepth === undefined || itemDepth <= nextDepth + .15) return
+  const parent = itemLayer === 'character'
+    ? parentWordForCharacter(item)
+    : itemLayer === 'word_form'
+      ? parentSceneForWord(item)
+      : null
+  if (parent) select(parent)
+  else clearSelection()
+}
+
+watch(semanticDepth, value => promoteSelection(value))
 
 function hover(item: any | null) {
   emit('cloud-hover', item ? [item] : [])

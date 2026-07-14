@@ -11,7 +11,7 @@ python3 -m pip install -e '.[dev]'
 ./dev.sh
 ```
 
-API доступен по `http://127.0.0.1:8000/docs`, клиент — по `http://localhost:3000`.
+API доступен по `http://127.0.0.1:8000/docs`, клиент — по `http://localhost:3010`.
 Состояние сохраняется в `.superai/state.sqlite` и содержит только таблицу
 `concepts`. Старые схемы очищаются однократно при переходе на новую версию.
 
@@ -55,3 +55,8 @@ cd web && npm install && npm run test && npm run build
 - `server/server.py` — FastAPI API;
 - `web/` — Vue/Vite визуализация поля;
 - `tests/` — backend-тесты.
+
+## Документация
+
+- [`docs/CONTINUOUS_SPACE.md`](docs/CONTINUOUS_SPACE.md) — подробное описание
+  непрерывного пространства, zoom, семантической глубины и серверной навигации.
