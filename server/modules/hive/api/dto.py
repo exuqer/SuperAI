@@ -73,6 +73,14 @@ class HiveExportRequest(BaseModel):
     detail: str = Field(default="full")
 
 
+class HiveAnalyticsResponse(BaseModel):
+    """Read-only experiment analytics for one hive."""
+    hive_id: str
+    runs: list[dict[str, Any]]
+    primary: dict[str, Any] | None
+    comparison: dict[str, Any] | None
+
+
 class HiveRestoreRequest(BaseModel):
     """Hive restore request."""
     run_id: str

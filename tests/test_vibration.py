@@ -54,3 +54,41 @@ def test_export_current_initial_and_trace():
     assert service.runs(hive_id)[0]["id"] == run_id
     assert len(service.snapshots(hive_id, run_id)) == 3
     assert service.restore(hive_id, run_id, 0)["restored"] is True
+
+
+def test_analytics_ranks_role_matched_answer_and_preserves_evicted_candidate():
+    TrainingPipelineV2().train("Кот ест рыбу. Рыбак ловит рыбу. Рыбу продают на рынке.")
+    service = V2HiveService()
+    hive_id = service.create(24, "analytics-test")["hive"]["id"]
+    service.query(hive_id, "Кто ловит рыбу?")
+
+    active_run = service.reason(hive_id, config={"reasoning_steps": 1, "random_seed": 9})
+    active = service.analytics(hive_id, active_run["run"]["id"])["primary"]
+    active_candidates = active["snapshots"][-1]["candidates"]
+    assert active_candidates[0]["answer"] == "рыбак"
+    assert active_candidates[0]["semantic_score"] == 1.0
+    assert active_candidates[0]["eviction_status"] == "ACTIVE"
+
+    evicted_run = service.reason(hive_id, config={
+        "reasoning_steps": 2,
+        "random_seed": 9,
+        "weak_node_threshold": 1.0,
+        "eviction_threshold": 1.0,
+        "eviction_confirmation_steps": 1,
+    })
+    evicted = service.analytics(hive_id, evicted_run["run"]["id"])["primary"]
+    evicted_candidate = next(
+        item for item in evicted["snapshots"][-1]["candidates"] if item["answer"] == "рыбак"
+    )
+    assert evicted_candidate["semantic_score"] == 1.0
+    assert evicted_candidate["eviction_status"] == "EVICTED"
+    assert evicted_candidate["viability"] == 0.10
+
+
+def test_analytics_falls_back_to_scenes_when_query_has_no_unknown_role():
+    service, hive_id = setup_hive()
+    run = service.reason(hive_id, "Рыбак ловит рыбу", {"reasoning_steps": 1, "random_seed": 5})
+    primary = service.analytics(hive_id, run["run"]["id"])["primary"]
+    candidate = primary["snapshots"][-1]["candidates"][0]
+    assert candidate["answer"] is None
+    assert candidate["scene_label"]

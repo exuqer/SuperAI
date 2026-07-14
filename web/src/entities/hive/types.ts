@@ -149,3 +149,80 @@ export interface HiveResonanceClusterV2 {
   status: string;
   created_at: string;
 }
+
+export interface HiveAnalyticsRunV2 {
+  id: string;
+  hive_id: string;
+  status: string;
+  reasoning_steps: number;
+  completed_steps: number;
+  stop_reason: string | null;
+  random_seed: number;
+  created_at: string;
+  completed_at: string | null;
+  query: { terms?: string[]; roles?: string[]; cloud_ids?: number[] };
+  config: Record<string, unknown>;
+}
+
+export interface HiveAnalyticsNodeV2 {
+  placement_id: number;
+  cell_id: string | null;
+  cloud_id: number;
+  node_type: string;
+  label: string;
+  local_activation: number;
+  local_gravity: number;
+  retention: number;
+  energy: number;
+  eviction_status: string;
+}
+
+export interface HiveAnswerCandidateV2 {
+  placement_id: number;
+  cell_id: string | null;
+  scene_cloud_id: number;
+  scene_label: string;
+  answer: string | null;
+  matched_components: Array<{ term: string; role: string; label: string }>;
+  answer_components: Array<{ answer: string; role: string; question_term: string }>;
+  semantic_score: number;
+  dynamic_score: number;
+  viability: number;
+  candidate_score: number;
+  eviction_status: string;
+  explanation: string;
+}
+
+export interface HiveAnalyticsSnapshotV2 {
+  step: number;
+  phase: string;
+  created_at: string;
+  temperature: number;
+  metrics: {
+    average_activation: number;
+    average_retention: number;
+    total_energy: number;
+    active_nodes: number;
+    weakening_nodes: number;
+    evicted_nodes: number;
+  };
+  nodes: HiveAnalyticsNodeV2[];
+  candidates: HiveAnswerCandidateV2[];
+  delta: Record<string, unknown>;
+  events: Array<Record<string, unknown>>;
+}
+
+export interface HiveAnalyticsRunResultV2 {
+  run: HiveAnalyticsRunV2;
+  query_components: Array<{ term: string; role: string; word_form_cloud_id: number | null }>;
+  snapshots: HiveAnalyticsSnapshotV2[];
+  events: Array<Record<string, unknown>>;
+  clusters: Array<Record<string, unknown>>;
+}
+
+export interface HiveAnalyticsResponse {
+  hive_id: string;
+  runs: HiveAnalyticsRunV2[];
+  primary: HiveAnalyticsRunResultV2 | null;
+  comparison: HiveAnalyticsRunResultV2 | null;
+}

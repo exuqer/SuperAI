@@ -105,3 +105,11 @@ class HiveService:
             return self.facade.snapshots(hive_id, run_id)
         except KeyError as error:
             raise NotFoundError("reasoning run", run_id) from error
+
+    def analytics(
+        self, hive_id: str, run_id: str | None = None, compare_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self.facade.analytics(hive_id, run_id, compare_run_id)
+        except KeyError as error:
+            raise NotFoundError("hive or reasoning run", str(error)) from error

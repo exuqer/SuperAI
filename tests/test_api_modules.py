@@ -31,6 +31,16 @@ def test_modular_routes_preserve_v2_contract():
         assert query.status_code == 200
         assert query.json()["decision"]["decision"] in {"MISS", "PARTIAL_HIT", "LOCAL_HIT"}
 
+        reasoning = client.post(
+            f"/api/v2/hives/{hive_id}/reasoning",
+            json={"text": "Кот ест рыбу", "config": {"reasoning_steps": 1}},
+        )
+        assert reasoning.status_code == 200
+        analytics = client.get(f"/api/v2/hives/{hive_id}/analytics")
+        assert analytics.status_code == 200
+        assert analytics.json()["primary"]["run"]["id"] == reasoning.json()["run"]["id"]
+        assert analytics.json()["primary"]["snapshots"]
+
         stop = client.post(f"/api/v2/hives/{hive_id}/reasoning/stop")
         assert stop.status_code == 409
         assert stop.json() == {"detail": "synchronous reasoning runs cannot be stopped"}

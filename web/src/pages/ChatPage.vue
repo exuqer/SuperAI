@@ -10,6 +10,7 @@
       </div>
       <div class="top-actions">
         <RouterLink class="nav-link" to="/field">Обучение поля</RouterLink>
+        <RouterLink class="nav-link" :to="{ name: 'analytics' }">Аналитика</RouterLink>
         <span class="status" :class="mode">{{ modeLabel }}</span>
         <button class="ghost" @click="hiveStore.resetHive">Новый улей</button>
         <span class="avatar">AI</span>
@@ -25,7 +26,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, nextTick, onMounted, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import ChatPanel from '@/widgets/chat-panel/ChatPanel.vue';
 import RoutingField from '@/widgets/routing-field/RoutingField.vue';
 import HiveWorkspace from '@/widgets/hive-workspace/HiveWorkspace.vue';
@@ -33,6 +35,7 @@ import JsonExportDialog from '@/features/hive-export/ui/JsonExportDialog.vue';
 import { useHiveStore } from '@/entities/hive/store';
 
 const hiveStore = useHiveStore();
+const route = useRoute();
 const mode = computed(() =>
   !hiveStore.decision ? 'idle'
     : !hiveStore.decision.external_search_required ? 'local'
@@ -46,7 +49,18 @@ const modeLabel = computed(() =>
     : 'Улей готов'
 );
 
-onMounted(() => { void hiveStore.restoreHive(); });
+async function selectCellFromRoute() {
+  const cellId = typeof route.query.cell === 'string' ? route.query.cell : '';
+  if (!cellId) return;
+  await nextTick();
+  hiveStore.selectedCell = hiveStore.cells.find(cell => cell.id === cellId) || null;
+}
+
+watch(() => route.query.cell, () => { void selectCellFromRoute(); });
+onMounted(async () => {
+  await hiveStore.restoreHive();
+  await selectCellFromRoute();
+});
 </script>
 
 <style scoped lang="scss">

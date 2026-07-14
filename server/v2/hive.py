@@ -9,6 +9,7 @@ from .local_memory import V2LocalMemoryService, HiveLocalMemoryConfig
 from .repository import V2Repository
 from .vibration import HiveVibrationEngine, QueryActivation, VibrationConfig
 from .export import HiveExportService
+from .analytics import HiveAnalyticsService
 
 
 class V2HiveService:
@@ -87,3 +88,8 @@ class V2HiveService:
             if not conn.execute("SELECT 1 FROM hives WHERE id=? AND id IN (SELECT hive_id FROM hive_reasoning_runs WHERE id=?)", (hive_id, run_id)).fetchone():
                 raise KeyError(run_id)
             return [dict(row) for row in conn.execute("SELECT id, run_id, hive_id, step, phase, state_hash, delta_json, clusters_json, events_json, created_at FROM hive_reasoning_snapshots WHERE run_id=? ORDER BY step, id", (run_id,))]
+
+    def analytics(
+        self, hive_id: str, run_id: Optional[str] = None, compare_run_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return HiveAnalyticsService(self.service.repository).get(hive_id, run_id, compare_run_id)

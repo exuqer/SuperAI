@@ -11,6 +11,7 @@ from server.modules.hive.application.services import HiveService
 from server.modules.hive.infrastructure.repository import HiveRepository
 from server.modules.hive.api.dto import (
     HiveCreateRequest,
+    HiveAnalyticsResponse,
     HiveQueryRequest,
     HiveReasoningRequest,
 )
@@ -127,6 +128,17 @@ async def reasoning_runs(
 ) -> dict[str, list[dict[str, Any]]]:
     """Get reasoning runs for hive."""
     return {"runs": service.runs(hive_id)}
+
+
+@router.get("/{hive_id}/analytics", response_model=HiveAnalyticsResponse)
+async def hive_analytics(
+    hive_id: str,
+    run_id: str = Query(default=""),
+    compare_run_id: str = Query(default=""),
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Return read-only analysis of one or two persisted reasoning runs."""
+    return service.analytics(hive_id, run_id or None, compare_run_id or None)
 
 
 @router.get("/{hive_id}/reasoning-runs/{run_id}/snapshots")
