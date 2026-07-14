@@ -62,6 +62,11 @@ def test_analytics_ranks_role_matched_answer_and_preserves_evicted_candidate():
     hive_id = service.create(24, "analytics-test")["hive"]["id"]
     service.query(hive_id, "Кто ловит рыбу?")
 
+    before_vibration = service.analytics(hive_id)
+    assert before_vibration["primary"] is None
+    assert before_vibration["current"]["snapshot"]["candidates"][0]["answer"] == "рыбак"
+    assert before_vibration["current"]["snapshot"]["phase"] == "CURRENT"
+
     active_run = service.reason(hive_id, config={"reasoning_steps": 1, "random_seed": 9})
     active = service.analytics(hive_id, active_run["run"]["id"])["primary"]
     active_candidates = active["snapshots"][-1]["candidates"]

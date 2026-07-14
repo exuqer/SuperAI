@@ -38,6 +38,7 @@ function response() {
   return {
     hive_id: 'hive-analytics',
     runs: [primaryRun, comparisonRun],
+    current: { query_components: [{ term: 'кто', role: 'subject', word_form_cloud_id: null }], snapshot: snapshot(1), updated_at: '2026-07-14T16:01:00Z' },
     primary: { run: primaryRun, query_components: [{ term: 'кто', role: 'subject', word_form_cloud_id: null }], snapshots: [snapshot(0), snapshot(1)], events: [], clusters: [] },
     comparison: { run: comparisonRun, query_components: [], snapshots: [snapshot(0), snapshot(1, 'кот')], events: [], clusters: [] },
   };

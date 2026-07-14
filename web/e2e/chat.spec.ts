@@ -94,6 +94,8 @@ test.describe('Hive chat', () => {
     await page.goto('/analytics');
     await expect(page.getByRole('heading', { name: 'Лаборатория улья' })).toBeVisible();
     await expect(page.locator('.candidate-row').first()).toContainText('рыбак');
+    await page.getByRole('button', { name: 'Описание: Температура' }).first().hover();
+    await expect(page.getByText(/Уровень исследования и шума при встряске/)).toBeVisible();
     await page.locator('.candidate-row').first().click();
     await expect(page).toHaveURL(/\/?cell=cell-fisher/);
     await expect(page.locator('.hive-inspector')).toContainText('рыбак ловит рыбу');

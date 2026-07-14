@@ -62,6 +62,13 @@ class HiveAnalyticsService:
 
     @staticmethod
     def _query_components(conn: Any, query: Dict[str, Any]) -> List[Dict[str, Any]]:
+        persisted = query.get("components", [])
+        if isinstance(persisted, list) and persisted:
+            return [{
+                "term": str(item.get("normalized_form") or item.get("surface_form") or "").casefold(),
+                "role": str(item.get("expected_role") or "unknown"),
+                "word_form_cloud_id": item.get("word_form_cloud_id"),
+            } for item in persisted]
         terms = [str(term).casefold() for term in query.get("terms", [])]
         roles = [str(role) for role in query.get("roles", [])]
         components: List[Dict[str, Any]] = []
@@ -75,6 +82,68 @@ class HiveAnalyticsService:
                 "word_form_cloud_id": int(row["cloud_id"]) if row else None,
             })
         return components
+
+    @staticmethod
+    def _snapshot_payload(
+        nodes: List[Dict[str, Any]],
+        clouds: Dict[int, Dict[str, Any]],
+        scene_components: Dict[int, List[Dict[str, Any]]],
+        cells: Dict[int, str],
+        query_components: List[Dict[str, Any]],
+        *,
+        step: int,
+        phase: str,
+        created_at: str,
+        temperature: float,
+        delta: Optional[Dict[str, Any]] = None,
+        events: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        displayed_nodes = []
+        candidates = []
+        for node in nodes:
+            cloud = clouds.get(int(node["cloud_id"]), {})
+            descriptor = {
+                **node,
+                "label": cloud.get("canonical_name", str(node["cloud_id"])),
+                "cell_id": cells.get(int(node["placement_id"])),
+            }
+            displayed_nodes.append(descriptor)
+            if cloud.get("cloud_type") == "scene":
+                candidates.append(HiveAnalyticsService._candidate(
+                    node,
+                    scene_components.get(int(node["cloud_id"]), []),
+                    query_components,
+                    descriptor["label"],
+                    descriptor["cell_id"],
+                ))
+        candidates.sort(key=lambda item: (
+            -item["candidate_score"],
+            -item["semantic_score"],
+            -item["dynamic_score"],
+            item["scene_label"],
+        ))
+        active = sum(node.get("eviction_status") == "ACTIVE" for node in nodes)
+        weakening = sum(node.get("eviction_status") in {"WEAKENING", "EVICTION_CANDIDATE"} for node in nodes)
+        evicted = sum(node.get("eviction_status") == "EVICTED" for node in nodes)
+        count = max(1, len(nodes))
+        return {
+            "step": step,
+            "phase": phase,
+            "created_at": created_at,
+            "temperature": temperature,
+            "metrics": {
+                "average_activation": sum(float(node.get("local_activation", 0)) for node in nodes) / count,
+                "average_retention": sum(float(node.get("retention", 0)) for node in nodes) / count,
+                "total_energy": sum(float(node.get("energy", 0)) for node in nodes),
+                "active_nodes": active,
+                "weakening_nodes": weakening,
+                "evicted_nodes": evicted,
+            },
+            "nodes": displayed_nodes,
+            "candidates": candidates,
+            "delta": delta or {},
+            "events": events or [],
+        }
 
     @staticmethod
     def _catalog(conn: Any, hive_id: str) -> tuple[Dict[int, Dict[str, Any]], Dict[int, List[Dict[str, Any]]], Dict[int, str]]:
@@ -183,52 +252,12 @@ class HiveAnalyticsService:
         for snapshot in snapshot_rows:
             state = snapshot.pop("state", {})
             nodes = state.get("nodes", [])
-            displayed_nodes = []
-            candidates = []
-            for node in nodes:
-                cloud = clouds.get(int(node["cloud_id"]), {})
-                descriptor = {
-                    **node,
-                    "label": cloud.get("canonical_name", str(node["cloud_id"])),
-                    "cell_id": cells.get(int(node["placement_id"])),
-                }
-                displayed_nodes.append(descriptor)
-                if cloud.get("cloud_type") == "scene":
-                    candidates.append(self._candidate(
-                        node,
-                        scene_components.get(int(node["cloud_id"]), []),
-                        query_components,
-                        descriptor["label"],
-                        descriptor["cell_id"],
-                    ))
-            candidates.sort(key=lambda item: (
-                -item["candidate_score"],
-                -item["semantic_score"],
-                -item["dynamic_score"],
-                item["scene_label"],
+            snapshots.append(self._snapshot_payload(
+                nodes, clouds, scene_components, cells, query_components,
+                step=int(snapshot["step"]), phase=str(snapshot["phase"]),
+                created_at=str(snapshot["created_at"]), temperature=float(state.get("temperature", 0.0)),
+                delta=snapshot.get("delta", {}), events=snapshot.get("events", []),
             ))
-            active = sum(node.get("eviction_status") == "ACTIVE" for node in nodes)
-            weakening = sum(node.get("eviction_status") in {"WEAKENING", "EVICTION_CANDIDATE"} for node in nodes)
-            evicted = sum(node.get("eviction_status") == "EVICTED" for node in nodes)
-            count = max(1, len(nodes))
-            snapshots.append({
-                "step": snapshot["step"],
-                "phase": snapshot["phase"],
-                "created_at": snapshot["created_at"],
-                "temperature": state.get("temperature", 0.0),
-                "metrics": {
-                    "average_activation": sum(float(node.get("local_activation", 0)) for node in nodes) / count,
-                    "average_retention": sum(float(node.get("retention", 0)) for node in nodes) / count,
-                    "total_energy": sum(float(node.get("energy", 0)) for node in nodes),
-                    "active_nodes": active,
-                    "weakening_nodes": weakening,
-                    "evicted_nodes": evicted,
-                },
-                "nodes": displayed_nodes,
-                "candidates": candidates,
-                "delta": snapshot.get("delta", {}),
-                "events": snapshot.get("events", []),
-            })
         events = [
             self._json_row(row)
             for row in conn.execute(
@@ -249,12 +278,53 @@ class HiveAnalyticsService:
             "clusters": clusters,
         }
 
+    def _current(self, conn: Any, hive: Dict[str, Any]) -> Dict[str, Any]:
+        hive_id = str(hive["id"])
+        clouds, scene_components, cells = self._catalog(conn, hive_id)
+        query_components = self._query_components(conn, hive.get("query") or {})
+        nodes = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM hive_node_states WHERE hive_id = ? ORDER BY placement_id", (hive_id,)
+            )
+        ]
+        if not nodes:
+            nodes = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT hc.hive_placement_id AS placement_id, hc.dominant_cloud_id AS cloud_id,
+                              c.cloud_type AS node_type, p.x, p.y, p.z, 0 AS velocity_x, 0 AS velocity_y,
+                              0 AS velocity_z, hc.local_activation, p.local_gravity, hc.stored_strength,
+                              hc.retention AS local_stability, hc.retention,
+                              hc.local_activation AS energy, 0 AS phase, 1 AS frequency,
+                              1 AS temperature_response, 0 AS age_steps, 0 AS activation_count,
+                              0 AS last_activated_step, 0 AS weakening_steps, 'ACTIVE' AS eviction_status
+                       FROM hive_cells hc JOIN cloud_placements p ON p.id = hc.hive_placement_id
+                       JOIN clouds c ON c.id = hc.dominant_cloud_id WHERE hc.hive_id = ?
+                       ORDER BY hc.hive_placement_id""",
+                    (hive_id,),
+                )
+            ]
+        snapshot = self._snapshot_payload(
+            nodes, clouds, scene_components, cells, query_components,
+            step=int(hive.get("reasoning_step") or 0), phase="CURRENT",
+            created_at=str(hive.get("updated_at") or ""),
+            temperature=float(hive.get("current_temperature") or 0.0),
+        )
+        return {
+            "query_components": query_components,
+            "snapshot": snapshot,
+            "updated_at": hive.get("updated_at"),
+        }
+
     def get(
         self, hive_id: str, run_id: Optional[str] = None, compare_run_id: Optional[str] = None
     ) -> Dict[str, Any]:
         with self.repository.transaction() as conn:
-            if not conn.execute("SELECT 1 FROM hives WHERE id = ?", (hive_id,)).fetchone():
+            hive_row = conn.execute("SELECT * FROM hives WHERE id = ?", (hive_id,)).fetchone()
+            if not hive_row:
                 raise KeyError(hive_id)
+            hive = self._json_row(hive_row)
             runs = [
                 self._json_row(row)
                 for row in conn.execute(
@@ -272,6 +342,7 @@ class HiveAnalyticsService:
                 raise KeyError(comparison_id)
             return {
                 "hive_id": hive_id,
+                "current": self._current(conn, hive),
                 "runs": [self._run_summary(run) for run in runs],
                 "primary": self._analysis(conn, hive_id, by_id[primary_id]) if primary_id else None,
                 "comparison": self._analysis(conn, hive_id, by_id[comparison_id]) if comparison_id else None,

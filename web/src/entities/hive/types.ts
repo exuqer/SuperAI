@@ -220,8 +220,15 @@ export interface HiveAnalyticsRunResultV2 {
   clusters: Array<Record<string, unknown>>;
 }
 
+export interface HiveAnalyticsCurrentV2 {
+  query_components: Array<{ term: string; role: string; word_form_cloud_id: number | null }>;
+  snapshot: HiveAnalyticsSnapshotV2;
+  updated_at: string | null;
+}
+
 export interface HiveAnalyticsResponse {
   hive_id: string;
+  current: HiveAnalyticsCurrentV2;
   runs: HiveAnalyticsRunV2[];
   primary: HiveAnalyticsRunResultV2 | null;
   comparison: HiveAnalyticsRunResultV2 | null;

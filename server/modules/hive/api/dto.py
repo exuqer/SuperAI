@@ -76,6 +76,7 @@ class HiveExportRequest(BaseModel):
 class HiveAnalyticsResponse(BaseModel):
     """Read-only experiment analytics for one hive."""
     hive_id: str
+    current: dict[str, Any]
     runs: list[dict[str, Any]]
     primary: dict[str, Any] | None
     comparison: dict[str, Any] | None
