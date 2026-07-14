@@ -253,10 +253,12 @@ def test_init_db():
             CREATE TABLE context_vectors (
                 lexeme_id INTEGER NOT NULL,
                 context_lexeme_id INTEGER NOT NULL,
-                weight REAL NOT NULL,
+                direction INTEGER NOT NULL DEFAULT 1,
+                weight REAL NOT NULL DEFAULT 0,
+                raw_weight REAL NOT NULL DEFAULT 0,
                 count INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY (lexeme_id, context_lexeme_id),
+                PRIMARY KEY (lexeme_id, context_lexeme_id, direction),
                 FOREIGN KEY (lexeme_id) REFERENCES lexemes(id),
                 FOREIGN KEY (context_lexeme_id) REFERENCES lexemes(id)
             )

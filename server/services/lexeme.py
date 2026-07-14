@@ -1,28 +1,22 @@
-"""Lexeme service - handles Russian normalization, context vectors, and concept formation."""
+"""Russian lexemes, distributional context vectors and fuzzy concepts."""
 
 import json
 import math
-import sqlite3
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import numpy as np
 from pymorphy3 import MorphAnalyzer
 
 from server.database import get_connection, now
-from server.models.cloud import Cloud
-from server.repositories.cloud_repository import CloudRepository, LayerRepository
 
 
-# Initialize pymorphy3 for Russian
-morph = MorphAnalyzer(lang='ru')
+_morph = MorphAnalyzer(lang="ru")
 
 
 @dataclass
 class Lexeme:
-    """Normalized lexeme with morphological info."""
     id: Optional[int] = None
     canonical_form: str = ""
     language: str = "ru"
@@ -31,15 +25,15 @@ class Lexeme:
     frequency: int = 0
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    
+
     @property
     def features(self) -> Dict[str, Any]:
         return json.loads(self.features_json or "{}")
-    
+
     @features.setter
-    def features(self, value: Dict[str, Any]):
-        self.features_json = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-    
+    def features(self, value: Dict[str, Any]) -> None:
+        self.features_json = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -54,554 +48,486 @@ class Lexeme:
 
 
 class LexemeService:
-    """Service for managing lexemes, context vectors, and concept formation."""
-    
-    def __init__(self):
-        self.cloud_repo = CloudRepository()
-        self.layer_repo = LayerRepository()
-    
     def get_layer_id(self, layer_name: str) -> Optional[int]:
-        layer = self.layer_repo.get_by_name(layer_name)
-        return layer.id if layer else None
-    
-    # ============================================================
-    # Russian Normalization with pymorphy3
-    # ============================================================
-    
+        with get_connection() as conn:
+            row = conn.execute("SELECT id FROM layers WHERE name = ?", (layer_name,)).fetchone()
+        return int(row["id"]) if row else None
+
     def normalize_russian(self, word: str) -> Tuple[str, Optional[str], Dict[str, Any]]:
-        """
-        Normalize Russian word using pymorphy3.
-        Returns (canonical_form, pos_tag, features_dict).
-        """
-        parsed = morph.parse(word)
+        parsed = _morph.parse(word.casefold())
         if not parsed:
             return word.casefold(), None, {}
-        
-        # Get the most probable parse
         best = parsed[0]
-        canonical = best.normal_form
-        pos = best.tag.POS
-        features = {
+        return best.normal_form, best.tag.POS, {
             "tag": str(best.tag),
             "score": float(best.score),
-            "methods": [str(m) for m in best.methods_stack],
+            "methods": [str(method) for method in best.methods_stack],
         }
-        return canonical, pos, features
-    
+
     def normalize_unknown(self, word: str) -> Tuple[str, Optional[str], Dict[str, Any]]:
-        """Normalize unknown/Latin words using casefold."""
         return word.casefold(), None, {"method": "casefold"}
-    
+
     def get_or_create_lexeme(self, word_form: str, language: str = "ru") -> Lexeme:
-        """Get or create lexeme for a word form."""
-        if language == "ru":
-            canonical, pos, features = self.normalize_russian(word_form)
-        else:
-            canonical, pos, features = self.normalize_unknown(word_form)
-        
+        canonical, pos, features = (
+            self.normalize_russian(word_form)
+            if language == "ru"
+            else self.normalize_unknown(word_form)
+        )
+        timestamp = now()
         with get_connection() as conn:
-            # Try to find existing lexeme
             row = conn.execute(
                 "SELECT * FROM lexemes WHERE canonical_form = ? AND language = ?",
-                (canonical, language)
+                (canonical, language),
             ).fetchone()
-            
             if row:
-                lexeme = self._row_to_lexeme(row)
-                # Update frequency
                 conn.execute(
                     "UPDATE lexemes SET frequency = frequency + 1, updated_at = ? WHERE id = ?",
-                    (now(), lexeme.id)
+                    (timestamp, row["id"]),
                 )
                 conn.commit()
-                return lexeme
-            
-            # Create new lexeme
+                data = dict(row)
+                data["frequency"] += 1
+                data["updated_at"] = timestamp
+                return self._row_to_lexeme(data)
+
             cursor = conn.execute(
                 """INSERT INTO lexemes
                 (canonical_form, language, pos_tag, features_json, frequency, created_at, updated_at)
                 VALUES (?, ?, ?, ?, 1, ?, ?)""",
-                (canonical, language, pos, json.dumps(features, separators=(",", ":"), ensure_ascii=False),
-                 now(), now())
+                (
+                    canonical,
+                    language,
+                    pos,
+                    json.dumps(features, ensure_ascii=False, separators=(",", ":")),
+                    timestamp,
+                    timestamp,
+                ),
             )
-            lexeme_id = cursor.lastrowid
             conn.commit()
-            
             return Lexeme(
-                id=lexeme_id,
+                id=int(cursor.lastrowid),
                 canonical_form=canonical,
                 language=language,
                 pos_tag=pos,
-                features_json=json.dumps(features, separators=(",", ":"), ensure_ascii=False),
+                features_json=json.dumps(features, ensure_ascii=False, separators=(",", ":")),
                 frequency=1,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=datetime.fromisoformat(timestamp),
+                updated_at=datetime.fromisoformat(timestamp),
             )
-    
-    def link_word_form_to_lexeme(self, word_form_cloud_id: int, lexeme_id: int, is_canonical: bool = False) -> None:
-        """Link a word_form cloud to its lexeme."""
+
+    def get_lexeme_by_id(self, lexeme_id: int) -> Optional[Lexeme]:
+        with get_connection() as conn:
+            row = conn.execute("SELECT * FROM lexemes WHERE id = ?", (lexeme_id,)).fetchone()
+        return self._row_to_lexeme(row) if row else None
+
+    def link_word_form_to_lexeme(
+        self, word_form_cloud_id: int, lexeme_id: int, is_canonical: bool = False
+    ) -> None:
         with get_connection() as conn:
             conn.execute(
-                """INSERT OR IGNORE INTO word_form_to_lexeme
+                """INSERT INTO word_form_to_lexeme
                 (word_form_cloud_id, lexeme_id, is_canonical, created_at)
-                VALUES (?, ?, ?, ?)""",
-                (word_form_cloud_id, lexeme_id, 1 if is_canonical else 0, now())
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(word_form_cloud_id, lexeme_id) DO UPDATE SET
+                    is_canonical = MAX(is_canonical, excluded.is_canonical)""",
+                (word_form_cloud_id, lexeme_id, int(is_canonical), now()),
             )
             conn.commit()
-    
+
     def get_lexeme_for_word_form(self, word_form_cloud_id: int) -> Optional[Lexeme]:
-        """Get the lexeme linked to a word form cloud."""
         with get_connection() as conn:
             row = conn.execute(
                 """SELECT l.* FROM lexemes l
-                JOIN word_form_to_lexeme wfl ON l.id = wfl.lexeme_id
-                WHERE wfl.word_form_cloud_id = ?
-                ORDER BY wfl.is_canonical DESC LIMIT 1""",
-                (word_form_cloud_id,)
+                JOIN word_form_to_lexeme w ON w.lexeme_id = l.id
+                WHERE w.word_form_cloud_id = ?
+                ORDER BY w.is_canonical DESC LIMIT 1""",
+                (word_form_cloud_id,),
             ).fetchone()
         return self._row_to_lexeme(row) if row else None
-    
+
     def get_word_forms_for_lexeme(self, lexeme_id: int) -> List[int]:
-        """Get all word form cloud IDs for a lexeme."""
         with get_connection() as conn:
             rows = conn.execute(
                 "SELECT word_form_cloud_id FROM word_form_to_lexeme WHERE lexeme_id = ?",
-                (lexeme_id,)
+                (lexeme_id,),
             ).fetchall()
-        return [row["word_form_cloud_id"] for row in rows]
-    
-    # ============================================================
-    # Context Vector Accumulation with PPMI
-    # ============================================================
-    
+        return [int(row["word_form_cloud_id"]) for row in rows]
+
     def accumulate_context(self, sentence_lexeme_ids: List[int], window_size: int = 5) -> None:
-        """
-        Accumulate context vectors for lexemes in a sentence.
-        Weight = 1 / (1 + distance) for neighbors within window.
-        """
         if len(sentence_lexeme_ids) < 2:
             return
-        
-        # Count co-occurrences
-        cooccur_counts: Dict[Tuple[int, int], float] = Counter()
-        lexeme_totals: Counter = Counter()
-        
-        for i, lexeme_id in enumerate(sentence_lexeme_ids):
-            lexeme_totals[lexeme_id] += 1
-            # Look at neighbors within window
-            for j in range(max(0, i - window_size), min(len(sentence_lexeme_ids), i + window_size + 1)):
-                if i == j:
+
+        increments: Counter[Tuple[int, int, int]] = Counter()
+        counts: Counter[Tuple[int, int, int]] = Counter()
+        for target_index, target_id in enumerate(sentence_lexeme_ids):
+            start = max(0, target_index - window_size)
+            end = min(len(sentence_lexeme_ids), target_index + window_size + 1)
+            for context_index in range(start, end):
+                if target_index == context_index:
                     continue
-                context_id = sentence_lexeme_ids[j]
-                distance = abs(i - j)
-                weight = 1.0 / (1.0 + distance)
-                pair = tuple(sorted([lexeme_id, context_id]))
-                cooccur_counts[pair] += weight
-                lexeme_totals[context_id] += 1
-        
-        # Compute PPMI and update context_vectors
-        total_windows = sum(lexeme_totals.values())
-        
+                context_id = sentence_lexeme_ids[context_index]
+                distance = abs(target_index - context_index)
+                direction = -1 if context_index < target_index else 1
+                key = (target_id, context_id, direction)
+                increments[key] += 1.0 / distance
+                counts[key] += 1
+
+        timestamp = now()
         with get_connection() as conn:
-            for (lex_a, lex_b), cooccur in cooccur_counts.items():
-                # PMI = log(P(a,b) / (P(a) * P(b)))
-                p_ab = cooccur / total_windows
-                p_a = lexeme_totals[lex_a] / total_windows
-                p_b = lexeme_totals[lex_b] / total_windows
-                
-                if p_a > 0 and p_b > 0:
-                    pmi = math.log(p_ab / (p_a * p_b))
-                    ppmi = max(0.0, pmi)
-                    
-                    if ppmi > 0:
-                        # Update both directions
-                        for l1, l2 in [(lex_a, lex_b), (lex_b, lex_a)]:
-                            row = conn.execute(
-                                "SELECT weight, count FROM context_vectors WHERE lexeme_id = ? AND context_lexeme_id = ?",
-                                (l1, l2)
-                            ).fetchone()
-                            
-                            if row:
-                                new_count = row["count"] + 1
-                                # Exponential moving average for weight
-                                new_weight = row["weight"] * 0.9 + ppmi * 0.1
-                                conn.execute(
-                                    """UPDATE context_vectors SET
-                                    weight = ?, count = ?, updated_at = ?
-                                    WHERE lexeme_id = ? AND context_lexeme_id = ?""",
-                                    (new_weight, new_count, now(), l1, l2)
-                                )
-                            else:
-                                conn.execute(
-                                    """INSERT INTO context_vectors
-                                    (lexeme_id, context_lexeme_id, weight, count, updated_at)
-                                    VALUES (?, ?, ?, 1, ?)""",
-                                    (l1, l2, ppmi, now())
-                                )
+            for (lexeme_id, context_id, direction), raw_delta in increments.items():
+                conn.execute(
+                    """INSERT INTO context_vectors
+                    (lexeme_id, context_lexeme_id, direction, weight, raw_weight, count, updated_at)
+                    VALUES (?, ?, ?, 0, ?, ?, ?)
+                    ON CONFLICT(lexeme_id, context_lexeme_id, direction) DO UPDATE SET
+                        raw_weight = raw_weight + excluded.raw_weight,
+                        count = count + excluded.count,
+                        updated_at = excluded.updated_at""",
+                    (
+                        lexeme_id,
+                        context_id,
+                        direction,
+                        raw_delta,
+                        counts[(lexeme_id, context_id, direction)],
+                        timestamp,
+                    ),
+                )
+            self._recompute_ppmi(conn)
             conn.commit()
-    
+
+    def _recompute_ppmi(self, conn=None) -> None:
+        owns_connection = conn is None
+        context = get_connection() if owns_connection else None
+        if owns_connection:
+            conn = context.__enter__()
+        try:
+            rows = conn.execute(
+                """SELECT lexeme_id, context_lexeme_id, direction, raw_weight AS raw
+                FROM context_vectors WHERE lexeme_id != context_lexeme_id"""
+            ).fetchall()
+            if not rows:
+                return
+            row_totals: Counter[int] = Counter()
+            column_totals: Counter[Tuple[int, int]] = Counter()
+            total = 0.0
+            for row in rows:
+                raw = max(0.0, float(row["raw"]))
+                row_totals[int(row["lexeme_id"])] += raw
+                column_totals[(int(row["context_lexeme_id"]), int(row["direction"]))] += raw
+                total += raw
+            if total <= 0:
+                return
+            timestamp = now()
+            for row in rows:
+                source = int(row["lexeme_id"])
+                target = int(row["context_lexeme_id"])
+                direction = int(row["direction"])
+                raw = max(0.0, float(row["raw"]))
+                denominator = row_totals[source] * column_totals[(target, direction)]
+                ppmi = max(0.0, math.log((raw * total) / denominator)) if raw and denominator else 0.0
+                conn.execute(
+                    """UPDATE context_vectors SET weight = ?, updated_at = ?
+                    WHERE lexeme_id = ? AND context_lexeme_id = ? AND direction = ?""",
+                    (ppmi, timestamp, source, target, direction),
+                )
+            if owns_connection:
+                conn.commit()
+        finally:
+            if owns_connection:
+                context.__exit__(None, None, None)
+
     def get_context_vector(self, lexeme_id: int, top_k: int = 100) -> Dict[int, float]:
-        """Get context vector for a lexeme as dict of context_lexeme_id -> weight."""
         with get_connection() as conn:
             rows = conn.execute(
-                """SELECT context_lexeme_id, weight FROM context_vectors
-                WHERE lexeme_id = ? ORDER BY weight DESC LIMIT ?""",
-                (lexeme_id, top_k)
+                """SELECT context_lexeme_id, direction, weight FROM context_vectors
+                WHERE lexeme_id = ? AND context_lexeme_id != lexeme_id AND weight > 0
+                ORDER BY weight DESC LIMIT ?""",
+                (lexeme_id, top_k),
             ).fetchall()
-        return {row["context_lexeme_id"]: row["weight"] for row in rows}
-    
-    def cosine_similarity(self, vec_a: Dict[int, float], vec_b: Dict[int, float]) -> float:
-        """Compute cosine similarity between two sparse vectors."""
-        if not vec_a or not vec_b:
+        return {
+            int(row["context_lexeme_id"]) * 2 + (1 if int(row["direction"]) > 0 else 0): float(row["weight"])
+            for row in rows
+        }
+
+    @staticmethod
+    def cosine_similarity(vec_a: Dict[int, float], vec_b: Dict[int, float]) -> float:
+        normalized_a = {int(key): float(value) for key, value in vec_a.items()}
+        normalized_b = {int(key): float(value) for key, value in vec_b.items()}
+        common = normalized_a.keys() & normalized_b.keys()
+        if not common:
             return 0.0
-        
-        # Get common keys
-        common_keys = set(vec_a.keys()) & set(vec_b.keys())
-        if not common_keys:
-            return 0.0
-        
-        dot_product = sum(vec_a[k] * vec_b[k] for k in common_keys)
-        norm_a = math.sqrt(sum(v * v for v in vec_a.values()))
-        norm_b = math.sqrt(sum(v * v for v in vec_b.values()))
-        
+        norm_a = math.sqrt(sum(value * value for value in normalized_a.values()))
+        norm_b = math.sqrt(sum(value * value for value in normalized_b.values()))
         if norm_a == 0 or norm_b == 0:
             return 0.0
-        
-        return dot_product / (norm_a * norm_b)
-    
-    # ============================================================
-    # Concept Formation with Centroid Clustering
-    # ============================================================
-    
-    def find_or_create_concept(self, lexeme_ids: List[int], min_contexts: int = 3, 
-                                similarity_threshold: float = 0.72,
-                                merge_threshold: float = 0.85,
-                                unify_threshold: float = 0.92) -> Optional[int]:
-        """
-        Find existing concept or create new one from lexemes with similar context vectors.
-        Returns concept_cloud_id.
-        """
-        if len(lexeme_ids) < 2:
-            return None
-        
-        # Get context vectors for all lexemes
-        vectors = {}
-        for lid in lexeme_ids:
-            vec = self.get_context_vector(lid)
-            if vec:
-                vectors[lid] = vec
-        
-        if len(vectors) < 2:
-            return None
-        
-        # Check if we have enough distinct contexts (at least 3 different context windows)
-        # For now, we check if lexemes have been seen in enough sentences
-        with get_connection() as conn:
-            # Check existing concepts in concept layer
-            concept_layer_id = self.get_layer_id("concept")
-            if not concept_layer_id:
-                return None
-            
-            concept_clouds = conn.execute(
-                "SELECT id FROM clouds WHERE layer_id = ?", (concept_layer_id,)
-            ).fetchall()
-            
-            # Compare with existing concept centroids
-            best_match = None
-            best_similarity = 0.0
-            
-            for c_row in concept_clouds:
-                centroid_row = conn.execute(
-                    "SELECT centroid_vector_json, member_lexeme_ids_json FROM concept_centroids WHERE concept_cloud_id = ?",
-                    (c_row["id"],)
-                ).fetchone()
-                
-                if not centroid_row:
-                    continue
-                
-                centroid_vec = json.loads(centroid_row["centroid_vector_json"])
-                member_ids = json.loads(centroid_row["member_lexeme_ids_json"])
-                
-                # Compute average similarity to centroid members
-                similarities = []
-                for mid in member_ids:
-                    if mid in vectors:
-                        sim = self.cosine_similarity(vectors[mid], centroid_vec)
-                        similarities.append(sim)
-                
-                if similarities:
-                    avg_sim = sum(similarities) / len(similarities)
-                    if avg_sim > best_similarity:
-                        best_similarity = avg_sim
-                        best_match = c_row["id"]
-            
-            # If good match found, add to existing concept
-            if best_match and best_similarity >= similarity_threshold:
-                self._add_lexemes_to_concept(best_match, list(vectors.keys()))
-                return best_match
-            
-            # Check if we should merge with existing concept (similarity >= 0.85)
-            if best_match and best_similarity >= merge_threshold:
-                self._add_lexemes_to_concept(best_match, list(vectors.keys()))
-                return best_match
-            
-            # Create new concept
-            return self._create_concept_from_lexemes(list(vectors.keys()))
-    
-    def _create_concept_from_lexemes(self, lexeme_ids: List[int]) -> Optional[int]:
-        """Create a new concept cloud from lexemes."""
-        if len(lexeme_ids) < 2:
-            return None
-        
-        # Compute centroid vector
-        vectors = [self.get_context_vector(lid) for lid in lexeme_ids]
-        vectors = [v for v in vectors if v]
-        
-        if len(vectors) < 2:
-            return None
-        
-        # Average the vectors
-        all_keys = set()
-        for v in vectors:
-            all_keys.update(v.keys())
-        
-        centroid = {}
-        for key in all_keys:
-            centroid[key] = sum(v.get(key, 0) for v in vectors) / len(vectors)
-        
-        # Generate concept name from top lexemes
-        lexeme_names = []
-        with get_connection() as conn:
-            for lid in lexeme_ids[:5]:
-                row = conn.execute("SELECT canonical_form FROM lexemes WHERE id = ?", (lid,)).fetchone()
-                if row:
-                    lexeme_names.append(row["canonical_form"])
-        
-        concept_name = " · ".join(lexeme_names[:3]) if lexeme_names else f"concept_{lexeme_ids[0]}"
-        
-        concept_layer_id = self.get_layer_id("concept")
-        if not concept_layer_id:
-            return None
-        
-        with get_connection() as conn:
-            # Create concept cloud
-            cursor = conn.execute(
-                """INSERT INTO clouds
-                (layer_id, cloud_type, canonical_name, mass, density, radius, stability, activation,
-                 observation_count, created_at, updated_at, metadata_json)
-                VALUES (?, 'concept', ?, 3.0, 1.0, 30.0, 0.3, 0.0, 1, ?, ?, '{}')""",
-                (concept_layer_id, concept_name, now(), now())
-            )
-            concept_cloud_id = cursor.lastrowid
-            
-            # Store centroid
-            conn.execute(
-                """INSERT INTO concept_centroids
-                (concept_cloud_id, centroid_vector_json, member_lexeme_ids_json, stability, created_at, updated_at)
-                VALUES (?, ?, ?, 0.5, ?, ?)""",
-                (concept_cloud_id, json.dumps(centroid, separators=(",", ":")),
-                 json.dumps(lexeme_ids, separators=(",", ":")), now(), now())
-            )
-            
-            # Create fuzzy memberships
-            for lid in lexeme_ids:
-                vec = self.get_context_vector(lid)
-                if vec:
-                    sim = self.cosine_similarity(vec, centroid)
-                    # smoothstep(0.55, 0.85, cosine)
-                    membership = self._smoothstep(0.55, 0.85, sim)
-                    if membership > 0:
-                        centrality = sim  # simplified
-                        context_coverage = len(vec) / max(1, len(centroid))
-                        conn.execute(
-                            """INSERT INTO lexeme_concept_membership
-                            (lexeme_id, concept_cloud_id, membership, centrality, context_coverage, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?)""",
-                            (lid, concept_cloud_id, membership, centrality, context_coverage, now())
-                        )
-            
-            conn.commit()
-        
-        return concept_cloud_id
-    
-    def _add_lexemes_to_concept(self, concept_cloud_id: int, lexeme_ids: List[int]) -> None:
-        """Add lexemes to an existing concept."""
-        with get_connection() as conn:
-            # Get current centroid
-            centroid_row = conn.execute(
-                "SELECT centroid_vector_json, member_lexeme_ids_json FROM concept_centroids WHERE concept_cloud_id = ?",
-                (concept_cloud_id,)
-            ).fetchone()
-            
-            if not centroid_row:
-                return
-            
-            old_centroid = json.loads(centroid_row["centroid_vector_json"])
-            old_members = json.loads(centroid_row["member_lexeme_ids_json"])
-            
-            # Add new members
-            all_members = list(set(old_members + lexeme_ids))
-            
-            # Recompute centroid
-            vectors = [self.get_context_vector(lid) for lid in all_members]
-            vectors = [v for v in vectors if v]
-            
-            if len(vectors) < 2:
-                return
-            
-            all_keys = set()
-            for v in vectors:
-                all_keys.update(v.keys())
-            
-            new_centroid = {}
-            for key in all_keys:
-                new_centroid[key] = sum(v.get(key, 0) for v in vectors) / len(vectors)
-            
-            # Update centroid
-            conn.execute(
-                """UPDATE concept_centroids SET
-                centroid_vector_json = ?, member_lexeme_ids_json = ?, updated_at = ?
-                WHERE concept_cloud_id = ?""",
-                (json.dumps(new_centroid, separators=(",", ":")),
-                 json.dumps(all_members, separators=(",", ":")),
-                 now(), concept_cloud_id)
-            )
-            
-            # Update memberships
-            for lid in lexeme_ids:
-                vec = self.get_context_vector(lid)
-                if vec:
-                    sim = self.cosine_similarity(vec, new_centroid)
-                    membership = self._smoothstep(0.55, 0.85, sim)
-                    if membership > 0:
-                        centrality = sim
-                        context_coverage = len(vec) / max(1, len(new_centroid))
-                        conn.execute(
-                            """INSERT OR REPLACE INTO lexeme_concept_membership
-                            (lexeme_id, concept_cloud_id, membership, centrality, context_coverage, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?)""",
-                            (lid, concept_cloud_id, membership, centrality, context_coverage, now())
-                        )
-            
-            # Update concept cloud mass
-            conn.execute(
-                "UPDATE clouds SET mass = mass + 1.0, observation_count = observation_count + 1, updated_at = ? WHERE id = ?",
-                (now(), concept_cloud_id)
-            )
-            
-            conn.commit()
-    
-    def _smoothstep(self, edge0: float, edge1: float, x: float) -> float:
-        """Smoothstep interpolation."""
-        t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
-        return t * t * (3.0 - 2.0 * t)
-    
-    def get_concept_members(self, concept_cloud_id: int) -> List[Tuple[int, float]]:
-        """Get lexeme members of a concept with their membership values."""
+        return sum(normalized_a[key] * normalized_b[key] for key in common) / (norm_a * norm_b)
+
+    def discover_concepts(
+        self,
+        min_contexts: int = 3,
+        similarity_threshold: float = 0.72,
+    ) -> List[int]:
         with get_connection() as conn:
             rows = conn.execute(
-                """SELECT lexeme_id, membership, centrality, context_coverage 
-                FROM lexeme_concept_membership 
-                WHERE concept_cloud_id = ? AND membership > 0
-                ORDER BY membership DESC""",
-                (concept_cloud_id,)
+                """SELECT l.id, l.pos_tag, l.features_json, COUNT(cv.context_lexeme_id) AS contexts
+                FROM lexemes l
+                JOIN context_vectors cv ON cv.lexeme_id = l.id
+                WHERE cv.context_lexeme_id != l.id AND cv.weight > 0
+                GROUP BY l.id HAVING contexts >= ?""",
+                (min_contexts,),
             ).fetchall()
-        return [(row["lexeme_id"], row["membership"]) for row in rows]
-    
-    def merge_concepts(self, concept_a_id: int, concept_b_id: int, threshold: float = 0.92) -> Optional[int]:
-        """Merge two concepts if their centroids are similar enough."""
+        lexeme_ids = [int(row["id"]) for row in rows]
+        signatures = {int(row["id"]): row["pos_tag"] or "" for row in rows}
+        vectors = {lexeme_id: self.get_context_vector(lexeme_id) for lexeme_id in lexeme_ids}
+        adjacency: Dict[int, set[int]] = {lexeme_id: set() for lexeme_id in lexeme_ids}
+        for index, left in enumerate(lexeme_ids):
+            for right in lexeme_ids[index + 1 :]:
+                if (
+                    signatures[left] == signatures[right]
+                    and self.cosine_similarity(vectors[left], vectors[right]) >= similarity_threshold
+                ):
+                    adjacency[left].add(right)
+                    adjacency[right].add(left)
+
+        created: List[int] = []
+        visited: set[int] = set()
+        for seed in lexeme_ids:
+            if seed in visited or not adjacency[seed]:
+                continue
+            component: set[int] = set()
+            stack = [seed]
+            while stack:
+                item = stack.pop()
+                if item in component:
+                    continue
+                component.add(item)
+                stack.extend(adjacency[item] - component)
+            visited.update(component)
+            concept_id = self.find_or_create_concept(
+                sorted(component),
+                min_contexts=min_contexts,
+                similarity_threshold=similarity_threshold,
+            )
+            if concept_id is not None:
+                created.append(concept_id)
+        return created
+
+    def find_or_create_concept(
+        self,
+        lexeme_ids: List[int],
+        min_contexts: int = 3,
+        similarity_threshold: float = 0.72,
+        merge_threshold: float = 0.85,
+        unify_threshold: float = 0.92,
+    ) -> Optional[int]:
+        unique_ids = list(dict.fromkeys(int(item) for item in lexeme_ids))
+        vectors = {item: self.get_context_vector(item) for item in unique_ids}
+        vectors = {item: vector for item, vector in vectors.items() if len(vector) >= min_contexts}
+        if len(vectors) < 2:
+            return None
+        pairwise = [
+            self.cosine_similarity(vectors[left], vectors[right])
+            for index, left in enumerate(vectors)
+            for right in list(vectors)[index + 1 :]
+        ]
+        if not pairwise or max(pairwise) < similarity_threshold:
+            return None
+
+        centroid = self._centroid(vectors.values())
+        best_id: Optional[int] = None
+        best_similarity = 0.0
         with get_connection() as conn:
-            centroid_a = conn.execute(
-                "SELECT centroid_vector_json FROM concept_centroids WHERE concept_cloud_id = ?",
-                (concept_a_id,)
-            ).fetchone()
-            centroid_b = conn.execute(
-                "SELECT centroid_vector_json FROM concept_centroids WHERE concept_cloud_id = ?",
-                (concept_b_id,)
-            ).fetchone()
-            
-            if not centroid_a or not centroid_b:
+            rows = conn.execute(
+                "SELECT concept_cloud_id, centroid_vector_json FROM concept_centroids"
+            ).fetchall()
+        for row in rows:
+            existing = {int(key): float(value) for key, value in json.loads(row["centroid_vector_json"]).items()}
+            similarity = self.cosine_similarity(centroid, existing)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_id = int(row["concept_cloud_id"])
+        if best_id is not None and best_similarity >= similarity_threshold:
+            self._add_lexemes_to_concept(best_id, list(vectors))
+            return best_id
+        return self._create_concept_from_lexemes(list(vectors))
+
+    def _create_concept_from_lexemes(self, lexeme_ids: List[int]) -> Optional[int]:
+        vectors = {item: self.get_context_vector(item) for item in lexeme_ids}
+        vectors = {item: vector for item, vector in vectors.items() if vector}
+        if len(vectors) < 2:
+            return None
+        centroid = self._centroid(vectors.values())
+        with get_connection() as conn:
+            placeholders = ",".join("?" for _ in vectors)
+            name_rows = conn.execute(
+                f"SELECT id, canonical_form FROM lexemes WHERE id IN ({placeholders})",
+                tuple(vectors),
+            ).fetchall()
+            names = {int(row["id"]): row["canonical_form"] for row in name_rows}
+            ordered_ids = sorted(vectors, key=lambda item: (-self.cosine_similarity(vectors[item], centroid), names.get(item, "")))
+            concept_name = " · ".join(names.get(item, str(item)) for item in ordered_ids[:3])
+            layer = conn.execute("SELECT id FROM layers WHERE name = 'concept'").fetchone()
+            if not layer:
                 return None
-            
-            vec_a = json.loads(centroid_a["centroid_vector_json"])
-            vec_b = json.loads(centroid_b["centroid_vector_json"])
-            
-            sim = self.cosine_similarity(vec_a, vec_b)
-            
-            if sim >= threshold:
-                # Merge B into A
-                members_a = conn.execute(
-                    "SELECT lexeme_id FROM lexeme_concept_membership WHERE concept_cloud_id = ?",
-                    (concept_a_id,)
-                ).fetchall()
-                members_b = conn.execute(
-                    "SELECT lexeme_id FROM lexeme_concept_membership WHERE concept_cloud_id = ?",
-                    (concept_b_id,)
-                ).fetchall()
-                
-                all_member_ids = list(set([r["lexeme_id"] for r in members_a] + [r["lexeme_id"] for r in members_b]))
-                
-                # Recompute centroid
-                vectors = [self.get_context_vector(lid) for lid in all_member_ids]
-                vectors = [v for v in vectors if v]
-                
-                if len(vectors) >= 2:
-                    all_keys = set()
-                    for v in vectors:
-                        all_keys.update(v.keys())
-                    
-                    new_centroid = {}
-                    for key in all_keys:
-                        new_centroid[key] = sum(v.get(key, 0) for v in vectors) / len(vectors)
-                    
-                    # Update concept A
-                    conn.execute(
-                        """UPDATE concept_centroids SET
-                        centroid_vector_json = ?, member_lexeme_ids_json = ?, updated_at = ?
-                        WHERE concept_cloud_id = ?""",
-                        (json.dumps(new_centroid, separators=(",", ":")),
-                         json.dumps(all_member_ids, separators=(",", ":")),
-                         now(), concept_a_id)
-                    )
-                    
-                    # Move memberships from B to A
-                    for row in members_b:
-                        lid = row["lexeme_id"]
-                        vec = self.get_context_vector(lid)
-                        if vec:
-                            membership = self._smoothstep(0.55, 0.85, self.cosine_similarity(vec, new_centroid))
-                            if membership > 0:
-                                conn.execute(
-                                    """INSERT OR REPLACE INTO lexeme_concept_membership
-                                    (lexeme_id, concept_cloud_id, membership, centrality, context_coverage, updated_at)
-                                    VALUES (?, ?, ?, ?, ?, ?)""",
-                                    (lid, concept_a_id, membership, 
-                                     self.cosine_similarity(vec, new_centroid),
-                                     len(vec) / max(1, len(new_centroid)), now())
-                                )
-                    
-                    # Delete concept B
-                    conn.execute("DELETE FROM lexeme_concept_membership WHERE concept_cloud_id = ?", (concept_b_id,))
-                    conn.execute("DELETE FROM concept_centroids WHERE concept_cloud_id = ?", (concept_b_id,))
-                    conn.execute("DELETE FROM clouds WHERE id = ?", (concept_b_id,))
-                    
-                    conn.commit()
-                    return concept_a_id
-        
-        return None
-    
-    def _row_to_lexeme(self, row: sqlite3.Row) -> Lexeme:
+            existing = conn.execute(
+                "SELECT id FROM clouds WHERE layer_id = ? AND canonical_name = ?",
+                (layer["id"], concept_name),
+            ).fetchone()
+            if existing:
+                concept_id = int(existing["id"])
+            else:
+                timestamp = now()
+                cursor = conn.execute(
+                    """INSERT INTO clouds
+                    (layer_id, cloud_type, canonical_name, mass, density, radius, stability,
+                     activation, observation_count, created_at, updated_at, metadata_json)
+                    VALUES (?, 'concept', ?, ?, 1, ?, 0.35, 0, 1, ?, ?, '{}')""",
+                    (layer["id"], concept_name, max(2.0, float(len(vectors))), 42.0 + 5.0 * len(vectors), timestamp, timestamp),
+                )
+                concept_id = int(cursor.lastrowid)
+            centroid_row = conn.execute(
+                "SELECT id FROM concept_centroids WHERE concept_cloud_id = ?", (concept_id,)
+            ).fetchone()
+            centroid_json = json.dumps(centroid, separators=(",", ":"))
+            members_json = json.dumps(ordered_ids, separators=(",", ":"))
+            if centroid_row:
+                conn.execute(
+                    """UPDATE concept_centroids SET centroid_vector_json = ?,
+                    member_lexeme_ids_json = ?, updated_at = ? WHERE id = ?""",
+                    (centroid_json, members_json, now(), centroid_row["id"]),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO concept_centroids
+                    (concept_cloud_id, centroid_vector_json, member_lexeme_ids_json, stability, created_at, updated_at)
+                    VALUES (?, ?, ?, 0.5, ?, ?)""",
+                    (concept_id, centroid_json, members_json, now(), now()),
+                )
+            self._write_memberships(conn, concept_id, vectors, centroid)
+            conn.commit()
+        return concept_id
+
+    def _add_lexemes_to_concept(self, concept_cloud_id: int, lexeme_ids: List[int]) -> None:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT member_lexeme_ids_json FROM concept_centroids WHERE concept_cloud_id = ?",
+                (concept_cloud_id,),
+            ).fetchone()
+        if not row:
+            return
+        members = sorted(set(json.loads(row["member_lexeme_ids_json"] or "[]")) | set(lexeme_ids))
+        vectors = {item: self.get_context_vector(item) for item in members}
+        vectors = {item: vector for item, vector in vectors.items() if vector}
+        if len(vectors) < 2:
+            return
+        centroid = self._centroid(vectors.values())
+        with get_connection() as conn:
+            conn.execute(
+                """UPDATE concept_centroids SET centroid_vector_json = ?,
+                member_lexeme_ids_json = ?, stability = MIN(1, stability + 0.03), updated_at = ?
+                WHERE concept_cloud_id = ?""",
+                (
+                    json.dumps(centroid, separators=(",", ":")),
+                    json.dumps(sorted(vectors), separators=(",", ":")),
+                    now(),
+                    concept_cloud_id,
+                ),
+            )
+            self._write_memberships(conn, concept_cloud_id, vectors, centroid)
+            conn.execute(
+                """UPDATE clouds SET mass = MAX(mass, ?), observation_count = observation_count + 1,
+                stability = MIN(1, stability + 0.02), updated_at = ? WHERE id = ?""",
+                (float(len(vectors)), now(), concept_cloud_id),
+            )
+            conn.commit()
+
+    def _write_memberships(
+        self,
+        conn,
+        concept_cloud_id: int,
+        vectors: Dict[int, Dict[int, float]],
+        centroid: Dict[int, float],
+    ) -> None:
+        for lexeme_id, vector in vectors.items():
+            similarity = self.cosine_similarity(vector, centroid)
+            membership = self._smoothstep(0.55, 0.85, similarity)
+            conn.execute(
+                """INSERT INTO lexeme_concept_membership
+                (lexeme_id, concept_cloud_id, membership, centrality, context_coverage, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lexeme_id, concept_cloud_id) DO UPDATE SET
+                    membership = excluded.membership,
+                    centrality = excluded.centrality,
+                    context_coverage = excluded.context_coverage,
+                    updated_at = excluded.updated_at""",
+                (
+                    lexeme_id,
+                    concept_cloud_id,
+                    membership,
+                    similarity,
+                    min(1.0, len(vector) / max(1, len(centroid))),
+                    now(),
+                ),
+            )
+
+    def get_concept_members(self, concept_cloud_id: int) -> List[Tuple[int, float]]:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """SELECT lexeme_id, membership FROM lexeme_concept_membership
+                WHERE concept_cloud_id = ? AND membership > 0 ORDER BY membership DESC""",
+                (concept_cloud_id,),
+            ).fetchall()
+        return [(int(row["lexeme_id"]), float(row["membership"])) for row in rows]
+
+    def merge_concepts(self, concept_a_id: int, concept_b_id: int, threshold: float = 0.92) -> Optional[int]:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """SELECT concept_cloud_id, centroid_vector_json, member_lexeme_ids_json
+                FROM concept_centroids WHERE concept_cloud_id IN (?, ?)""",
+                (concept_a_id, concept_b_id),
+            ).fetchall()
+        data = {int(row["concept_cloud_id"]): row for row in rows}
+        if concept_a_id not in data or concept_b_id not in data:
+            return None
+        left = json.loads(data[concept_a_id]["centroid_vector_json"])
+        right = json.loads(data[concept_b_id]["centroid_vector_json"])
+        if self.cosine_similarity(left, right) < threshold:
+            return None
+        members = sorted(
+            set(json.loads(data[concept_a_id]["member_lexeme_ids_json"]))
+            | set(json.loads(data[concept_b_id]["member_lexeme_ids_json"]))
+        )
+        self._add_lexemes_to_concept(concept_a_id, members)
+        with get_connection() as conn:
+            conn.execute("DELETE FROM lexeme_concept_membership WHERE concept_cloud_id = ?", (concept_b_id,))
+            conn.execute("DELETE FROM concept_centroids WHERE concept_cloud_id = ?", (concept_b_id,))
+            conn.execute("DELETE FROM clouds WHERE id = ?", (concept_b_id,))
+            conn.commit()
+        return concept_a_id
+
+    @staticmethod
+    def _centroid(vectors: Iterable[Dict[int, float]]) -> Dict[int, float]:
+        items = list(vectors)
+        keys = set().union(*(vector.keys() for vector in items))
+        return {int(key): sum(vector.get(key, 0.0) for vector in items) / len(items) for key in keys}
+
+    @staticmethod
+    def _smoothstep(edge0: float, edge1: float, value: float) -> float:
+        position = max(0.0, min(1.0, (value - edge0) / (edge1 - edge0)))
+        return position * position * (3.0 - 2.0 * position)
+
+    @staticmethod
+    def _row_to_lexeme(row) -> Lexeme:
         return Lexeme(
-            id=row["id"],
+            id=int(row["id"]),
             canonical_form=row["canonical_form"],
             language=row["language"],
             pos_tag=row["pos_tag"],
             features_json=row["features_json"] or "{}",
-            frequency=row["frequency"],
+            frequency=int(row["frequency"]),
             created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else None,
             updated_at=datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None,
         )
 
 
-# Global instance
 lexeme_service = LexemeService()

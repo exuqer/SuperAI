@@ -1,6 +1,8 @@
 """Tests for the relation-free concept field - legacy compatibility tests."""
 
 import sqlite3
+import json
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -83,12 +85,11 @@ def test_training_creates_word_forms_and_persists_field(isolated_database):
     assert all(concept["radius"] <= 250 for concept in result["concepts"])
 
     # Check that new nebula tables exist
-    tables = {
-        row[0]
-        for row in sqlite3.connect(isolated_database).execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        )
-    }
+    with closing(sqlite3.connect(isolated_database)) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
     # Should have nebula tables, not just "concepts"
     assert "clouds" in tables
     assert "layers" in tables
@@ -112,22 +113,28 @@ def test_existing_mass_increments_on_repeated_learning(isolated_database):
 
 
 def test_word_order_affects_activation_spread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Test that word order affects activation spread and thus positions."""
-    first_db = tmp_path / "first.sqlite"
-    monkeypatch.setattr(database, "DB_PATH", first_db)
-    init_db()
-    first = TrainingManager(PhysicsConfig(steps=5)).learn("кот ест рыбу")
-    first_positions = {concept["token"]: concept["position"] for concept in first["concepts"]}
+    """Test that scene structure preserves word order."""
+    manager = TrainingManager(PhysicsConfig(steps=5))
+    manager.learn("кот ест рыбу")
+    manager.learn("рыбу ест кот")
 
-    second_db = tmp_path / "second.sqlite"
-    monkeypatch.setattr(database, "DB_PATH", second_db)
-    init_db()
-    second = TrainingManager(PhysicsConfig(steps=5)).learn("рыбу ест кот")
-    second_positions = {concept["token"]: concept["position"] for concept in second["concepts"]}
+    with database.get_connection() as conn:
+        scenes = conn.execute(
+            "SELECT word_form_cloud_ids_json FROM scenes ORDER BY id"
+        ).fetchall()
+        orders = []
+        for scene in scenes:
+            ids = json.loads(scene["word_form_cloud_ids_json"])
+            placeholders = ",".join("?" for _ in ids)
+            names = {
+                row["id"]: row["canonical_name"]
+                for row in conn.execute(
+                    f"SELECT id, canonical_name FROM clouds WHERE id IN ({placeholders})", ids
+                ).fetchall()
+            }
+            orders.append([names[item] for item in ids])
 
-    # Positions should differ due to different activation spread order
-    # At least one token should have different position
-    assert first_positions != second_positions
+    assert orders == [["кот", "ест", "рыбу"], ["рыбу", "ест", "кот"]]
 
 
 def test_simulation_is_finite_and_bounded():

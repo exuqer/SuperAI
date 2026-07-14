@@ -541,156 +541,267 @@ class HierarchyResponse(BaseModel):
 
 
 @app.get("/api/field/hierarchy", response_model=HierarchyResponse)
-async def get_field_hierarchy(max_depth: int = 3):
-    """
-    Get field hierarchy with scenes, structural spaces, lexemes, and semantic overlays.
-    Returns local centers, radii, and computed contributions for semantic overlays.
-    """
-    cloud_repo = CloudRepository()
-    layer_repo = LayerRepository()
-    space_repo = SpaceRepository()
-    placement_repo = CloudPlacementRepository()
-    
-    # Get layer IDs
-    scene_layer = layer_repo.get_by_name("scene")
-    lexeme_layer = layer_repo.get_by_name("lexeme")
-    concept_layer = layer_repo.get_by_name("concept")
-    
+async def get_field_hierarchy(max_depth: int = Query(default=3, ge=1, le=4)):
     result = HierarchyResponse()
-    
-    # Get scenes
-    if scene_layer:
-        scene_clouds = cloud_repo.get_by_layer(scene_layer.id, limit=100)
-        for cloud in scene_clouds:
-            # Get scene details
-            with get_connection() as conn:
-                scene_row = conn.execute(
-                    "SELECT * FROM scenes WHERE scene_cloud_id = ?", (cloud.id,)
+    word_occurrences: List[Dict[str, Any]] = []
+
+    with get_connection() as conn:
+        layer_rows = conn.execute("SELECT id, name FROM layers").fetchall()
+        layers = {row["name"]: int(row["id"]) for row in layer_rows}
+        scene_layer_id = layers.get("scene")
+        if not scene_layer_id:
+            return result
+
+        scene_rows = conn.execute(
+            """SELECT s.*, c.canonical_name, c.mass, c.density, c.radius, c.stability,
+                c.activation, c.observation_count,
+                COALESCE(p.x, 500) AS x, COALESCE(p.y, 350) AS y
+            FROM scenes s
+            JOIN clouds c ON c.id = s.scene_cloud_id
+            LEFT JOIN spaces gs ON gs.layer_id = c.layer_id AND gs.mode = 'global' AND gs.host_cloud_id = 0
+            LEFT JOIN cloud_placements p ON p.space_id = gs.id AND p.cloud_id = c.id
+            ORDER BY c.mass DESC, s.id"""
+        ).fetchall()
+
+        for scene_row in scene_rows:
+            word_ids = [int(item) for item in json.loads(scene_row["word_form_cloud_ids_json"] or "[]")]
+            lexeme_ids = [int(item) for item in json.loads(scene_row["lexeme_ids_json"] or "[]")]
+            placement_rows = conn.execute(
+                """SELECT sc.position_index, sc.child_cloud_id, p.x, p.y, p.radius
+                FROM structural_components sc
+                LEFT JOIN cloud_placements p ON p.id = sc.child_placement_id
+                WHERE sc.parent_cloud_id = ? AND sc.role = 'word_form'
+                ORDER BY sc.position_index""",
+                (scene_row["scene_cloud_id"],),
+            ).fetchall()
+            placements = {int(row["position_index"]): row for row in placement_rows}
+            scene_words: List[Dict[str, Any]] = []
+            for index, word_id in enumerate(word_ids):
+                word_row = conn.execute(
+                    """SELECT c.*, l.id AS lexeme_id, l.canonical_form, l.pos_tag
+                    FROM clouds c
+                    LEFT JOIN word_form_to_lexeme w ON w.word_form_cloud_id = c.id
+                    LEFT JOIN lexemes l ON l.id = w.lexeme_id
+                    WHERE c.id = ? ORDER BY w.is_canonical DESC LIMIT 1""",
+                    (word_id,),
                 ).fetchone()
-                
-                if scene_row:
-                    # Get word forms and lexemes for this scene
-                    word_form_ids = json.loads(scene_row["word_form_cloud_ids_json"] or "[]")
-                    lexeme_ids = json.loads(scene_row["lexeme_ids_json"] or "[]")
-                    
-                    word_forms = []
-                    for wf_id in word_form_ids:
-                        wf_cloud = cloud_repo.get_by_id(wf_id)
-                        if wf_cloud:
-                            word_forms.append(wf_cloud.to_dict())
-                    
-                    lexemes = []
-                    for lex_id in lexeme_ids:
-                        lex = lexeme_service.get_lexeme_for_word_form(lex_id)  # This won't work, need to fix
-                        # Actually get lexeme by ID
-                        with get_connection() as conn2:
-                            lex_row = conn2.execute("SELECT * FROM lexemes WHERE id = ?", (lex_id,)).fetchone()
-                            if lex_row:
-                                lexemes.append({
-                                    "id": lex_row["id"],
-                                    "canonical_form": lex_row["canonical_form"],
-                                    "pos_tag": lex_row["pos_tag"],
-                                })
-                    
-                    result.scenes.append({
-                        "cloud": cloud.to_dict(),
-                        "sentence_text": scene_row["sentence_text"],
-                        "word_forms": word_forms,
-                        "lexemes": lexemes,
-                    })
-    
-    # Get structural spaces (for word forms)
-    word_form_layer = layer_repo.get_by_name("word_form")
-    if word_form_layer:
-        word_clouds = cloud_repo.get_by_layer(word_form_layer.id, limit=200)
-        for cloud in word_clouds:
-            struct_space = space_repo.get_structural_space(cloud.id)
-            if struct_space:
-                placements = placement_repo.get_by_space(struct_space.id)
-                children = []
-                for p in placements:
-                    child = cloud_repo.get_by_id(p.cloud_id)
-                    if child:
-                        children.append({
-                            "cloud": child.to_dict(),
-                            "placement": p.to_dict(),
-                        })
-                result.structural_spaces.append({
-                    "host_cloud": cloud.to_dict(),
-                    "space": struct_space.to_dict(),
-                    "children": children,
-                })
-    
-    # Get lexemes
-    if lexeme_layer:
-        lexeme_clouds = cloud_repo.get_by_layer(lexeme_layer.id, limit=200)
-        for cloud in lexeme_clouds:
-            # Get lexeme details
-            with get_connection() as conn:
-                lex_row = conn.execute(
-                    "SELECT * FROM lexemes WHERE canonical_form = ?", (cloud.canonical_form,)
-                ).fetchone()
-                if lex_row:
-                    # Get word forms for this lexeme
-                    wf_rows = conn.execute(
-                        """SELECT wfl.word_form_cloud_id, c.canonical_name 
-                        FROM word_form_to_lexeme wfl
-                        JOIN clouds c ON wfl.word_form_cloud_id = c.id
-                        WHERE wfl.lexeme_id = ?""",
-                        (lex_row["id"],)
+                if not word_row:
+                    continue
+                placement = placements.get(index)
+                local_x = float(placement["x"]) if placement and placement["x"] is not None else 0.0
+                local_y = float(placement["y"]) if placement and placement["y"] is not None else 0.0
+                world_x = float(scene_row["x"]) + local_x
+                world_y = float(scene_row["y"]) + local_y
+                lexeme_id = (
+                    int(word_row["lexeme_id"])
+                    if word_row["lexeme_id"] is not None
+                    else (lexeme_ids[index] if index < len(lexeme_ids) else None)
+                )
+                characters: List[Dict[str, Any]] = []
+                if max_depth >= 3:
+                    character_rows = conn.execute(
+                        """SELECT sc.position_index, c.id, c.canonical_name, c.mass,
+                            c.density, c.radius, c.stability, c.activation, p.x, p.y
+                        FROM structural_components sc
+                        JOIN clouds c ON c.id = sc.child_cloud_id
+                        LEFT JOIN cloud_placements p ON p.id = sc.child_placement_id
+                        WHERE sc.parent_cloud_id = ? AND sc.role = 'character'
+                        ORDER BY sc.position_index""",
+                        (word_id,),
                     ).fetchall()
-                    
-                    word_forms = [{"id": r["word_form_cloud_id"], "name": r["canonical_name"]} for r in wf_rows]
-                    
-                    result.lexemes.append({
-                        "cloud": cloud.to_dict(),
-                        "lexeme": {
-                            "id": lex_row["id"],
-                            "canonical_form": lex_row["canonical_form"],
-                            "pos_tag": lex_row["pos_tag"],
-                            "frequency": lex_row["frequency"],
-                        },
-                        "word_forms": word_forms,
-                    })
-    
-    # Get semantic overlays (concept projections)
-    if concept_layer:
-        concept_clouds = cloud_repo.get_by_layer(concept_layer.id, limit=100)
-        for cloud in concept_clouds:
-            # Get semantic space for this concept
-            semantic_space = space_repo.get_semantic_space(cloud.id)
-            if semantic_space:
-                # Get overlays in this space
-                with get_connection() as conn:
-                    overlay_rows = conn.execute(
-                        """SELECT * FROM semantic_overlays WHERE concept_cloud_id = ?""",
-                        (cloud.id,)
-                    ).fetchall()
-                    
-                    for overlay in overlay_rows:
-                        member_lexeme_ids = json.loads(overlay["member_lexeme_ids_json"] or "[]")
-                        member_weights = json.loads(overlay["member_weights_json"] or "[]")
-                        
-                        members = []
-                        for lid, weight in zip(member_lexeme_ids, member_weights):
-                            with get_connection() as conn2:
-                                lex_row = conn2.execute("SELECT canonical_form FROM lexemes WHERE id = ?", (lid,)).fetchone()
-                                if lex_row:
-                                    members.append({
-                                        "lexeme_id": lid,
-                                        "canonical_form": lex_row["canonical_form"],
-                                        "weight": weight,
-                                    })
-                        
-                        result.semantic_overlays.append({
-                            "concept_cloud": cloud.to_dict(),
-                            "space_id": overlay["space_id"],
-                            "center_x": overlay["center_x"],
-                            "center_y": overlay["center_y"],
-                            "radius": overlay["radius"],
-                            "members": members,
+                    for character in character_rows:
+                        characters.append({
+                            "id": int(character["id"]),
+                            "key": f"{scene_row['id']}:{index}:{character['position_index']}",
+                            "token": character["canonical_name"],
+                            "index": int(character["position_index"]),
+                            "x": world_x + float(character["x"] or 0.0),
+                            "y": world_y + float(character["y"] or 0.0),
+                            "radius": max(3.0, float(character["radius"]) * 0.55),
+                            "mass": float(character["mass"]),
+                            "density": float(character["density"]),
+                            "stability": float(character["stability"]),
+                            "activation": float(character["activation"]),
+                            "layer": "character",
+                            "cloud_type": "character",
                         })
-    
+                word = {
+                    "id": int(word_row["id"]),
+                    "key": f"{scene_row['id']}:{index}",
+                    "token": word_row["canonical_name"],
+                    "index": index,
+                    "x": world_x,
+                    "y": world_y,
+                    "local_x": local_x,
+                    "local_y": local_y,
+                    "radius": max(28.0, float(placement["radius"]) * 2.4) if placement else 30.0,
+                    "mass": float(word_row["mass"]),
+                    "density": float(word_row["density"]),
+                    "stability": float(word_row["stability"]),
+                    "activation": float(word_row["activation"]),
+                    "layer": "word_form",
+                    "cloud_type": "word_form",
+                    "lexeme_id": lexeme_id,
+                    "lexeme": word_row["canonical_form"] or word_row["canonical_name"],
+                    "pos_tag": word_row["pos_tag"],
+                    "scene_cloud_id": int(scene_row["scene_cloud_id"]),
+                    "scene_x": float(scene_row["x"]),
+                    "scene_y": float(scene_row["y"]),
+                    "scene_radius": float(scene_row["radius"]),
+                    "characters": characters,
+                }
+                scene_words.append(word)
+                word_occurrences.append(word)
+
+            result.scenes.append({
+                "id": int(scene_row["scene_cloud_id"]),
+                "scene_id": int(scene_row["id"]),
+                "token": scene_row["sentence_text"],
+                "canonical_name": scene_row["canonical_name"],
+                "sentence_text": scene_row["sentence_text"],
+                "x": float(scene_row["x"]),
+                "y": float(scene_row["y"]),
+                "radius": float(scene_row["radius"]),
+                "mass": float(scene_row["mass"]),
+                "density": float(scene_row["density"]),
+                "stability": float(scene_row["stability"]),
+                "activation": float(scene_row["activation"]),
+                "observation_count": int(scene_row["observation_count"]),
+                "layer": "scene",
+                "cloud_type": "scene",
+                "words": scene_words,
+                "word_forms": scene_words,
+            })
+
+        grouped_occurrences: Dict[int, List[Dict[str, Any]]] = {}
+        for occurrence in word_occurrences:
+            if occurrence["lexeme_id"] is not None:
+                grouped_occurrences.setdefault(int(occurrence["lexeme_id"]), []).append(occurrence)
+        for occurrences in grouped_occurrences.values():
+            remaining = set(range(len(occurrences)))
+            while remaining:
+                component = {remaining.pop()}
+                changed = True
+                while changed:
+                    changed = False
+                    for candidate in list(remaining):
+                        if any(
+                            (
+                                (occurrences[candidate]["scene_x"] - occurrences[index]["scene_x"]) ** 2
+                                + (occurrences[candidate]["scene_y"] - occurrences[index]["scene_y"]) ** 2
+                            ) ** 0.5
+                            < occurrences[candidate]["scene_radius"] + occurrences[index]["scene_radius"]
+                            for index in component
+                        ):
+                            component.add(candidate)
+                            remaining.remove(candidate)
+                            changed = True
+                if len(component) < 2:
+                    continue
+                center_x = sum(occurrences[index]["x"] for index in component) / len(component)
+                center_y = sum(occurrences[index]["y"] for index in component) / len(component)
+                for index in component:
+                    occurrence = occurrences[index]
+                    dx = center_x - occurrence["x"]
+                    dy = center_y - occurrence["y"]
+                    occurrence["x"] = center_x
+                    occurrence["y"] = center_y
+                    for character in occurrence["characters"]:
+                        character["x"] += dx
+                        character["y"] += dy
+
+        lexeme_rows = conn.execute(
+            """SELECT l.*, c.id AS cloud_id, c.mass, c.density, c.radius,
+                c.stability, c.activation
+            FROM lexemes l
+            LEFT JOIN clouds c ON c.canonical_name = l.canonical_form
+                AND c.layer_id = ?
+            ORDER BY l.frequency DESC, l.id""",
+            (layers.get("lexeme", -1),),
+        ).fetchall()
+        for lexeme in lexeme_rows:
+            forms = conn.execute(
+                """SELECT c.id, c.canonical_name AS name FROM word_form_to_lexeme w
+                JOIN clouds c ON c.id = w.word_form_cloud_id WHERE w.lexeme_id = ?""",
+                (lexeme["id"],),
+            ).fetchall()
+            result.lexemes.append({
+                "id": int(lexeme["cloud_id"] or lexeme["id"]),
+                "lexeme_id": int(lexeme["id"]),
+                "token": lexeme["canonical_form"],
+                "canonical_form": lexeme["canonical_form"],
+                "pos_tag": lexeme["pos_tag"],
+                "frequency": int(lexeme["frequency"]),
+                "mass": float(lexeme["mass"] or 1),
+                "density": float(lexeme["density"] or 1),
+                "radius": float(lexeme["radius"] or 18),
+                "stability": float(lexeme["stability"] or 0),
+                "activation": float(lexeme["activation"] or 0),
+                "layer": "lexeme",
+                "cloud_type": "lexeme",
+                "word_forms": [dict(form) for form in forms],
+            })
+
+        concept_rows = conn.execute(
+            """SELECT c.*, cc.member_lexeme_ids_json
+            FROM clouds c
+            JOIN concept_centroids cc ON cc.concept_cloud_id = c.id
+            WHERE c.layer_id = ? ORDER BY c.mass DESC""",
+            (layers.get("concept", -1),),
+        ).fetchall()
+        for concept in concept_rows:
+            memberships = conn.execute(
+                """SELECT m.lexeme_id, m.membership, m.centrality, l.canonical_form
+                FROM lexeme_concept_membership m
+                JOIN lexemes l ON l.id = m.lexeme_id
+                WHERE m.concept_cloud_id = ? AND m.membership > 0
+                ORDER BY m.membership DESC""",
+                (concept["id"],),
+            ).fetchall()
+            weights = {int(row["lexeme_id"]): float(row["membership"]) for row in memberships}
+            matched = [word for word in word_occurrences if word["lexeme_id"] in weights]
+            if not matched:
+                continue
+            total_weight = sum(weights[word["lexeme_id"]] for word in matched)
+            center_x = sum(word["x"] * weights[word["lexeme_id"]] for word in matched) / total_weight
+            center_y = sum(word["y"] * weights[word["lexeme_id"]] for word in matched) / total_weight
+            spread = max(
+                (((word["x"] - center_x) ** 2 + (word["y"] - center_y) ** 2) ** 0.5)
+                + word["radius"]
+                for word in matched
+            )
+            result.semantic_overlays.append({
+                "id": int(concept["id"]),
+                "token": concept["canonical_name"],
+                "concept_name": concept["canonical_name"],
+                "center_x": center_x,
+                "center_y": center_y,
+                "radius": max(float(concept["radius"]), spread + 22.0),
+                "mass": float(concept["mass"]),
+                "density": float(concept["density"]),
+                "stability": float(concept["stability"]),
+                "activation": float(concept["activation"]),
+                "layer": "concept",
+                "cloud_type": "concept",
+                "members": [
+                    {
+                        "lexeme_id": int(member["lexeme_id"]),
+                        "canonical_form": member["canonical_form"],
+                        "weight": float(member["membership"]),
+                        "centrality": float(member["centrality"]),
+                    }
+                    for member in memberships
+                ],
+            })
+
+        if max_depth >= 3:
+            for scene in result.scenes:
+                for word in scene["words"]:
+                    result.structural_spaces.append({
+                        "host_cloud": {"id": word["id"], "canonical_name": word["token"]},
+                        "children": word["characters"],
+                    })
+
     return result
 
 
@@ -701,6 +812,7 @@ async def get_field_hierarchy(max_depth: int = 3):
 @app.post("/api/scenes/similarity")
 async def compute_scene_similarity(scene_a_id: int, scene_b_id: int):
     """Compute weighted Jaccard similarity between two scenes."""
+    cloud_repo = CloudRepository()
     with get_connection() as conn:
         # Get scene data
         scene_a = conn.execute("SELECT * FROM scenes WHERE id = ?", (scene_a_id,)).fetchone()
@@ -725,8 +837,8 @@ async def compute_scene_similarity(scene_a_id: int, scene_b_id: int):
         cloud_a = cloud_repo.get_by_id(scene_a["scene_cloud_id"])
         cloud_b = cloud_repo.get_by_id(scene_b["scene_cloud_id"])
         
-        r1 = cloud_a.mass if cloud_a else 1.0
-        r2 = cloud_b.mass if cloud_b else 1.0
+        r1 = cloud_a.radius if cloud_a else 1.0
+        r2 = cloud_b.radius if cloud_b else 1.0
         
         weight = (r1 + r2) * max(0.35, min(1.15, 1.15 - 1.1 * jaccard))
         

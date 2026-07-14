@@ -1,5 +1,6 @@
 """Tests for the recursive nebula system."""
 
+import asyncio
 import pytest
 from datetime import datetime
 
@@ -13,7 +14,7 @@ from server.services.activation import ActivationManager, compute_activation_fro
 from server.training import TrainingManager, TrainingConfig
 from server.physics import LocalSpacePhysics, create_space_physics, PhysicsConfig
 from server.services.zoom import zoom_service
-from server.server import RegionSelectRequest
+from server.server import RegionSelectRequest, get_field_hierarchy
 
 
 def now_str():
@@ -289,14 +290,12 @@ def test_training_semantic_proximity():
     
     assert len(concepts) > 0
     
-    # Check co-activation stats exist
+    # Check fuzzy semantic membership exists without relation edges
     from server.database import get_connection
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM coactivation_stats WHERE layer_id = ?",
-            (concept_layer_id,)
+            "SELECT * FROM lexeme_concept_membership WHERE membership > 0"
         ).fetchall()
-        # Should have some co-activation records
         assert len(rows) > 0
 
 
@@ -343,11 +342,11 @@ def test_zoom_semantic():
     concept_layer_id = manager.get_layer_id("concept")
     cloud_repo = CloudRepository()
     concepts = cloud_repo.get_by_layer(concept_layer_id)
-    мяч_concept = next((c for c in concepts if "мяч" in c.canonical_name), None)
-    assert мяч_concept is not None
+    adjective_concept = next((c for c in concepts if "круглый" in c.canonical_name), None)
+    assert adjective_concept is not None
     
     # Zoom in semantic
-    result = zoom_service.zoom_in_semantic("test_session", мяч_concept.id)
+    result = zoom_service.zoom_in_semantic("test_session", adjective_concept.id)
     
     assert result is not None
     assert result["space"]["mode"] == "semantic"
@@ -359,17 +358,17 @@ def test_region_selection():
     config = TrainingConfig(min_word_observations=1, min_concept_observations=1, enable_concept_layer=True)
     manager = TrainingManager(config)
     
-    # Train
     manager.learn("круглый мяч")
+    manager.learn("красный мяч")
     
     # Get semantic space
     concept_layer_id = manager.get_layer_id("concept")
     cloud_repo = CloudRepository()
     concepts = cloud_repo.get_by_layer(concept_layer_id)
-    мяч_concept = next((c for c in concepts if "мяч" in c.canonical_name), None)
+    adjective_concept = next((c for c in concepts if "круглый" in c.canonical_name), None)
     
     # Zoom to get space
-    result = zoom_service.zoom_in_semantic("test_session", мяч_concept.id)
+    result = zoom_service.zoom_in_semantic("test_session", adjective_concept.id)
     space_id = result["space"]["id"]
     
     # Just verify the space was created
@@ -518,6 +517,44 @@ def test_physics_local_simulation():
     moved_1 = abs(updated_p1.x - 300) > 0.01 or abs(updated_p1.y - 300) > 0.01
     moved_2 = abs(updated_p2.x - 500) > 0.01 or abs(updated_p2.y - 300) > 0.01
     assert moved_1 or moved_2, f"Neither placement moved: p1=({updated_p1.x}, {updated_p1.y}), p2=({updated_p2.x}, {updated_p2.y})"
+
+
+def test_scene_hierarchy_overlaps_and_reuses_shared_words():
+    manager = TrainingManager(TrainingConfig(min_word_observations=1))
+    manager.learn("Кот ест рыбу. Кот ест мясо.")
+
+    hierarchy = asyncio.run(get_field_hierarchy(3))
+    assert len(hierarchy.scenes) == 2
+
+    first, second = hierarchy.scenes
+    distance = ((first["x"] - second["x"]) ** 2 + (first["y"] - second["y"]) ** 2) ** 0.5
+    assert distance < first["radius"] + second["radius"]
+
+    for token in ("кот", "ест"):
+        left = next(word for word in first["words"] if word["token"] == token)
+        right = next(word for word in second["words"] if word["token"] == token)
+        assert (left["x"], left["y"]) == pytest.approx((right["x"], right["y"]))
+
+    cat = next(word for word in first["words"] if word["token"] == "кот")
+    assert [character["token"] for character in cat["characters"]] == ["к", "о", "т"]
+
+
+def test_synonyms_form_a_fuzzy_concept_overlay():
+    manager = TrainingManager(TrainingConfig(
+        min_word_observations=1,
+        min_concept_observations=1,
+        enable_concept_layer=True,
+    ))
+    manager.learn("Кружка стоит. Стакан стоит.")
+
+    hierarchy = asyncio.run(get_field_hierarchy(3))
+    overlay = next(
+        item
+        for item in hierarchy.semantic_overlays
+        if {member["canonical_form"] for member in item["members"]} == {"кружка", "стакан"}
+    )
+    assert overlay["radius"] > 0
+    assert all(0 < member["weight"] <= 1 for member in overlay["members"])
 
 
 if __name__ == "__main__":

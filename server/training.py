@@ -2,6 +2,7 @@
 
 import time
 import uuid
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -116,6 +117,8 @@ class TrainingManager:
             "activations": [],
         }
         
+        learned_lexeme_ids: List[int] = []
+
         # Process each sentence as a context window
         for sent_idx, sentence in enumerate(tokenization.sentences):
             context_id = f"{self.session_id}:{sent_idx}"
@@ -133,10 +136,7 @@ class TrainingManager:
             sentence_lexeme_ids = []
             if self.config.enable_lexeme_layer:
                 sentence_lexeme_ids = self._learn_lexemes(sentence, context_id, results)
-            
-            # Learn concepts from lexeme context vectors (if enabled)
-            if self.config.enable_concept_layer and sentence_lexeme_ids:
-                self._learn_concepts(sentence_lexeme_ids, context_id, results)
+                learned_lexeme_ids.extend(sentence_lexeme_ids)
             
             # Create scene from word forms (if enabled)
             if self.config.enable_scene_layer:
@@ -144,6 +144,9 @@ class TrainingManager:
             
             # Run local physics for active spaces
             self._run_physics_for_active_spaces(results)
+
+        if self.config.enable_concept_layer and learned_lexeme_ids:
+            self._learn_concepts(learned_lexeme_ids, f"{self.session_id}:concepts", results)
         
         # Update co-activation statistics
         self._update_coactivation_stats(results)
@@ -305,6 +308,12 @@ class TrainingManager:
                 })
             
             self._ensure_global_space_and_placement(lexeme_cloud, lexeme_layer_id)
+            self._create_structural_links(
+                lexeme_cloud,
+                [word_cloud],
+                child_layer_id=word_layer_id,
+                role="word_form",
+            )
             
             # Activate lexeme
             self.activation_manager.activate_cloud(lexeme_cloud, 0.9)
@@ -327,26 +336,19 @@ class TrainingManager:
         if not concept_layer_id:
             return
         
-        if len(sentence_lexeme_ids) < 2:
-            return
-        
-        # Find or create concept from lexemes with similar context vectors
-        concept_cloud_id = lexeme_service.find_or_create_concept(
-            sentence_lexeme_ids,
-            min_contexts=3,
+        concept_cloud_ids = lexeme_service.discover_concepts(
+            min_contexts=max(1, self.config.min_concept_observations),
             similarity_threshold=0.72,
-            merge_threshold=0.85,
-            unify_threshold=0.92
         )
-        
-        if concept_cloud_id:
+
+        for concept_cloud_id in concept_cloud_ids:
             concept_cloud = self.cloud_repo.get_by_id(concept_cloud_id)
             if concept_cloud:
-                if concept_cloud.id not in [c["id"] for c in results["created_clouds"]]:
+                known_ids = {item["id"] for item in results["created_clouds"]}
+                if concept_cloud.id not in known_ids:
                     results["created_clouds"].append({
                         "id": concept_cloud.id, "name": concept_cloud.canonical_name, "layer": "concept"
                     })
-                    # Ensure concept has semantic space
                     self._ensure_semantic_space(concept_cloud, concept_layer_id)
                 else:
                     results["strengthened_clouds"].append({
@@ -387,68 +389,60 @@ class TrainingManager:
         if len(word_clouds) < 2:
             return
         
-        # Create scene cloud
-        scene_name = " ".join([c.canonical_name for c in word_clouds[:5]])
-        if len(word_clouds) > 5:
-            scene_name += "..."
-        
-        # Check if similar scene exists
+        scene_name = " ".join(cloud.canonical_name for cloud in word_clouds)
+        scene_cloud = self.cloud_repo.get_by_canonical_name(scene_layer_id, scene_name)
+        is_new = scene_cloud is None
+        if scene_cloud is None:
+            scene_cloud = self.cloud_repo.create(Cloud(
+                layer_id=scene_layer_id,
+                cloud_type="scene",
+                canonical_name=scene_name,
+                mass=2.0,
+                density=0.85,
+                radius=95.0 + min(85.0, 14.0 * len(word_clouds)),
+                stability=0.4,
+                observation_count=1,
+            ))
+        else:
+            self.cloud_repo.increment_observation(scene_cloud.id, mass_delta=0.25, stability_delta=0.03)
+            scene_cloud = self.cloud_repo.get_by_id(scene_cloud.id) or scene_cloud
+
         with get_connection() as conn:
-            existing = conn.execute(
-                """SELECT s.*, c.canonical_name FROM scenes s
-                JOIN clouds c ON s.scene_cloud_id = c.id
-                WHERE c.layer_id = ?""",
-                (scene_layer_id,)
-            ).fetchall()
-            
-            # Check if scene with same name already exists
-            scene_cloud = None
-            for row in existing:
-                if row["canonical_name"] == scene_name:
-                    scene_cloud = self.cloud_repo.get_by_id(row["scene_cloud_id"])
-                    break
-            
-            if not scene_cloud:
-                # Create new scene cloud
-                scene_cloud = self.cloud_repo.create(Cloud(
-                    layer_id=scene_layer_id,
-                    cloud_type="scene",
-                    canonical_name=scene_name,
-                    mass=2.0,
-                    density=1.0,
-                    radius=40.0,
-                    stability=0.4,
-                    observation_count=1,
-                ))
-                
-                # Store scene with ordered word forms and lexemes
+            stored_scene = conn.execute(
+                "SELECT id FROM scenes WHERE scene_cloud_id = ?", (scene_cloud.id,)
+            ).fetchone()
+            values = (
+                sentence.text,
+                json.dumps(word_form_ids, separators=(",", ":")),
+                json.dumps(lexeme_ids, separators=(",", ":")),
+                now(),
+            )
+            if stored_scene:
+                conn.execute(
+                    """UPDATE scenes SET sentence_text = ?, word_form_cloud_ids_json = ?,
+                    lexeme_ids_json = ?, updated_at = ? WHERE id = ?""",
+                    (*values, stored_scene["id"]),
+                )
+            else:
                 conn.execute(
                     """INSERT INTO scenes
                     (scene_cloud_id, sentence_text, word_form_cloud_ids_json, lexeme_ids_json, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?)""",
-                    (scene_cloud.id, sentence.text, 
-                     json.dumps(word_form_ids, separators=(",", ":")),
-                     json.dumps(lexeme_ids, separators=(",", ":")),
-                     now(), now())
-                )
-            else:
-                # Update existing scene
-                conn.execute(
-                    """UPDATE scenes SET
-                    sentence_text = ?, word_form_cloud_ids_json = ?, lexeme_ids_json = ?, updated_at = ?
-                    WHERE scene_cloud_id = ?""",
-                    (sentence.text, 
-                     json.dumps(word_form_ids, separators=(",", ":")),
-                     json.dumps(lexeme_ids, separators=(",", ":")),
-                     now(), scene_cloud.id)
+                    (scene_cloud.id, values[0], values[1], values[2], values[3], values[3]),
                 )
             conn.commit()
-        
-        results["created_clouds"].append({
-            "id": scene_cloud.id, "name": scene_cloud.canonical_name, "layer": "scene"
-        })
-        
+
+        target = results["created_clouds"] if is_new else results["strengthened_clouds"]
+        target.append({"id": scene_cloud.id, "name": scene_cloud.canonical_name, "layer": "scene"})
+
         self._ensure_global_space_and_placement(scene_cloud, scene_layer_id)
+        self._place_scene_by_similarity(scene_cloud, lexeme_ids)
+        self._create_structural_links(
+            scene_cloud,
+            word_clouds,
+            child_layer_id=word_layer_id,
+            role="word_form",
+        )
         
         # Activate scene
         self.activation_manager.activate_cloud(scene_cloud, 0.8)
@@ -458,15 +452,19 @@ class TrainingManager:
         )
         self.sequence_counter += 1
     
-    def _create_structural_links(self, parent: "Cloud", children: List["Cloud"]) -> None:
+    def _create_structural_links(
+        self,
+        parent: "Cloud",
+        children: List["Cloud"],
+        child_layer_id: Optional[int] = None,
+        role: str = "character",
+    ) -> None:
         """Create structural components linking parent to children."""
-        # Ensure parent has structural space
         structural_space = self.placement_repo.get_structural_space(parent.id)
         if not structural_space:
-            # Create structural space for this word
             space = Space(
                 host_cloud_id=parent.id,
-                layer_id=self.get_layer_id("character"),
+                layer_id=child_layer_id or self.get_layer_id("character"),
                 mode="structural",
                 coordinate_dimensions=2,
                 scale=1.0,
@@ -474,39 +472,116 @@ class TrainingManager:
             space_repo = SpaceRepository()
             structural_space = space_repo.create(space)
         
-        # Place children in structural space
-        for idx, child in enumerate(children):
-            # Get or create placement for child in this structural space
-            placements = self.placement_repo.get_by_cloud(child.id)
-            child_placement = None
-            for p in placements:
-                if p.space_id == structural_space.id:
-                    child_placement = p
-                    break
-            
-            if not child_placement:
-                # Create new placement
-                child_placement = self.placement_repo.create(CloudPlacement(
-                    space_id=structural_space.id,
-                    cloud_id=child.id,
-                    x=400 + idx * 100,  # spaced horizontally
-                    y=300,
-                    radius=child.radius,
-                    density=child.density,
-                    mass=child.mass,
-                    activation=0.0,
-                ))
-            
-            # Create structural component
-            self.component_repo.create(StructuralComponent(
-                parent_cloud_id=parent.id,
-                child_cloud_id=child.id,
-                child_placement_id=child_placement.id,
-                position_index=idx,
-                phase=float(idx) * 0.1,
-                weight=1.0,
-                role="character",
-            ))
+        with get_connection() as conn:
+            placement_ids = [
+                row["child_placement_id"]
+                for row in conn.execute(
+                    "SELECT child_placement_id FROM structural_components WHERE parent_cloud_id = ?",
+                    (parent.id,),
+                ).fetchall()
+                if row["child_placement_id"] is not None
+            ]
+            conn.execute("DELETE FROM structural_components WHERE parent_cloud_id = ?", (parent.id,))
+            if placement_ids:
+                placeholders = ",".join("?" for _ in placement_ids)
+                conn.execute(f"DELETE FROM cloud_placements WHERE id IN ({placeholders})", placement_ids)
+
+            count = len(children)
+            span = min(parent.radius * 1.35, max(48.0, 38.0 * max(1, count - 1)))
+            for index, child in enumerate(children):
+                x = 0.0 if count == 1 else -span / 2.0 + span * index / (count - 1)
+                y = math.sin(index * 1.7) * min(10.0, parent.radius * 0.06)
+                cursor = conn.execute(
+                    """INSERT INTO cloud_placements
+                    (space_id, cloud_id, x, y, z, radius, density, mass, activation,
+                     velocity_x, velocity_y, velocity_z, fixed, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 0, ?, ?, ?, 0, 0, 0, 0, 1, ?, ?)""",
+                    (
+                        structural_space.id,
+                        child.id,
+                        x,
+                        y,
+                        max(8.0, min(child.radius, parent.radius / max(2.5, count * 0.72))),
+                        child.density,
+                        child.mass,
+                        now(),
+                        now(),
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO structural_components
+                    (parent_cloud_id, child_cloud_id, child_placement_id, position_index,
+                     phase, weight, role, created_at)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
+                    (parent.id, child.id, cursor.lastrowid, index, float(index) * 0.1, role, now()),
+                )
+            conn.commit()
+
+    def _place_scene_by_similarity(self, scene_cloud: "Cloud", lexeme_ids: List[int]) -> None:
+        scene_layer_id = self.get_layer_id("scene")
+        if not scene_layer_id:
+            return
+        space = SpaceRepository().get_global_space(scene_layer_id)
+        if not space:
+            return
+        with get_connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM cloud_placements WHERE space_id = ? AND cloud_id = ?",
+                (space.id, scene_cloud.id),
+            ).fetchone()
+            scene_row = conn.execute(
+                "SELECT id FROM scenes WHERE scene_cloud_id = ?", (scene_cloud.id,)
+            ).fetchone()
+            if not current or not scene_row:
+                return
+            others = conn.execute(
+                """SELECT s.id, s.lexeme_ids_json, c.id AS cloud_id, c.radius,
+                    p.x, p.y
+                FROM scenes s
+                JOIN clouds c ON c.id = s.scene_cloud_id
+                JOIN cloud_placements p ON p.cloud_id = c.id AND p.space_id = ?
+                WHERE c.id != ?""",
+                (space.id, scene_cloud.id),
+            ).fetchall()
+            if not others:
+                conn.execute(
+                    "UPDATE cloud_placements SET x = 500, y = 350 WHERE id = ?",
+                    (current["id"],),
+                )
+                conn.commit()
+                return
+            current_set = set(lexeme_ids)
+            best = None
+            best_similarity = -1.0
+            for other in others:
+                other_set = set(json.loads(other["lexeme_ids_json"] or "[]"))
+                union = current_set | other_set
+                similarity = len(current_set & other_set) / len(union) if union else 0.0
+                if similarity > best_similarity:
+                    best = other
+                    best_similarity = similarity
+            angle = ((scene_cloud.id * 137.508) % 360.0) * math.pi / 180.0
+            distance = (scene_cloud.radius + float(best["radius"])) * max(
+                0.35, min(1.15, 1.15 - 1.1 * best_similarity)
+            )
+            x = float(best["x"]) + math.cos(angle) * distance
+            y = float(best["y"]) + math.sin(angle) * distance
+            conn.execute(
+                "UPDATE cloud_placements SET x = ?, y = ?, radius = ? WHERE id = ?",
+                (x, y, scene_cloud.radius, current["id"]),
+            )
+            scene_a, scene_b = sorted((int(scene_row["id"]), int(best["id"])))
+            conn.execute(
+                """INSERT INTO scene_similarity
+                (scene_a_id, scene_b_id, similarity, weight, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(scene_a_id, scene_b_id) DO UPDATE SET
+                    similarity = excluded.similarity,
+                    weight = excluded.weight,
+                    updated_at = excluded.updated_at""",
+                (scene_a, scene_b, best_similarity, distance, now()),
+            )
+            conn.commit()
     
     def _ensure_global_space_and_placement(self, cloud: "Cloud", layer_id: int) -> None:
         """Ensure cloud has a placement in the global layer space."""
@@ -565,17 +640,45 @@ class TrainingManager:
     def _ensure_semantic_space(self, cloud: "Cloud", layer_id: int) -> None:
         """Ensure a cloud has a semantic space for projections."""
         space_repo = SpaceRepository()
-        
         existing = space_repo.get_semantic_space(cloud.id)
         if not existing:
-            space = Space(
+            existing = space_repo.create(Space(
                 host_cloud_id=cloud.id,
                 layer_id=layer_id,
                 mode="semantic",
                 coordinate_dimensions=2,
                 scale=1.0,
-            )
-            space_repo.create(space)
+            ))
+
+        if cloud.cloud_type != "concept":
+            return
+        member_ids = [member_id for member_id, membership in lexeme_service.get_concept_members(cloud.id) if membership > 0]
+        if not member_ids:
+            return
+        lexeme_layer_id = self.get_layer_id("lexeme")
+        if not lexeme_layer_id:
+            return
+        existing_cloud_ids = {placement.cloud_id for placement in self.placement_repo.get_by_space(existing.id)}
+        for index, lexeme_id in enumerate(member_ids):
+            lexeme = lexeme_service.get_lexeme_by_id(lexeme_id)
+            if not lexeme:
+                continue
+            lexeme_cloud = self.cloud_repo.get_by_canonical_name(lexeme_layer_id, lexeme.canonical_form)
+            if not lexeme_cloud or lexeme_cloud.id in existing_cloud_ids:
+                continue
+            angle = 2.0 * math.pi * index / max(1, len(member_ids))
+            orbit = max(28.0, cloud.radius * 0.46)
+            self.placement_repo.create(CloudPlacement(
+                space_id=existing.id,
+                cloud_id=lexeme_cloud.id,
+                x=math.cos(angle) * orbit,
+                y=math.sin(angle) * orbit,
+                radius=max(8.0, lexeme_cloud.radius),
+                density=lexeme_cloud.density,
+                mass=lexeme_cloud.mass,
+                activation=lexeme_cloud.activation,
+                fixed=True,
+            ))
     
     def _run_physics_for_active_spaces(self, results: Dict) -> None:
         """Run physics simulation for spaces with active clouds."""

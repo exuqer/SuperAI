@@ -77,6 +77,7 @@
         <div class="renderer-container">
           <SpaceVisualization 
             ref="rendererRef"
+            :hierarchy="hierarchyData"
             :concepts="displayedConcepts"
             :width="rendererWidth"
             :height="rendererHeight"
@@ -97,17 +98,17 @@
           <div v-if="selectedItem" class="inspector-content">
             <h3>{{ selectedItem.token }}</h3>
             <div class="inspector-grid">
-              <div><span>Mass</span><strong>{{ selectedItem.mass.toFixed(2) }}</strong></div>
-              <div><span>Density</span><strong>{{ selectedItem.density.toFixed(2) }}</strong></div>
-              <div><span>Radius</span><strong>{{ selectedItem.radius.toFixed(1) }}</strong></div>
-              <div><span>Stability</span><strong>{{ selectedItem.stability.toFixed(2) }}</strong></div>
-              <div><span>Activation</span><strong>{{ selectedItem.activation.toFixed(2) }}</strong></div>
-              <div><span>Layer</span><strong>{{ selectedItem.layerName || selectedItem.layerId }}</strong></div>
-              <div><span>Type</span><strong>{{ selectedItem.cloudType }}</strong></div>
+              <div><span>Mass</span><strong>{{ Number(selectedItem.mass || 0).toFixed(2) }}</strong></div>
+              <div><span>Density</span><strong>{{ Number(selectedItem.density || 0).toFixed(2) }}</strong></div>
+              <div><span>Radius</span><strong>{{ Number(selectedItem.radius || 0).toFixed(1) }}</strong></div>
+              <div><span>Stability</span><strong>{{ Number(selectedItem.stability || 0).toFixed(2) }}</strong></div>
+              <div><span>Activation</span><strong>{{ Number(selectedItem.activation || 0).toFixed(2) }}</strong></div>
+              <div><span>Layer</span><strong>{{ selectedItem.layer }}</strong></div>
+              <div><span>Type</span><strong>{{ selectedItem.cloud_type }}</strong></div>
             </div>
             
             <!-- Lexeme details -->
-            <div v-if="selectedItem.layerName === 'lexeme'" class="inspector-section">
+            <div v-if="selectedItem.layer === 'lexeme'" class="inspector-section">
               <h4>Морфологические формы</h4>
               <div v-if="selectedItem.word_forms && selectedItem.word_forms.length" class="word-forms-list">
                 <div v-for="wf in selectedItem.word_forms" :key="wf.id" class="word-form-item">
@@ -119,7 +120,7 @@
             </div>
             
             <!-- Concept details -->
-            <div v-if="selectedItem.layerName === 'concept'" class="inspector-section">
+            <div v-if="selectedItem.layer === 'concept'" class="inspector-section">
               <h4>Смысловые вклады (семантические наложения)</h4>
               <div v-if="selectedItem.members && selectedItem.members.length" class="concept-members">
                 <div v-for="member in selectedItem.members" :key="member.lexeme_id" class="member-item">
@@ -131,7 +132,7 @@
             </div>
             
             <!-- Scene details -->
-            <div v-if="selectedItem.layerName === 'scene'" class="inspector-section">
+            <div v-if="selectedItem.layer === 'scene'" class="inspector-section">
               <h4>Структура сцены</h4>
               <div v-if="selectedItem.word_forms && selectedItem.word_forms.length" class="scene-words">
                 <div v-for="wf in selectedItem.word_forms" :key="wf.id" class="scene-word">
@@ -175,6 +176,7 @@
       </div>
     </footer>
   </div>
+</template>
 
 <script setup lang="ts">
 import { onMounted, ref, computed, watch } from 'vue'
@@ -192,13 +194,11 @@ const loading = ref(false)
 const errorMessage = ref('')
 
 // Computed from nebula store
-const currentSpaceId = computed(() => nebulaStore.currentSpaceId)
 const breadcrumb = computed(() => nebulaStore.breadcrumb)
 const debugMode = computed(() => nebulaStore.debugMode)
 const liveMode = computed(() => nebulaStore.liveMode)
 const trainingPanelOpen = computed(() => nebulaStore.trainingPanelOpen)
 const inspectorOpen = computed(() => nebulaStore.inspectorOpen)
-const selectedCloud = computed(() => nebulaStore.selectedCloud)
 const physicsConfig = computed(() => nebulaStore.physicsConfig)
 const cameraZoom = computed(() => nebulaStore.camera.zoom)
 const currentLayer = computed(() => nebulaStore.currentSpace?.layerId ?? 0)
@@ -207,6 +207,7 @@ const stats = computed(() => nebulaStore.stats)
 
 // Displayed concepts for SpaceVisualization
 const displayedConcepts = ref<any[]>([])
+const hierarchyData = ref<any>({ scenes: [], semantic_overlays: [] })
 
 // Renderer dimensions
 const rendererWidth = ref(1000)
@@ -221,14 +222,8 @@ async function fetchHierarchy() {
     const response = await fetch('/api/field/hierarchy?max_depth=3')
     if (response.ok) {
       const data = await response.json()
-      // Combine all layers for display
-      const allItems = [
-        ...(data.scenes || []).map((s: any) => ({ ...s.cloud, layer: 'scene', token: s.cloud.canonical_name || s.sentence_text })),
-        ...(data.structural_spaces || []).flatMap((ss: any) => ss.children.map((c: any) => ({ ...c.cloud, layer: 'word_form', token: c.cloud.canonical_name }))),
-        ...(data.lexemes || []).map((l: any) => ({ ...l.cloud, layer: 'lexeme', token: l.lexeme.canonical_form, word_forms: l.word_forms })),
-        ...(data.semantic_overlays || []).map((o: any) => ({ ...o.concept_cloud, layer: 'concept', token: o.concept_name, center_x: o.center_x, center_y: o.center_y, radius: o.radius, members: o.members })),
-      ]
-      displayedConcepts.value = allItems
+      hierarchyData.value = data
+      displayedConcepts.value = []
     }
   } catch (error) {
     console.error('Failed to fetch hierarchy:', error)
@@ -253,6 +248,7 @@ async function loadSpace() {
       stability: 0.5,
       activation: c.activation || 0,
       layerId: 0,
+      layerName: 'word_form',
       cloudType: 'concept',
       color: '',
       seed: c.id,
@@ -289,6 +285,7 @@ async function handleLearn() {
       stability: 0.5,
       activation: c.activation || 0,
       layerId: 0,
+      layerName: 'word_form',
       cloudType: 'concept',
       color: '',
       seed: c.id,
@@ -315,6 +312,7 @@ async function handleReset() {
     await trainingStore.resetSpace()
     nebulaStore.reset()
     displayedConcepts.value = []
+    hierarchyData.value = { scenes: [], semantic_overlays: [] }
   } catch (error: any) {
     nebulaStore.setError(error.message || 'Ошибка сброса')
   } finally {
@@ -404,6 +402,7 @@ watch(() => nebulaStore.clouds, () => {
 }, { deep: true })
 
 onMounted(loadSpace)
+</script>
 
 <style scoped lang="scss">
 .training-view { display: flex; flex-direction: column; min-height: 100vh; color: #eef4ff; }
