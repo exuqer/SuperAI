@@ -29,4 +29,23 @@ Backend: `http://127.0.0.1:8000`. Frontend: `http://127.0.0.1:5173`.
 - `POST /api/v2/hives`
 - `POST /api/v2/hives/{id}/query`
 
-Схема создаётся с нуля. V1 и перенос старых данных не поддерживаются.
+Иерархия морфологии и генерации поверхности:
+
+- `GET /api/v2/hives/{id}/hierarchy`
+- `POST /api/v2/hives/{id}/cells/{cell_id}/expand`
+- `POST /api/v2/hives/{id}/subspaces/{subspace_id}/collapse`
+- `POST /api/v2/hives/{id}/generate`
+- `GET /api/v2/hives/{id}/generation-candidates`
+- `GET /api/v2/hives/{id}/generation-candidates/{candidate_id}`
+- `POST /api/v2/hives/{id}/generation-candidates/{candidate_id}/select`
+- `POST /api/v2/hives/{id}/validate-surface`
+
+Морфология хранится нормализованно в `word_form_features`, `cloud_compositions` и
+`morph_pattern_data`. Временные варианты поверхности находятся только в
+`hive_generation_candidates`; ручной выбор переводит вариант в статус `SELECTED`.
+Старый reasoning JSON остаётся совместимым (`schema_version: 2`), а текущий экспорт
+дополнен разделами `subspaces`, `generation_candidates`, `sentence_plan`,
+`selected_surface`, `reverse_validation` и `morphology_trace`.
+
+Миграция схемы V2 сохраняет существующие данные и добавляет морфологические типы.
+Перенос данных из V1 не поддерживается.

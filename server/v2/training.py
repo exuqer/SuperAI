@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from server.tokenizer import SentenceTokens, WordToken, tokenize_hierarchical
 from .repository import V2Repository, encode, utcnow
+from .morphology import MorphologyService
 
 
 ROLE_VALUES = {
@@ -205,6 +206,7 @@ class TrainingPipelineV2:
         self.morphology = RussianMorphology()
         self.roles = RoleResolver()
         self.structures = WordFormStructureService(self.repository)
+        self.morphology_space = MorphologyService(self.repository)
 
     def train(self, text: str, source_type: str = "training") -> Dict[str, Any]:
         tokenization = tokenize_hierarchical(text)
@@ -433,6 +435,11 @@ class TrainingPipelineV2:
             )
 
         self.structures.ensure_structure(conn, word, token.normalized, global_space_id, journal)
+        self.morphology_space.record_form(
+            conn, int(word["id"]), int(lexeme["id"]),
+            {"lemma": morphology.lemma, "pos": morphology.pos_tag, **morphology.features},
+        )
+        self.morphology_space.learn_differences(conn, int(lexeme["id"]))
         candidate, candidate_created = self._cloud(
             conn,
             "concept_candidate",

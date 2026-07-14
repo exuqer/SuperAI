@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +23,18 @@ class Settings(BaseSettings):
     app_title: str = "SuperAI Cloud / Space / Placement API"
     app_version: str = "2.0.0"
     debug: bool = False
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def parse_debug_mode(cls, value: object) -> object:
+        """Accept the conventional deployment labels used by local shells."""
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in {"release", "production", "prod"}:
+                return False
+            if normalized in {"development", "dev"}:
+                return True
+        return value
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -25,6 +25,20 @@ class HiveQueryRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
 
+class HiveExpandRequest(BaseModel):
+    target_level: str = Field(default="word_form")
+    reason: str = Field(default="manual", max_length=240)
+    max_candidates: int = Field(default=5, ge=1, le=32)
+
+
+class HiveGenerateRequest(BaseModel):
+    sentence_plan: dict[str, Any]
+
+
+class HiveValidateSurfaceRequest(BaseModel):
+    surface: str = Field(..., min_length=1)
+
+
 class HiveQueryResponse(BaseModel):
     """Hive query response."""
     hive: dict[str, Any]

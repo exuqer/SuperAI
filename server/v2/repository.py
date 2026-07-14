@@ -250,13 +250,15 @@ class V2Repository:
     def trained_model_snapshot(self) -> Dict[str, Any]:
         tables = (
             "clouds", "spaces", "cloud_placements", "structural_components",
-            "lexemes", "word_forms", "semantic_memberships", "scenes",
+            "lexemes", "word_forms", "word_form_features", "cloud_compositions",
+            "morph_pattern_data", "semantic_memberships", "scenes",
             "scene_components", "training_runs", "training_observations",
             "training_change_events",
         )
         ordering = {
             "lexemes": "cloud_id",
             "word_forms": "cloud_id",
+            "morph_pattern_data": "cloud_id",
             "scenes": "cloud_id",
         }
 

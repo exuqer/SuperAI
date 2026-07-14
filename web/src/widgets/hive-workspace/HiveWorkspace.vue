@@ -57,6 +57,7 @@
           <circle class="node-core" :r="Math.max(10, node.radius - 10)" />
           <text class="node-label" text-anchor="middle" y="-2">{{ node.label }}</text>
           <text class="node-gravity" text-anchor="middle" :y="node.radius + 15">{{ formatPercent(node.cell.retention) }}</text>
+          <text v-if="node.cell.subspaces?.length" class="node-depth" text-anchor="middle" :y="-(node.radius + 7)">↳{{ node.cell.subspaces.length }}</text>
         </g>
       </svg>
       <div v-else class="hive-empty">Улей ожидает нектар</div>
@@ -85,6 +86,15 @@
         >
           <span>{{ component.canonical_name }}</span>
           <b>{{ formatPercent(component.composition_share) }}</b>
+        </span>
+      </div>
+      <button class="secondary" @click="hiveStore.expandCell(hiveStore.selectedCell.id, 'word_form')">
+        Раскрыть словоформы
+      </button>
+      <div v-if="hiveStore.generationCandidates.length" class="component-list">
+        <span v-for="candidate in hiveStore.generationCandidates" :key="String(candidate.id)" class="component">
+          <span>{{ candidate.candidate_text }}</span>
+          <b>{{ Array.isArray(candidate.character_sequence) ? candidate.character_sequence.join(' → ') : '' }}</b>
         </span>
       </div>
     </section>

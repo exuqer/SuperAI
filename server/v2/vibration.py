@@ -7,7 +7,7 @@ import json
 import math
 import random
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .repository import V2Repository, encode, utcnow
@@ -52,6 +52,7 @@ class VibrationConfig:
     boundary_mode: str = "CLAMP"
     deterministic: bool = True
     random_seed: int = 0
+    level_frequencies: Dict[str, float] = field(default_factory=dict)
 
     def normalized(self) -> "VibrationConfig":
         values = asdict(self)
@@ -61,6 +62,10 @@ class VibrationConfig:
         values["eviction_confirmation_steps"] = max(1, int(values["eviction_confirmation_steps"]))
         values["convergence_patience"] = max(1, int(values["convergence_patience"]))
         values["boundary_mode"] = str(values["boundary_mode"]).upper()
+        values["level_frequencies"] = dict(values.get("level_frequencies") or {
+            "scene": 0.6, "concept": 0.8, "lexeme": 1.0, "word_form": 1.2,
+            "morpheme": 1.4, "morph_pattern": 1.4, "character": 1.7,
+        })
         if values["boundary_mode"] not in {"CLAMP", "BOUNCE", "WRAP", "SOFT_REPULSION"}:
             values["boundary_mode"] = "CLAMP"
         return VibrationConfig(**values)
@@ -400,6 +405,8 @@ class HiveVibrationEngine:
                 ),
             )
             nodes = self._load_nodes(conn, hive_id)
+            for node in nodes:
+                node["frequency"] = float(config.level_frequencies.get(node.get("node_type", ""), 1.0))
             temperature = float(hive["current_temperature"] or config.initial_temperature)
             initial = self._snapshot(conn, run_id, hive_id, 0, "INITIAL", nodes, temperature)
             snapshots = [initial]

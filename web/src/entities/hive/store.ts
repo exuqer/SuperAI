@@ -10,6 +10,7 @@ import type {
   HiveMessageV2,
   HiveQueryDecisionV2,
   HiveResonanceEventV2,
+  HiveSubspaceV2,
 } from '@/entities/hive/types';
 
 interface HiveStateResponse {
@@ -41,6 +42,11 @@ interface ExternalSearch {
   anchors: Array<Record<string, unknown>>;
 }
 
+interface HiveExpandResponse {
+  subspace: HiveSubspaceV2;
+  candidates: Array<Record<string, unknown>>;
+}
+
 export const useHiveStore = defineStore('hive', () => {
   const hive = ref<HiveV2 | null>(null);
   const cells = ref<HiveCellV2[]>([]);
@@ -63,6 +69,7 @@ export const useHiveStore = defineStore('hive', () => {
   const jsonFormat = ref<'formatted' | 'raw'>('formatted');
   const jsonStep = ref(0);
   const jsonValue = ref<unknown>(null);
+  const generationCandidates = ref<Array<Record<string, unknown>>>([]);
 
   // Computed
   const averageActivation = computed(() =>
@@ -121,6 +128,40 @@ export const useHiveStore = defineStore('hive', () => {
         `/api/v2/hives/${hive.value!.id}/query/preview`,
         { text }
       );
+    });
+  }
+
+  async function hierarchy() {
+    if (!hive.value) return null;
+    return run(async () => {
+      const result = await api.get<{ cells: HiveCellV2[]; generation_candidates: Array<Record<string, unknown>> }>(
+        `/api/v2/hives/${hive.value!.id}/hierarchy`
+      );
+      const subspacesByCell = new Map(result.cells.map(cell => [cell.id, cell.subspaces || []]));
+      cells.value = cells.value.map(cell => ({ ...cell, subspaces: subspacesByCell.get(cell.id) || [] }));
+      generationCandidates.value = result.generation_candidates || [];
+      if (selectedCell.value) {
+        selectedCell.value = cells.value.find(cell => cell.id === selectedCell.value?.id) || null;
+      }
+      return result;
+    });
+  }
+
+  async function expandCell(cellId: string, targetLevel: string = 'word_form') {
+    if (!hive.value) return null;
+    return run(async () => {
+      const result = await api.post<HiveExpandResponse>(`/api/v2/hives/${hive.value!.id}/cells/${cellId}/expand`, {
+        target_level: targetLevel, reason: 'user', max_candidates: 5,
+      });
+      cells.value = cells.value.map(cell => cell.id === cellId
+        ? { ...cell, subspaces: [...(cell.subspaces || []), result.subspace] }
+        : cell);
+      generationCandidates.value = result.candidates;
+      if (selectedCell.value?.id === cellId) {
+        selectedCell.value = cells.value.find(cell => cell.id === cellId) || null;
+      }
+      cacheState();
+      return result;
     });
   }
 
@@ -331,12 +372,15 @@ export const useHiveStore = defineStore('hive', () => {
     jsonFormat,
     jsonStep,
     jsonValue,
+    generationCandidates,
     averageActivation,
     averageRetention,
     activeCellIds,
     createHive,
     getHive,
     preview,
+    hierarchy,
+    expandCell,
     query,
     runReasoning,
     runReasoningStep,

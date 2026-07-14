@@ -117,12 +117,13 @@ def test_trained_model_snapshot_contains_canonical_data_without_hive_runtime():
         snapshot = client.get("/api/v2/model")
     assert snapshot.status_code == 200
     data = snapshot.json()
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["stats"]["clouds_total"] == len(data["model"]["clouds"])
     assert data["model"]["scene_components"]
     assert "metadata" in data["model"]["clouds"][0]
     assert "metadata_json" not in data["model"]["clouds"][0]
     assert "hives" not in data["model"]
+    assert data["model"]["word_form_features"]
 
 
 def test_definition_sentence_roles():

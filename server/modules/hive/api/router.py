@@ -14,6 +14,9 @@ from server.modules.hive.api.dto import (
     HiveAnalyticsResponse,
     HiveQueryRequest,
     HiveReasoningRequest,
+    HiveExpandRequest,
+    HiveGenerateRequest,
+    HiveValidateSurfaceRequest,
 )
 
 router = APIRouter(prefix="/api/v2/hives", tags=["hives"])
@@ -40,6 +43,53 @@ async def get_hive(
 ) -> dict[str, Any]:
     """Get hive by ID."""
     return service.get_hive(hive_id)
+
+
+@router.get("/{hive_id}/hierarchy")
+async def hive_hierarchy(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.hierarchy(hive_id)
+
+
+@router.post("/{hive_id}/cells/{cell_id}/expand")
+async def expand_hive_cell(hive_id: str, cell_id: str, request: HiveExpandRequest,
+                           service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.expand(hive_id, cell_id, request.target_level, request.reason, request.max_candidates)
+
+
+@router.post("/{hive_id}/subspaces/{subspace_id}/collapse")
+async def collapse_hive_subspace(hive_id: str, subspace_id: int,
+                                 service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.collapse(hive_id, subspace_id)
+
+
+@router.get("/{hive_id}/generation-candidates")
+async def generation_candidates(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"candidates": service.candidates(hive_id)}
+
+
+@router.get("/{hive_id}/generation-candidates/{candidate_id}")
+async def generation_candidate(hive_id: str, candidate_id: int,
+                               service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    candidates = service.candidates(hive_id, candidate_id)
+    return candidates[0]
+
+
+@router.post("/{hive_id}/generation-candidates/{candidate_id}/select")
+async def select_generation_candidate(hive_id: str, candidate_id: int,
+                                      service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.select_candidate(hive_id, candidate_id)
+
+
+@router.post("/{hive_id}/generate")
+async def generate_surface(hive_id: str, request: HiveGenerateRequest,
+                           service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.generate(hive_id, request.sentence_plan)
+
+
+@router.post("/{hive_id}/validate-surface")
+async def validate_surface(hive_id: str, request: HiveValidateSurfaceRequest,
+                           service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.validate_surface(hive_id, request.surface)
 
 
 @router.post("/{hive_id}/query/preview")

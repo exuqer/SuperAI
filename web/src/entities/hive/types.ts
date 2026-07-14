@@ -32,6 +32,19 @@ export interface HiveCellV2 {
   y?: number;
   gravity?: number;
   components?: HiveCellComponentV2[];
+  subspaces?: HiveSubspaceV2[];
+}
+
+export interface HiveSubspaceV2 {
+  id: number;
+  hive_id: string;
+  parent_cell_id: string | null;
+  space_id: number;
+  subspace_type: 'lexeme' | 'word_form' | 'morphology' | 'characters' | string;
+  depth: number;
+  capacity: number;
+  status: string;
+  expansion_reason: string;
 }
 
 export interface HiveCellComponentV2 {

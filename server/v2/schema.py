@@ -5,10 +5,91 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def _needs_constraint_migration(conn: sqlite3.Connection, table: str, expected_value: str) -> bool:
+    """Return whether a legacy SQLite CHECK constraint must be rebuilt.
+
+    SQLite cannot alter a CHECK constraint in place.  The first V2 schema only
+    allowed the original cloud and space types, so an existing database needs a
+    table rebuild before morphology records can be inserted.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return bool(row and expected_value not in (row[0] or ""))
+
+
+def _migrate_legacy_type_constraints(conn: sqlite3.Connection) -> None:
+    """Expand legacy cloud/space type constraints without losing model data."""
+    migrate_clouds = _needs_constraint_migration(conn, "clouds", "morph_pattern")
+    migrate_spaces = _needs_constraint_migration(conn, "spaces", "morphology_space")
+    if not migrate_clouds and not migrate_spaces:
+        return
+
+    # This function runs before ensure_schema performs any writes.  Disabling
+    # FK checks lets us replace parent tables while retaining all child rows;
+    # the copied primary keys keep every existing relation valid.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        if migrate_clouds:
+            conn.executescript(
+                """
+                CREATE TABLE clouds__v2 (
+                    id INTEGER PRIMARY KEY,
+                    cloud_type TEXT NOT NULL CHECK (cloud_type IN
+                        ('character','word_form','lexeme','scene','concept_candidate','concept',
+                         'morpheme_candidate','morpheme','morph_operator','morph_pattern','sentence_frame')),
+                    canonical_name TEXT NOT NULL,
+                    mass REAL NOT NULL DEFAULT 1.0 CHECK (mass >= 0),
+                    density REAL NOT NULL DEFAULT 1.0 CHECK (density >= 0),
+                    stability REAL NOT NULL DEFAULT 0.0 CHECK (stability BETWEEN 0 AND 1),
+                    base_activation REAL NOT NULL DEFAULT 0.0 CHECK (base_activation BETWEEN 0 AND 1),
+                    observation_count INTEGER NOT NULL DEFAULT 0 CHECK (observation_count >= 0),
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO clouds__v2
+                    SELECT id, cloud_type, canonical_name, mass, density, stability,
+                           base_activation, observation_count, metadata_json, created_at, updated_at
+                    FROM clouds;
+                DROP TABLE clouds;
+                ALTER TABLE clouds__v2 RENAME TO clouds;
+                """
+            )
+        if migrate_spaces:
+            conn.executescript(
+                """
+                CREATE TABLE spaces__v2 (
+                    id INTEGER PRIMARY KEY,
+                    space_type TEXT NOT NULL CHECK (space_type IN
+                        ('global_field','scene_space','word_structure_space','morphology_space',
+                         'sentence_frame_space','concept_space','hive_space','hive_subspace')),
+                    owner_cloud_id INTEGER,
+                    parent_space_id INTEGER,
+                    dimensionality INTEGER NOT NULL DEFAULT 2 CHECK (dimensionality IN (2,3)),
+                    random_seed INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (owner_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+                    FOREIGN KEY (parent_space_id) REFERENCES spaces(id) ON DELETE CASCADE
+                );
+                INSERT INTO spaces__v2
+                    SELECT id, space_type, owner_cloud_id, parent_space_id, dimensionality,
+                           random_seed, metadata_json, created_at
+                    FROM spaces;
+                DROP TABLE spaces;
+                ALTER TABLE spaces__v2 RENAME TO spaces;
+                """
+            )
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    _migrate_legacy_type_constraints(conn)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(
         """
@@ -20,7 +101,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS clouds (
             id INTEGER PRIMARY KEY,
             cloud_type TEXT NOT NULL CHECK (cloud_type IN
-                ('character','word_form','lexeme','scene','concept_candidate','concept')),
+                ('character','word_form','lexeme','scene','concept_candidate','concept',
+                 'morpheme_candidate','morpheme','morph_operator','morph_pattern','sentence_frame')),
             canonical_name TEXT NOT NULL,
             mass REAL NOT NULL DEFAULT 1.0 CHECK (mass >= 0),
             density REAL NOT NULL DEFAULT 1.0 CHECK (density >= 0),
@@ -39,7 +121,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS spaces (
             id INTEGER PRIMARY KEY,
             space_type TEXT NOT NULL CHECK (space_type IN
-                ('global_field','scene_space','word_structure_space','concept_space','hive_space')),
+                ('global_field','scene_space','word_structure_space','morphology_space',
+                 'sentence_frame_space','concept_space','hive_space','hive_subspace')),
             owner_cloud_id INTEGER,
             parent_space_id INTEGER,
             dimensionality INTEGER NOT NULL DEFAULT 2 CHECK (dimensionality IN (2,3)),
@@ -125,6 +208,63 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS word_form_normalized_idx
             ON word_forms(normalized_form, language);
         CREATE INDEX IF NOT EXISTS word_form_lexeme_idx ON word_forms(lexeme_cloud_id);
+
+        CREATE TABLE IF NOT EXISTS cloud_compositions (
+            id INTEGER PRIMARY KEY,
+            parent_cloud_id INTEGER NOT NULL,
+            child_cloud_id INTEGER NOT NULL,
+            relation_type TEXT NOT NULL,
+            child_order INTEGER NOT NULL DEFAULT 0,
+            weight REAL NOT NULL DEFAULT 1.0,
+            confidence REAL NOT NULL DEFAULT 0.0,
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(parent_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(child_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            UNIQUE(parent_cloud_id, child_cloud_id, relation_type, child_order)
+        );
+        CREATE INDEX IF NOT EXISTS cloud_composition_parent_idx ON cloud_compositions(parent_cloud_id);
+        CREATE INDEX IF NOT EXISTS cloud_composition_child_idx ON cloud_compositions(child_cloud_id);
+
+        CREATE TABLE IF NOT EXISTS word_form_features (
+            id INTEGER PRIMARY KEY,
+            word_form_cloud_id INTEGER NOT NULL UNIQUE,
+            lexeme_cloud_id INTEGER,
+            part_of_speech TEXT,
+            number TEXT,
+            grammatical_case TEXT,
+            gender TEXT,
+            tense TEXT,
+            person TEXT,
+            animacy TEXT,
+            aspect TEXT,
+            degree TEXT,
+            confidence REAL NOT NULL DEFAULT 0.0,
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            features_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(word_form_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(lexeme_cloud_id) REFERENCES clouds(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS morph_pattern_data (
+            cloud_id INTEGER PRIMARY KEY,
+            operator_cloud_id INTEGER,
+            input_signature_json TEXT NOT NULL DEFAULT '{}',
+            output_template_json TEXT NOT NULL DEFAULT '{}',
+            compatibility_json TEXT NOT NULL DEFAULT '{}',
+            confidence REAL NOT NULL DEFAULT 0.0,
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            successful_uses INTEGER NOT NULL DEFAULT 0,
+            failed_uses INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(operator_cloud_id) REFERENCES clouds(id) ON DELETE SET NULL
+        );
 
         CREATE TABLE IF NOT EXISTS semantic_memberships (
             id INTEGER PRIMARY KEY,
@@ -250,6 +390,53 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (source_scene_cloud_id) REFERENCES clouds(id)
         );
         CREATE INDEX IF NOT EXISTS hive_cell_retention_idx ON hive_cells(hive_id, retention DESC);
+
+        CREATE TABLE IF NOT EXISTS hive_subspaces (
+            id INTEGER PRIMARY KEY,
+            hive_id TEXT NOT NULL,
+            parent_cell_id TEXT,
+            parent_placement_id INTEGER,
+            space_id INTEGER NOT NULL,
+            subspace_type TEXT NOT NULL,
+            depth INTEGER NOT NULL DEFAULT 0,
+            capacity INTEGER NOT NULL DEFAULT 12,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            expansion_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_cell_id) REFERENCES hive_cells(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_placement_id) REFERENCES cloud_placements(id) ON DELETE SET NULL,
+            FOREIGN KEY(space_id) REFERENCES spaces(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS hive_subspace_hive_idx ON hive_subspaces(hive_id, status);
+
+        CREATE TABLE IF NOT EXISTS hive_generation_candidates (
+            id INTEGER PRIMARY KEY,
+            hive_id TEXT NOT NULL,
+            subspace_id INTEGER,
+            sentence_slot_id TEXT,
+            source_lexeme_cloud_id INTEGER,
+            candidate_text TEXT NOT NULL,
+            requested_features_json TEXT NOT NULL DEFAULT '{}',
+            applied_patterns_json TEXT NOT NULL DEFAULT '[]',
+            character_sequence_json TEXT NOT NULL DEFAULT '[]',
+            score_total REAL NOT NULL DEFAULT 0,
+            score_semantic REAL NOT NULL DEFAULT 0,
+            score_grammar REAL NOT NULL DEFAULT 0,
+            score_pattern REAL NOT NULL DEFAULT 0,
+            score_orthography REAL NOT NULL DEFAULT 0,
+            score_context REAL NOT NULL DEFAULT 0,
+            reverse_validation_score REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'GENERATED',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE,
+            FOREIGN KEY(subspace_id) REFERENCES hive_subspaces(id) ON DELETE SET NULL,
+            FOREIGN KEY(source_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS generation_candidate_hive_idx ON hive_generation_candidates(hive_id, status, score_total DESC);
 
         CREATE TABLE IF NOT EXISTS hive_cell_components (
             id INTEGER PRIMARY KEY,

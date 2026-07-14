@@ -68,6 +68,16 @@ class HiveExportService:
                     (hive_id,),
                 )
             ]
+            subspaces = [
+                self._json_row(row) for row in conn.execute(
+                    "SELECT * FROM hive_subspaces WHERE hive_id=? ORDER BY depth, id", (hive_id,)
+                )
+            ]
+            generation_candidates = [
+                self._json_row(row) for row in conn.execute(
+                    "SELECT * FROM hive_generation_candidates WHERE hive_id=? ORDER BY score_total DESC, id", (hive_id,)
+                )
+            ]
             payload = {
                 "schema_version": 2,
                 "export_type": "current",
@@ -76,6 +86,12 @@ class HiveExportService:
                 "nodes": nodes,
                 "cells": cells,
                 "components": components,
+                "subspaces": subspaces,
+                "generation_candidates": generation_candidates,
+                "sentence_plan": decode(hive["query_json"], {}).get("sentence_plan"),
+                "selected_surface": decode(hive["metadata_json"], {}).get("selected_surface"),
+                "reverse_validation": decode(hive["metadata_json"], {}).get("reverse_validation"),
+                "morphology_trace": decode(hive["metadata_json"], {}).get("morphology_trace", []),
             }
             if detail != "compact":
                 payload["stats"] = {
