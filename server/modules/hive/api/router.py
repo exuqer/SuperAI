@@ -1,0 +1,194 @@
+"""Hive API router."""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, Query, Response
+
+from server.core.exceptions import ConflictError
+from server.modules.hive.application.services import HiveService
+from server.modules.hive.infrastructure.repository import HiveRepository
+from server.modules.hive.api.dto import (
+    HiveCreateRequest,
+    HiveQueryRequest,
+    HiveReasoningRequest,
+)
+
+router = APIRouter(prefix="/api/v2/hives", tags=["hives"])
+
+
+def get_hive_service() -> HiveService:
+    """Dependency for HiveService."""
+    return HiveService(HiveRepository())
+
+
+@router.post("")
+async def create_hive(
+    request: HiveCreateRequest,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Create a new hive."""
+    return service.create(request.max_cells, request.conversation_id)
+
+
+@router.get("/{hive_id}")
+async def get_hive(
+    hive_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Get hive by ID."""
+    return service.get_hive(hive_id)
+
+
+@router.post("/{hive_id}/query/preview")
+async def preview_hive(
+    hive_id: str,
+    request: HiveQueryRequest,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Preview routing decision without modifying state."""
+    return service.preview(hive_id, request.text)
+
+
+@router.post("/{hive_id}/query")
+async def query_hive(
+    hive_id: str,
+    request: HiveQueryRequest,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Process a query against the hive."""
+    return service.query(hive_id, request.text)
+
+
+@router.get("/{hive_id}/resonance-events")
+async def hive_events(
+    hive_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, list[dict[str, Any]]]:
+    """Get resonance events for hive."""
+    return {"events": service.events(hive_id)}
+
+
+@router.get("/{hive_id}/search-decisions")
+async def hive_decisions(
+    hive_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, list[dict[str, Any]]]:
+    """Get search decisions for hive."""
+    return {"decisions": service.decisions(hive_id)}
+
+
+@router.get("/{hive_id}/cells/{cell_id}/matches")
+async def hive_matches(
+    hive_id: str,
+    cell_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, list[dict[str, Any]]]:
+    """Get cell matches for hive."""
+    return {"matches": service.matches(hive_id, cell_id)}
+
+
+@router.post("/{hive_id}/reasoning")
+async def reason_hive(
+    hive_id: str,
+    request: HiveReasoningRequest,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Run reasoning on hive."""
+    return service.reason(hive_id, request.text, request.config)
+
+
+@router.post("/{hive_id}/reasoning/step")
+async def reason_hive_step(
+    hive_id: str,
+    request: HiveReasoningRequest,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Run single reasoning step on hive."""
+    config = dict(request.config)
+    config["reasoning_steps"] = 1
+    return service.reason(hive_id, request.text, config)
+
+
+@router.post("/{hive_id}/reasoning/stop")
+async def stop_hive_reasoning(
+    hive_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> Response:
+    """Stop hive reasoning (not supported for synchronous runs)."""
+    raise ConflictError("synchronous reasoning runs cannot be stopped")
+
+
+@router.get("/{hive_id}/reasoning-runs")
+async def reasoning_runs(
+    hive_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, list[dict[str, Any]]]:
+    """Get reasoning runs for hive."""
+    return {"runs": service.runs(hive_id)}
+
+
+@router.get("/{hive_id}/reasoning-runs/{run_id}/snapshots")
+async def reasoning_snapshots(
+    hive_id: str,
+    run_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, list[dict[str, Any]]]:
+    """Get snapshots for reasoning run."""
+    return {"snapshots": service.snapshots(hive_id, run_id)}
+
+
+@router.post("/{hive_id}/reasoning-runs/{run_id}/snapshots/{step}/restore")
+async def restore_reasoning_snapshot(
+    hive_id: str,
+    run_id: str,
+    step: int,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Restore hive to reasoning snapshot."""
+    return service.restore(hive_id, run_id, step)
+
+
+@router.get("/{hive_id}/reasoning-runs/{run_id}/diff")
+async def reasoning_diff(
+    hive_id: str,
+    run_id: str,
+    from_step: int,
+    to_step: int,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Get diff between reasoning steps."""
+    return service.diff(run_id, from_step, to_step)
+
+
+@router.get("/{hive_id}/reasoning/export")
+async def reasoning_export(
+    hive_id: str,
+    mode: str = Query(default="current"),
+    run_id: str = Query(default=""),
+    step: Optional[int] = Query(default=None),
+    detail: str = Query(default="full"),
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    """Export hive reasoning data."""
+    return service.export(hive_id, mode, run_id or None, step, detail)
+
+
+@router.get("/{hive_id}/reasoning/export/download")
+async def reasoning_export_download(
+    hive_id: str,
+    mode: str = Query(default="current"),
+    run_id: str = Query(default=""),
+    step: Optional[int] = Query(default=None),
+    detail: str = Query(default="full"),
+    service: HiveService = Depends(get_hive_service),
+) -> Response:
+    """Download hive reasoning export as JSON file."""
+    import json
+    payload = service.export(hive_id, mode, run_id or None, step, detail)
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="hive-{hive_id}-{mode}.json"'},
+    )

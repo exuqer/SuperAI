@@ -85,7 +85,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import type { CloudV2, PlacementV2, SpaceV2, StructureV2 } from '@/stores/modelV2'
+import type { CloudV2, PlacementV2, SpaceV2, StructureV2 } from '@/entities/model/types'
 
 const props = withDefaults(defineProps<{
   space: SpaceV2 | null

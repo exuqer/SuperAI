@@ -323,6 +323,140 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # Additive upgrades for databases created by schema v1.
+    hive_columns = {
+        "conversation_id": "TEXT NOT NULL DEFAULT ''",
+        "hive_space_id": "INTEGER",
+        "status": "TEXT NOT NULL DEFAULT 'ACTIVE'",
+        "capacity": "INTEGER NOT NULL DEFAULT 24",
+        "reasoning_step": "INTEGER NOT NULL DEFAULT 0",
+        "current_temperature": "REAL NOT NULL DEFAULT 1.0",
+        "total_energy": "REAL NOT NULL DEFAULT 0.0",
+        "random_seed": "INTEGER NOT NULL DEFAULT 0",
+        "last_reasoned_at": "TEXT",
+        "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(hives)")}
+    for column, declaration in hive_columns.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE hives ADD COLUMN {column} {declaration}")
+    component_columns = {
+        "role": "TEXT NOT NULL DEFAULT 'context'",
+        "effective_strength": "REAL NOT NULL DEFAULT 0 CHECK (effective_strength BETWEEN 0 AND 1)",
+        "component_class": "TEXT NOT NULL DEFAULT 'context'",
+    }
+    existing_components = {row[1] for row in conn.execute("PRAGMA table_info(hive_cell_components)")}
+    for column, declaration in component_columns.items():
+        if column not in existing_components:
+            conn.execute(f"ALTER TABLE hive_cell_components ADD COLUMN {column} {declaration}")
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS hive_conversation_idx ON hives(conversation_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS active_hive_conversation_idx
+            ON hives(conversation_id) WHERE status = 'ACTIVE' AND conversation_id <> '';
+
+        CREATE TABLE IF NOT EXISTS hive_node_states (
+            hive_id TEXT NOT NULL,
+            placement_id INTEGER NOT NULL,
+            cloud_id INTEGER NOT NULL,
+            node_type TEXT NOT NULL DEFAULT 'temporary_candidate',
+            x REAL NOT NULL DEFAULT 0,
+            y REAL NOT NULL DEFAULT 0,
+            z REAL,
+            velocity_x REAL NOT NULL DEFAULT 0,
+            velocity_y REAL NOT NULL DEFAULT 0,
+            velocity_z REAL,
+            local_activation REAL NOT NULL DEFAULT 0 CHECK (local_activation BETWEEN 0 AND 1),
+            local_gravity REAL NOT NULL DEFAULT 0 CHECK (local_gravity BETWEEN 0 AND 1),
+            stored_strength REAL NOT NULL DEFAULT 0 CHECK (stored_strength BETWEEN 0 AND 1),
+            local_stability REAL NOT NULL DEFAULT 0 CHECK (local_stability BETWEEN 0 AND 1),
+            retention REAL NOT NULL DEFAULT 0 CHECK (retention BETWEEN 0 AND 1),
+            energy REAL NOT NULL DEFAULT 0 CHECK (energy BETWEEN 0 AND 1),
+            phase REAL NOT NULL DEFAULT 0,
+            frequency REAL NOT NULL DEFAULT 1,
+            temperature_response REAL NOT NULL DEFAULT 1,
+            age_steps INTEGER NOT NULL DEFAULT 0,
+            activation_count INTEGER NOT NULL DEFAULT 0,
+            last_activated_step INTEGER NOT NULL DEFAULT 0,
+            weakening_steps INTEGER NOT NULL DEFAULT 0,
+            eviction_status TEXT NOT NULL DEFAULT 'ACTIVE',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(hive_id, placement_id),
+            FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE,
+            FOREIGN KEY(placement_id) REFERENCES cloud_placements(id) ON DELETE CASCADE,
+            FOREIGN KEY(cloud_id) REFERENCES clouds(id)
+        );
+        CREATE INDEX IF NOT EXISTS hive_node_state_cloud_idx ON hive_node_states(hive_id, cloud_id);
+
+        CREATE TABLE IF NOT EXISTS hive_reasoning_runs (
+            id TEXT PRIMARY KEY,
+            hive_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'COMPLETED',
+            reasoning_steps INTEGER NOT NULL,
+            completed_steps INTEGER NOT NULL DEFAULT 0,
+            query_json TEXT NOT NULL DEFAULT '{}',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            random_seed INTEGER NOT NULL DEFAULT 0,
+            stop_reason TEXT,
+            initial_state_hash TEXT,
+            final_state_hash TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS hive_reasoning_run_idx ON hive_reasoning_runs(hive_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS hive_reasoning_snapshots (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            hive_id TEXT NOT NULL,
+            step INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            state_hash TEXT NOT NULL,
+            state_json TEXT NOT NULL,
+            delta_json TEXT NOT NULL DEFAULT '{}',
+            clusters_json TEXT NOT NULL DEFAULT '[]',
+            events_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES hive_reasoning_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE,
+            UNIQUE(run_id, step, phase)
+        );
+        CREATE INDEX IF NOT EXISTS hive_snapshot_run_idx ON hive_reasoning_snapshots(run_id, step);
+
+        CREATE TABLE IF NOT EXISTS hive_reasoning_events (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            hive_id TEXT NOT NULL,
+            step INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            placement_id INTEGER,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES hive_reasoning_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE,
+            FOREIGN KEY(placement_id) REFERENCES cloud_placements(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS hive_resonance_clusters (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            hive_id TEXT NOT NULL,
+            reasoning_step INTEGER NOT NULL,
+            member_placement_ids_json TEXT NOT NULL DEFAULT '[]',
+            dominant_cloud_ids_json TEXT NOT NULL DEFAULT '[]',
+            cohesion REAL NOT NULL DEFAULT 0,
+            total_energy REAL NOT NULL DEFAULT 0,
+            average_gravity REAL NOT NULL DEFAULT 0,
+            query_relevance REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES hive_reasoning_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE
+        );
+        """
+    )
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),

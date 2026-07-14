@@ -89,22 +89,28 @@ class V2LocalMemoryService:
         self.config = config or HiveLocalMemoryConfig()
         self.parser = HiveMessageParser()
 
-    def create_hive(self, max_cells: int = 24) -> Dict[str, Any]:
+    def create_hive(self, max_cells: int = 24, conversation_id: str = "") -> Dict[str, Any]:
         hive_id = f"hive-{uuid.uuid4().hex}"
         with self.repository.transaction() as conn:
+            if conversation_id:
+                existing = conn.execute("SELECT id FROM hives WHERE conversation_id = ? AND status = 'ACTIVE' LIMIT 1", (conversation_id,)).fetchone()
+                if existing:
+                    return self.get_hive(str(existing["id"]))
             global_space, _ = self.repository.get_or_create_space(conn, "global_field", seed=1337)
+            random_seed = int(uuid.uuid4().hex[:8], 16)
             hive_space = self.repository.create_space(
                 conn,
                 "hive_space",
                 parent_space_id=int(global_space["id"]),
-                seed=int(uuid.uuid4().hex[:8], 16),
+                seed=random_seed,
             )
             now = utcnow()
             conn.execute(
                 """INSERT INTO hives
-                (id, space_id, query_text, query_json, max_cells, created_at, updated_at)
-                VALUES (?, ?, '', '{}', ?, ?, ?)""",
-                (hive_id, hive_space["id"], max_cells, now, now),
+                (id, space_id, hive_space_id, conversation_id, query_text, query_json, max_cells,
+                 capacity, random_seed, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, '', '{}', ?, ?, ?, '{}', ?, ?)""",
+                (hive_id, hive_space["id"], hive_space["id"], conversation_id, max_cells, max_cells, random_seed, now, now),
             )
         return self.get_hive(hive_id)
 
@@ -252,7 +258,7 @@ class V2LocalMemoryService:
         }
 
     def _composition(self, conn: Any, source: Dict[str, Any]) -> Dict[int, float]:
-        composition: Dict[int, float] = {int(source["cloud_id"]): 1.0}
+        composition: Dict[int, float] = {}
         cloud = conn.execute("SELECT cloud_type FROM clouds WHERE id = ?", (source["cloud_id"],)).fetchone()
         if cloud and cloud["cloud_type"] == "scene":
             for row in conn.execute(
@@ -261,6 +267,8 @@ class V2LocalMemoryService:
             ):
                 cloud_id = int(row["word_form_cloud_id"])
                 composition[cloud_id] = composition.get(cloud_id, 0.0) + 1.0
+        else:
+            composition[int(source["cloud_id"])] = 1.0
         total = sum(composition.values())
         return {cloud_id: value / total for cloud_id, value in composition.items()}
 
@@ -331,15 +339,24 @@ class V2LocalMemoryService:
                 ),
             )
             for cloud_id, share in composition.items():
+                role = "context"
+                if source_cloud and source_cloud["cloud_type"] == "scene":
+                    role_row = conn.execute("SELECT grammatical_role FROM scene_components WHERE scene_cloud_id=? AND word_form_cloud_id=? LIMIT 1", (source["cloud_id"], cloud_id)).fetchone()
+                    role = str(role_row["grammatical_role"]) if role_row else role
+                component_class = "core" if role in {"subject", "predicate", "object"} else "context"
                 conn.execute(
                     """INSERT INTO hive_cell_components
-                    (cell_id, cloud_id, composition_share, local_activation, source_cloud_id,
-                     source_placement_id, source_space_id, provenance_json)
-                    VALUES (?, ?, ?, .9, ?, ?, ?, ?)""",
+                    (cell_id, cloud_id, composition_share, local_activation, role,
+                     effective_strength, component_class, source_cloud_id, source_placement_id,
+                     source_space_id, provenance_json)
+                    VALUES (?, ?, ?, .9, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         cell_id,
                         cloud_id,
                         share,
+                        role,
+                        clamp(source["fitness"] * share),
+                        component_class,
                         source["cloud_id"],
                         source["placement_id"],
                         source["space_id"],
@@ -458,8 +475,11 @@ class V2LocalMemoryService:
             if not hive:
                 raise KeyError(hive_id)
             cells = [dict(row) for row in connection.execute(
-                """SELECT hc.*, p.x, p.y, p.space_id hive_space_id, p.local_gravity
+                """SELECT hc.*, p.x, p.y, p.space_id hive_space_id, p.local_gravity,
+                hns.energy, hns.local_stability, hns.eviction_status, hns.velocity_x, hns.velocity_y,
+                hns.age_steps, hns.weakening_steps
                 FROM hive_cells hc JOIN cloud_placements p ON p.id = hc.hive_placement_id
+                LEFT JOIN hive_node_states hns ON hns.hive_id = hc.hive_id AND hns.placement_id = hc.hive_placement_id
                 WHERE hc.hive_id = ? ORDER BY hc.retention DESC""",
                 (hive_id,),
             )]

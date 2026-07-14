@@ -60,3 +60,43 @@ textarea:focus-visible {
   outline: 3px solid #8cbbff;
   outline-offset: 2px;
 }
+
+.panel {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(162, 189, 225, 0.15);
+  border-radius: 14px;
+  background: rgba(14, 28, 48, 0.76);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.16);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 20px 14px;
+  border-bottom: 1px solid rgba(162, 189, 225, 0.1);
+}
+
+.kicker {
+  color: #73b0ff;
+  font-size: 10px;
+  letter-spacing: 0.13em;
+}
+
+.panel h1,
+.panel h2 {
+  margin: 2px 0 0;
+  font-size: 18px;
+}
+
+.run-state,
+.tiny-label {
+  color: #798daa;
+  font-size: 10px;
+}
+
+.tiny-label {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
