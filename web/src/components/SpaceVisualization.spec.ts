@@ -1,44 +1,23 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import SpaceVisualization from './SpaceVisualization.vue'
 
+const space = { id: 1, space_type: 'scene_space' as const, owner_cloud_id: 7, parent_space_id: 2, random_seed: 1 }
+const cloud = { id: 3, cloud_type: 'word_form' as const, canonical_name: 'кот', mass: 1, density: 1, stability: .2, base_activation: 0, observation_count: 1, metadata_json: '{}' }
+const placement = { id: 11, cloud_id: 3, space_id: 1, x: 100, y: 120, z: null, radius: 20, local_activation: 1, local_density: 1, local_gravity: 0, local_stability_modifier: 0, metadata_json: '{}' }
+
 describe('SpaceVisualization', () => {
-  it('renders without crashing when no words', () => {
-    const wrapper = mount(SpaceVisualization, {
-      props: {
-        concepts: [],
-        width: 800,
-        height: 500,
-      },
-    })
-    expect(wrapper.find('svg').exists()).toBe(true)
+  it('renders normalized placements', () => {
+    const wrapper = mount(SpaceVisualization, { props: { space, clouds: { 3: cloud }, placements: [placement] } })
+    expect(wrapper.findAll('.placement-node')).toHaveLength(1)
+    expect(wrapper.findAll('.density-field circle')).toHaveLength(1)
+    expect(wrapper.find('radialGradient[id="continuum-word_form"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('кот')
   })
 
-  it('renders word nodes when words provided', () => {
-    const concepts = [
-      { id: 1, token: 'test', mass: 1.0, radius: 34, activation: 1, position: [100, 100] },
-      { id: 2, token: 'hello', mass: 2.0, radius: 39, activation: 1, position: [200, 200] },
-    ]
-    const wrapper = mount(SpaceVisualization, {
-      props: {
-        concepts,
-        width: 800,
-        height: 500,
-      },
-    })
-    const nodes = wrapper.findAll('.concept-node')
-    expect(nodes).toHaveLength(2)
-    expect(wrapper.findAll('line')).toHaveLength(0)
-  })
-
-  it('shows legend', () => {
-    const wrapper = mount(SpaceVisualization, {
-      props: {
-        concepts: [],
-        width: 800,
-        height: 500,
-      },
-    })
-    expect(wrapper.find('.legend').exists()).toBe(true)
+  it('emits placement identity instead of cloud identity', async () => {
+    const wrapper = mount(SpaceVisualization, { props: { space, clouds: { 3: cloud }, placements: [placement] } })
+    await wrapper.find('.placement-node').trigger('click')
+    expect(wrapper.emitted('select-placement')?.[0]).toEqual([11])
   })
 })

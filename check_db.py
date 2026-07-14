@@ -1,18 +1,12 @@
-import sqlite3
-conn = sqlite3.connect('.superai/state.sqlite')
-conn.row_factory = sqlite3.Row
+from pprint import pprint
 
-# Check lexeme clouds
-cur = conn.execute('SELECT * FROM clouds WHERE layer_id = (SELECT id FROM layers WHERE name="lexeme")')
-print('Lexeme clouds:', [dict(row) for row in cur.fetchall()])
+from server.v2.repository import V2Repository
+from server.v2.validation import ModelInvariantValidator
 
-cur = conn.execute('SELECT * FROM word_form_to_lexeme')
-print('Word form to lexeme:', [dict(row) for row in cur.fetchall()])
 
-# Check scenes
-cur = conn.execute('SELECT * FROM scenes')
-print('Scenes:', [dict(row) for row in cur.fetchall()])
-
-# Check word_form clouds
-cur = conn.execute('SELECT * FROM clouds WHERE layer_id = (SELECT id FROM layers WHERE name="word_form")')
-print('Word form clouds:', [dict(row) for row in cur.fetchall()])
+repository = V2Repository()
+with repository.transaction() as connection:
+    pprint(repository.stats(connection))
+    pprint([dict(row) for row in connection.execute("SELECT * FROM scenes ORDER BY cloud_id")])
+    pprint([dict(row) for row in connection.execute("SELECT * FROM word_forms ORDER BY cloud_id")])
+pprint(ModelInvariantValidator(repository).validate())

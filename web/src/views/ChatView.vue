@@ -1,7 +1,7 @@
 <template>
   <div class="chat-shell">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark">✦</span><div><div class="brand-title">SuperAI <span>· hive chat</span></div><div class="brand-sub">локальная память → ограниченный поиск</div></div></div>
+      <div class="brand"><span class="brand-mark">✦</span><div><div class="brand-title">SuperAI <span>· чат с ульем</span></div><div class="brand-sub">локальная память → ограниченный поиск</div></div></div>
       <div class="top-actions"><RouterLink class="nav-link" to="/field">Обучение поля</RouterLink><span class="status" :class="mode"><i></i>{{ modeLabel }}</span><button class="ghost" @click="resetHive">Новый улей</button><span class="avatar">AI</span></div>
     </header>
 
@@ -33,7 +33,7 @@
       </section>
 
       <aside class="panel hive-panel">
-        <div class="panel-head"><div><div class="kicker">WORKING MEMORY</div><h2>Улей</h2></div><span class="hive-count">{{ cells.length }} / {{ hive?.max_cells || 24 }} ячеек</span></div>
+        <div class="panel-head"><div><div class="kicker">РАБОЧАЯ ПАМЯТЬ</div><h2>Улей</h2></div><span class="hive-count">{{ cells.length }} / {{ hive?.max_cells || 24 }} ячеек</span></div>
         <div class="hive-summary"><div><span class="tiny-label">Активация</span><strong>{{ percent(averageActivation) }}</strong></div><div><span class="tiny-label">Удержание</span><strong>{{ percent(averageRetention) }}</strong></div></div>
         <div class="hive-map"><svg v-if="hiveGraphNodes.length" class="hive-graph" viewBox="0 0 850 500"><line v-for="link in hiveGraphLinks" :key="link.id" :x1="link.left.x" :y1="link.left.y" :x2="link.right.x" :y2="link.right.y" :stroke-width="1 + link.similarity * 7"/><g v-for="node in hiveGraphNodes" :key="node.cell.id" class="hive-node" :class="{ selected: selectedCell?.id === node.cell.id, active: activeCellIds.has(node.cell.id) }" :transform="`translate(${node.x} ${node.y})`" @click="selectedCell = node.cell"><circle :r="node.radius"/><circle class="node-core" :r="Math.max(10, node.radius - 10)"/><text class="node-label" text-anchor="middle" y="-2">{{ node.label }}</text><text class="node-gravity" text-anchor="middle" y="15">{{ percent(node.cell.retention) }}</text></g></svg><div v-else class="hive-empty">Улей ожидает нектар</div></div>
         <div class="hive-legend"><span><i></i> ячейка памяти</span><span><b></b> общий состав</span></div>

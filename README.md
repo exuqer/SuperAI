@@ -1,62 +1,32 @@
-# SuperAI
+# SuperAI V2
 
-SuperAI — минимальное приложение для обучения непрерывного 2D-поля понятий.
-Понятия не соединяются рёбрами: каждое понятие хранит координаты и массу, а
-вероятность совместной активации возникает из геометрии поля.
+Cloud / Space / Placement модель с идемпотентным обучением, локальной физикой сцен и изолированной памятью улья.
 
 ## Запуск
 
-```bash
-python3 -m pip install -e '.[dev]'
-./dev.sh
+```powershell
+python -m pip install -e ".[dev]"
+python -m uvicorn server.server:app --reload
+cd web
+npm install
+npm run dev:frontend
 ```
 
-API доступен по `http://127.0.0.1:8000/docs`, клиент — по `http://localhost:3010`.
-Состояние сохраняется в `.superai/state.sqlite` и содержит только таблицу
-`concepts`. Старые схемы очищаются однократно при переходе на новую версию.
+Backend: `http://127.0.0.1:8000`. Frontend: `http://127.0.0.1:5173`.
 
 ## API
 
-- `POST /api/v1/training/learn` — обучить поле на `{ "text": "..." }`;
-- `GET /api/v1/training/space` — получить понятия и статистику;
-- `DELETE /api/v1/training/space` — очистить поле;
-- `GET /api/health` — проверка здоровья.
+- `POST /api/v2/training/learn`
+- `GET /api/v2/field`
+- `GET /api/v2/stats`
+- `DELETE /api/v2/model`
+- `GET /api/v2/spaces/{id}`
+- `POST /api/v2/spaces/{id}/physics/tick`
+- `GET /api/v2/placements/{id}`
+- `GET /api/v2/clouds/{id}`
+- `GET /api/v2/clouds/{id}/structure`
+- `GET /api/v2/scenes/{id}`
+- `POST /api/v2/hives`
+- `POST /api/v2/hives/{id}/query`
 
-Объект понятия имеет формат:
-
-```json
-{
-  "id": 1,
-  "token": "кот",
-  "position": [800.0, 500.0],
-  "mass": 1.0,
-  "radius": 34.0,
-  "activation": 0.5
-}
-```
-
-Постоянно сохраняются только `token`, `position` и `mass`. Радиус и активация
-вычисляются во время обучения. Временные силы используют глобальное поле,
-отталкивание пересекающихся областей, расстояние между токенами в предложении
-и последовательную траекторию контекста.
-
-## Проверка
-
-```bash
-python3 -m pytest
-cd web && npm install && npm run test && npm run build
-```
-
-## Структура
-
-- `server/database.py` — хранение понятий;
-- `server/physics.py` — 2D-градиенты и физика;
-- `server/training.py` — токенизация и обучение;
-- `server/server.py` — FastAPI API;
-- `web/` — Vue/Vite визуализация поля;
-- `tests/` — backend-тесты.
-
-## Документация
-
-- [`docs/CONTINUOUS_SPACE.md`](docs/CONTINUOUS_SPACE.md) — подробное описание
-  непрерывного пространства, zoom, семантической глубины и серверной навигации.
+Схема создаётся с нуля. V1 и перенос старых данных не поддерживаются.

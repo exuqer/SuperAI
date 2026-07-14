@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 
 # Regex for tokenizing Russian and Latin words (including hyphens and apostrophes)
