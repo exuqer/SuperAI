@@ -348,6 +348,15 @@ class UnknownTokenSearchService:
         state = state or self._working_state(conn, hive_id)
         winner = search["selected_candidate"]
         target = winner["candidate_lexeme"]
+        if not state.get("memory_scenes"):
+            from .query_scene import QuerySceneService
+            query_service = QuerySceneService(self.repository)
+            global_scenes = query_service._memory_scenes(conn, None)
+            state["memory_scenes"] = [
+                query_service._score_scene(state.get("query_frame", {}), scene, conn)
+                for scene in global_scenes
+                if any(value.get("lemma") == target for value in scene.get("roles", {}).values() if isinstance(value, dict))
+            ][:8]
         self._place_bridge(conn, hive_id, search, winner)
         for token in state.get("query_frame", {}).get("roles", {}).values():
             if token.get("surface", "").casefold() == search["surface"]:
@@ -373,7 +382,7 @@ class UnknownTokenSearchService:
                 elif addition["scores"]["total"] > current["scores"].get("total", 0.0):
                     current.update(addition)
             for candidate in additions:
-                self._place_role_candidate(conn, hive_id, candidate)
+                candidate["cell_id"] = self._place_role_candidate(conn, hive_id, candidate)
                 for source_id in candidate.get("sources", []):
                     scene_id = str(source_id).removeprefix("scene-")
                     scene = next((item for item in state.get("memory_scenes", []) if item.get("id") == source_id), None)
@@ -406,27 +415,28 @@ class UnknownTokenSearchService:
             })
         self._save_working_state(conn, hive_id, state)
 
-    def _place_memory_source(self, conn: Any, hive_id: str, scene_id: int, scene: Dict[str, Any], search: Dict[str, Any]) -> None:
+    def _place_memory_source(self, conn: Any, hive_id: str, scene_id: int, scene: Dict[str, Any], search: Dict[str, Any]) -> Optional[str]:
         exists = conn.execute("SELECT id FROM hive_cells WHERE hive_id=? AND source_scene_cloud_id=? AND component_class='memory_source' LIMIT 1", (hive_id, scene_id)).fetchone()
         if exists:
-            return
+            return str(exists["id"])
         hive = conn.execute("SELECT space_id FROM hives WHERE id=?", (hive_id,)).fetchone()
         cloud = conn.execute("SELECT id FROM clouds WHERE id=?", (scene_id,)).fetchone()
         if not hive or not cloud:
-            return
+            return None
         index = conn.execute("SELECT COUNT(*) FROM hive_cells WHERE hive_id=?", (hive_id,)).fetchone()[0]
         angle = index * 2.399963
         source_confidence = max(.05, min(.95, float(scene.get("scores", {}).get("source_confidence", scene.get("scores", {}).get("total_score", .5)) or .5)))
         placement = self.repository.create_placement(conn, scene_id, int(hive["space_id"]), 420 + math.cos(angle) * (80 + 42 * math.sqrt(index + 1)), 280 + math.sin(angle) * (80 + 42 * math.sqrt(index + 1)), local_activation=source_confidence, local_gravity=source_confidence, metadata={"placement_kind": "memory_source", "scene_id": scene_id, "search_id": search["id"], "selection_status": "SELECTED"})
         source = conn.execute("SELECT p.id, p.space_id FROM cloud_placements p JOIN spaces s ON s.id=p.space_id WHERE p.cloud_id=? AND s.space_type='global_field' LIMIT 1", (scene_id,)).fetchone()
         cell_id, now = f"cell-{uuid.uuid4().hex}", utcnow()
-        metadata = {"component_class": "memory_source", "selection_status": "SELECTED", "query_session_id": search.get("query_session_id"), "source_scene_id": scene_id, "source_text": scene.get("source_text", ""), "query_frame_id": search.get("query_frame_id"), "message_id": search.get("message_id"), "created_for_surface": search.get("created_for_surface", "")}
+        metadata = {"component_class": "memory_source", "selection_status": "SELECTED", "query_session_id": search.get("query_session_id"), "source_scene_id": scene_id, "source_text": scene.get("source_text", ""), "query_frame_id": search.get("query_frame_id"), "message_id": search.get("message_id"), "created_for_surface": search.get("created_for_surface", ""), "retrieval_scope": scene.get("retrieval_scope", "LOCAL"), "provenance": scene.get("provenance", {})}
         conn.execute("""INSERT INTO hive_cells(id,hive_id,dominant_cloud_id,hive_placement_id,source_cloud_id,source_placement_id,source_space_id,source_scene_cloud_id,stored_strength,retention,local_activation,component_class,metadata_json,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (cell_id,hive_id,scene_id,placement["id"],scene_id,source["id"] if source else None,source["space_id"] if source else None,scene_id,source_confidence,source_confidence,source_confidence,"memory_source",encode(metadata),now,now))
         components = conn.execute("""SELECT sc.word_form_cloud_id, sc.grammatical_role, wf.normalized_form FROM scene_components sc JOIN word_forms wf ON wf.cloud_id=sc.word_form_cloud_id WHERE sc.scene_cloud_id=? ORDER BY sc.token_index""", (scene_id,)).fetchall()
         for component in components:
             conn.execute("""INSERT INTO hive_cell_components(cell_id,cloud_id,composition_share,local_activation,role,effective_strength,component_class,source_cloud_id,source_placement_id,source_space_id,provenance_json)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (cell_id,int(component["word_form_cloud_id"]),1/max(1,len(components)),source_confidence,component["grammatical_role"],source_confidence,"memory_source",scene_id,source["id"] if source else None,source["space_id"] if source else None,encode({"source_scene_id":scene_id,"surface":component["normalized_form"]})))
+        return cell_id
 
     def _place_bridge(self, conn: Any, hive_id: str, search: Dict[str, Any], winner: Dict[str, Any]) -> None:
         """Place the global candidate in the hive; the bridge itself remains local metadata."""
@@ -474,7 +484,7 @@ class UnknownTokenSearchService:
              global_source["space_id"] if global_source else None, encode({"search_id": search["id"], "source_cloud_id": winner["candidate_cloud_id"]})),
         )
 
-    def _place_role_candidate(self, conn: Any, hive_id: str, candidate: Dict[str, Any]) -> None:
+    def _place_role_candidate(self, conn: Any, hive_id: str, candidate: Dict[str, Any]) -> Optional[str]:
         cloud = conn.execute("SELECT cloud_id FROM lexemes WHERE lemma=?", (candidate["lemma"],)).fetchone()
         if not cloud:
             return
@@ -484,7 +494,7 @@ class UnknownTokenSearchService:
             (hive_id, cloud_id),
         ).fetchone()
         if exists:
-            return
+            return str(exists["id"])
         hive = conn.execute("SELECT space_id, max_cells FROM hives WHERE id=?", (hive_id,)).fetchone()
         cells = conn.execute("SELECT id, hive_placement_id, retention FROM hive_cells WHERE hive_id=?", (hive_id,)).fetchall()
         if len(cells) >= int(hive["max_cells"]):
@@ -523,6 +533,7 @@ class UnknownTokenSearchService:
             (cell_id, cloud_id, strength, candidate["target_role"], strength, cloud_id,
              source["id"] if source else None, source["space_id"] if source else None, encode(metadata)),
         )
+        return cell_id
 
     def _set_pipeline(self, state: Dict[str, Any], search: Dict[str, Any], candidate_count: int) -> None:
         frame = state.get("query_frame", {})

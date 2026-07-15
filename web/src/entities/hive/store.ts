@@ -97,6 +97,7 @@ export const useHiveStore = defineStore('hive', () => {
   const goalText = ref('');
   const reasoningSteps = ref(3);
   const reasoningLoading = ref(false);
+  let reasoningPromise: Promise<void> | null = null;
   const runResult = ref<ReasoningResponse | null>(null);
   const copyStatus = ref('');
   const jsonOpen = ref(false);
@@ -224,9 +225,9 @@ export const useHiveStore = defineStore('hive', () => {
     });
   }
 
-  async function hierarchy() {
+  async function hierarchy(manageLoading = true) {
     if (!hive.value) return null;
-    return run(async () => {
+    const operation = async () => {
       const result = await api.get<HiveHierarchyResponse>(
         `/api/v2/hives/${hive.value!.id}/hierarchy`
       );
@@ -239,7 +240,8 @@ export const useHiveStore = defineStore('hive', () => {
         selectedCell.value = cells.value.find(cell => cell.id === selectedCell.value?.id) || null;
       }
       return result;
-    });
+    };
+    return manageLoading ? run(operation) : operation();
   }
 
   async function expandCell(cellId: string, targetLevel: string = 'word_form') {
@@ -252,7 +254,7 @@ export const useHiveStore = defineStore('hive', () => {
         ? { ...cell, subspaces: [...(cell.subspaces || []), result.subspace] }
         : cell);
       generationCandidates.value = [];
-      await hierarchy();
+      await hierarchy(false);
       if (selectedCell.value?.id === cellId) {
         selectedCell.value = cells.value.find(cell => cell.id === cellId) || null;
       }
@@ -266,7 +268,7 @@ export const useHiveStore = defineStore('hive', () => {
     mode?: QueryMessageMode,
     resonanceScope: 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL' = 'LOCAL_THEN_GLOBAL',
   ) {
-    if (!hive.value || loading.value) return;
+    if (!hive.value || loading.value || reasoningLoading.value) return;
     loading.value = true;
     error.value = '';
     goalText.value = text;
@@ -313,7 +315,7 @@ export const useHiveStore = defineStore('hive', () => {
       hiveStructure.value = (result as any).hive_structure || null;
       resolvedMode.value = result.resolved_mode || null;
       vibrationHistory.value = [];
-      await hierarchy();
+      await hierarchy(false);
       if (result.resolved_mode !== 'LOCAL_RESONANCE' && queryScene.value && queryAnswer.value?.status !== 'RESOLVED') {
         await runReasoning();
       }
@@ -341,42 +343,47 @@ export const useHiveStore = defineStore('hive', () => {
     }
   }
 
-  async function runReasoning() {
-    if (!hive.value || reasoningLoading.value) return;
+  function runReasoning(): Promise<void> {
+    if (!hive.value) return Promise.resolve();
+    if (reasoningPromise) return reasoningPromise;
     reasoningLoading.value = true;
-    try {
-      if (queryScene.value) {
-        const result = await api.post<{ hive: any }>(`/api/v2/hives/${hive.value.id}/vibrate/run`, { steps: reasoningSteps.value, config: {} });
-        queryFrame.value = result.hive.query_frame;
-        queryScene.value = result.hive.query_scene;
-        memoryScenes.value = result.hive.memory_scenes;
-        queryCandidates.value = result.hive.candidates;
-        queryAnswer.value = result.hive.answer;
-        queryPipeline.value = result.hive.pipeline || result.hive.hive?.pipeline || null;
-        memorySources.value = result.hive.memory_sources || [];
-        sentencePlan.value = result.hive.sentence_plan || null;
-        fullSentencePlan.value = result.hive.full_sentence_plan || null;
-        morphologyTrace.value = result.hive.morphology_trace || [];
-        reverseValidation.value = result.hive.reverse_validation || null;
-        unknownTokenSearches.value = result.hive.unknown_token_searches || [];
-        roleSearches.value = result.hive.role_searches || [];
-        localResonance.value = result.hive.local_resonance || null;
-        resonanceProbes.value = result.hive.resonance_probes || [];
-        activeQuery.value = result.hive.active_query || null;
-        vibrationHistory.value = result.hive.vibration.history;
-        dynamics.value = result.hive.dynamics || null;
-        reasoningTrace.value = result.hive.reasoning_trace || null;
-        await hierarchy();
-        return;
+    reasoningPromise = (async () => {
+      try {
+        if (queryScene.value) {
+          const result = await api.post<{ hive: any }>(`/api/v2/hives/${hive.value!.id}/vibrate/run`, { steps: reasoningSteps.value, config: {} });
+          queryFrame.value = result.hive.query_frame;
+          queryScene.value = result.hive.query_scene;
+          memoryScenes.value = result.hive.memory_scenes;
+          queryCandidates.value = result.hive.candidates;
+          queryAnswer.value = result.hive.answer;
+          queryPipeline.value = result.hive.pipeline || result.hive.hive?.pipeline || null;
+          memorySources.value = result.hive.memory_sources || [];
+          sentencePlan.value = result.hive.sentence_plan || null;
+          fullSentencePlan.value = result.hive.full_sentence_plan || null;
+          morphologyTrace.value = result.hive.morphology_trace || [];
+          reverseValidation.value = result.hive.reverse_validation || null;
+          unknownTokenSearches.value = result.hive.unknown_token_searches || [];
+          roleSearches.value = result.hive.role_searches || [];
+          localResonance.value = result.hive.local_resonance || null;
+          resonanceProbes.value = result.hive.resonance_probes || [];
+          activeQuery.value = result.hive.active_query || null;
+          vibrationHistory.value = result.hive.vibration.history;
+          dynamics.value = result.hive.dynamics || null;
+          reasoningTrace.value = result.hive.reasoning_trace || null;
+          await hierarchy(false);
+          return;
+        }
+        runResult.value = await api.post<ReasoningResponse>(`/api/v2/hives/${hive.value!.id}/reasoning`, {
+          text: goalText.value,
+          config: { reasoning_steps: reasoningSteps.value },
+        });
+        applyState(runResult.value.hive);
+      } finally {
+        reasoningLoading.value = false;
+        reasoningPromise = null;
       }
-      runResult.value = await api.post<ReasoningResponse>(`/api/v2/hives/${hive.value.id}/reasoning`, {
-        text: goalText.value,
-        config: { reasoning_steps: reasoningSteps.value },
-      });
-      applyState(runResult.value.hive);
-    } finally {
-      reasoningLoading.value = false;
-    }
+    })();
+    return reasoningPromise;
   }
 
   async function runReasoningStep() {
@@ -401,7 +408,7 @@ export const useHiveStore = defineStore('hive', () => {
       resonanceProbes.value = result.resonance_probes || [];
       activeQuery.value = result.active_query || activeQuery.value;
       resolvedMode.value = result.resolved_mode || null;
-      await hierarchy();
+      await hierarchy(false);
       cacheState();
       return result;
     });

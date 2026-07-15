@@ -14,6 +14,23 @@ from .repository import V2Repository, encode, utcnow
 from .training import RoleResolver, RussianMorphology
 
 
+SEARCH_STOP_WORDS = {
+    "а", "бы", "в", "во", "где", "да", "же", "и", "из", "к", "как", "когда",
+    "кто", "ли", "на", "над", "не", "но", "о", "об", "от", "откуда", "по",
+    "под", "при", "про", "с", "со", "там", "то", "у", "что", "чем", "это",
+}
+
+ROLE_ALIASES = {
+    "subject": {"subject", "agent"},
+    "agent": {"subject", "agent"},
+    "predicate": {"predicate", "action"},
+    "action": {"predicate", "action"},
+    "location": {"location", "destination", "source"},
+    "destination": {"location", "destination"},
+    "source": {"location", "source"},
+}
+
+
 def clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
@@ -205,33 +222,79 @@ class V2LocalMemoryService:
         request = decision.get("external_request")
         if not request:
             return {"sources": [], "bees": [], "iterations": 0, "anchors": decision["local_anchors"]}
-        terms = {
-            item["normalized_form"]
-            for item in request["unresolved_components"]
-            if item.get("normalized_form")
-        }
-        if not terms:
-            terms = {
-                item["normalized_form"]
-                for item in decision["parsed_message"]["components"]
-                if item.get("normalized_form")
-            }
+        query_components = [
+            item for item in decision["parsed_message"]["components"]
+            if item.get("lexeme_cloud_id")
+            and str(item.get("normalized_form") or "").casefold() not in SEARCH_STOP_WORDS
+            and str(item.get("expected_role") or "") not in {"preposition", "conjunction", "particle", "question"}
+        ]
         ranked: List[Tuple[float, Dict[str, Any]]] = []
-        rows = conn.execute(
+        scene_rows = conn.execute(
             """SELECT p.*, c.cloud_type, c.canonical_name, c.mass, c.stability
-            FROM cloud_placements p JOIN spaces s ON s.id = p.space_id
-            JOIN clouds c ON c.id = p.cloud_id
-            WHERE s.space_type = 'global_field' AND c.cloud_type IN ('scene','word_form','lexeme','concept_candidate')"""
+               FROM cloud_placements p JOIN spaces s ON s.id = p.space_id
+               JOIN clouds c ON c.id = p.cloud_id
+               WHERE s.space_type = 'global_field' AND c.cloud_type = 'scene'"""
         ).fetchall()
-        for row in rows:
-            words = set(str(row["canonical_name"]).casefold().split())
-            overlap = len(words & terms) / max(1, len(terms))
+        for row in scene_rows:
+            components = conn.execute(
+                """SELECT lexeme_cloud_id, grammatical_role
+                   FROM scene_components WHERE scene_cloud_id = ?""",
+                (row["cloud_id"],),
+            ).fetchall()
+            matched = 0.0
+            for query in query_components:
+                aliases = ROLE_ALIASES.get(str(query.get("expected_role") or ""), {str(query.get("expected_role") or "")})
+                compatible = [
+                    component for component in components
+                    if component["lexeme_cloud_id"] is not None
+                    and int(component["lexeme_cloud_id"]) == int(query["lexeme_cloud_id"])
+                ]
+                if not compatible:
+                    continue
+                role_score = max(
+                    1.0 if str(component["grammatical_role"]) in aliases else 0.85
+                    for component in compatible
+                )
+                matched += role_score
+            overlap = matched / max(1, len(query_components))
             if overlap <= 0:
                 continue
-            score = clamp(overlap * 0.8 + min(1.0, float(row["mass"]) / 10.0) * 0.1 + float(row["stability"]) * 0.1)
+            score = clamp(
+                overlap * 0.85
+                + min(1.0, float(row["mass"]) / 10.0) * 0.05
+                + float(row["stability"]) * 0.10
+            )
             candidate = dict(row)
             candidate["_query_overlap"] = overlap
             ranked.append((score, candidate))
+
+        if not ranked:
+            terms = {
+                str(item.get("normalized_form") or "").casefold()
+                for item in request["unresolved_components"]
+                if item.get("normalized_form")
+                and str(item.get("normalized_form") or "").casefold() not in SEARCH_STOP_WORDS
+            }
+            rows = conn.execute(
+                """SELECT p.*, c.cloud_type, c.canonical_name, c.mass, c.stability
+                   FROM cloud_placements p JOIN spaces s ON s.id = p.space_id
+                   JOIN clouds c ON c.id = p.cloud_id
+                   WHERE s.space_type = 'global_field'
+                     AND c.cloud_type IN ('word_form','lexeme','concept_candidate')"""
+            ).fetchall()
+            for row in rows:
+                words = set(str(row["canonical_name"]).casefold().split())
+                overlap = len(words & terms) / max(1, len(terms))
+                if overlap <= 0:
+                    continue
+                score = clamp(
+                    overlap * 0.8
+                    + min(1.0, float(row["mass"]) / 10.0) * 0.1
+                    + float(row["stability"]) * 0.1
+                )
+                candidate = dict(row)
+                candidate["_query_overlap"] = overlap
+                ranked.append((score, candidate))
         ranked.sort(key=lambda item: (-item[0], int(item[1]["id"])))
         exact_scenes = [
             item for item in ranked

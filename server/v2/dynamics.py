@@ -689,10 +689,14 @@ class HiveDynamicsService:
         return DynamicsState(initial_temperature=config.temperature.default, current_temperature=config.temperature.default, minimum_temperature=config.temperature.minimum, maximum_temperature=config.temperature.maximum, cooling_rate=config.temperature.cooling_rate, temperature_state=DynamicsEngine.temperature_state(config.temperature.default), temperature_history=[{"step": 0, "value": config.temperature.default}], zones=asdict(config.zones), anchors=anchors, nodes=nodes, random_seed=config.random_seed)
 
     def _sync_candidates(self, state: Dict[str, Any], dynamics: DynamicsState) -> None:
-        by_label = {node.label.casefold(): node for node in dynamics.nodes}
+        by_cell = {str(node.cell_id): node for node in dynamics.nodes}
+        by_candidate = {}
+        for node in dynamics.nodes:
+            candidate_id = (node.admission or {}).get("candidate_id") or (node.admission or {}).get("metadata", {}).get("candidate_id")
+            if candidate_id:
+                by_candidate[str(candidate_id)] = node
         for candidate in state.get("candidates") or []:
-            label = str(candidate.get("surface") or candidate.get("lemma") or "").casefold()
-            node = by_label.get(label)
+            node = by_cell.get(str(candidate.get("cell_id"))) or by_candidate.get(str(candidate.get("id")))
             if not node:
                 continue
             scores = candidate.setdefault("scores", {})

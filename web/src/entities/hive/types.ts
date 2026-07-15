@@ -126,6 +126,21 @@ export interface QuerySceneCandidateV2 {
     generated: boolean;
   };
   scores: Record<string, number>;
+  answer_mode?: 'direct' | 'explanation' | string;
+  cell_id?: string | null;
+}
+
+export interface DialogueContextV2 {
+  location?: Record<string, unknown> | null;
+  destination?: Record<string, unknown> | null;
+  source?: Record<string, unknown> | null;
+}
+
+export interface ContextResolutionV2 {
+  status: 'NOT_APPLICABLE' | 'RESOLVED' | 'UNRESOLVED_CONTEXT' | string;
+  referential?: string | null;
+  role?: string | null;
+  value?: Record<string, unknown> | null;
 }
 
 export interface QuerySceneV2 {
@@ -154,6 +169,12 @@ export interface QueryWorkingHiveV2 {
   candidates: QuerySceneCandidateV2[];
   vibration: { current_step: number; status: string; history: Array<Record<string, unknown>> };
   answer: { answer_mode: string; surface_answer: string; confidence: number };
+  dialogue_context?: DialogueContextV2;
+  context_resolution?: ContextResolutionV2;
+  retrieval_scope?: Record<string, number>;
+  semantic_total?: number;
+  gravity?: number;
+  decision_score?: number;
 }
 
 export interface DynamicsNodeStateV2 {

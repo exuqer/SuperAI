@@ -65,6 +65,11 @@ class RoleResolver:
     def resolve(self, tokens: Sequence[WordToken], morphologies: Sequence[Morphology]) -> List[Dict[str, Any]]:
         predicate_index = next((i for i, item in enumerate(morphologies) if item.pos_tag in self.VERBS), None)
         definition_index = next((i for i, token in enumerate(tokens) if token.normalized == "это"), None)
+        has_source = any(
+            tokens[index - 1].normalized in {"из", "от"} and morph.features.get("case") == "gent"
+            for index, (token, morph) in enumerate(zip(tokens, morphologies))
+            if index
+        )
         result: List[Dict[str, Any]] = []
         for index, (token, morph) in enumerate(zip(tokens, morphologies)):
             previous = tokens[index - 1].normalized if index else ""
@@ -73,10 +78,21 @@ class RoleResolver:
                 role, dependency, confidence = "preposition", "marker", 0.99
             elif token.normalized in self.SERVICE:
                 role, dependency, confidence = "service", "service", 0.98
-            elif previous in {"в", "во", "на"}:
-                role, dependency, confidence = "location", "prepositional", 0.88
-            elif previous in {"с", "со"}:
-                role, dependency, confidence = "complement", "prepositional", 0.82
+            elif previous in {"в", "во", "на"} and morph.features.get("case") in {"loct", None}:
+                role, dependency, confidence = "location", "prepositional", 0.92
+            elif previous in {"в", "во", "на"} and morph.features.get("case") == "accs":
+                role, dependency, confidence = "destination", "prepositional", 0.92
+            elif previous in {"к"} and morph.features.get("case") in {"datv", None}:
+                role, dependency, confidence = "destination", "prepositional", 0.9
+            elif previous in {"из", "от"} and morph.features.get("case") == "gent":
+                role, dependency, confidence = "source", "prepositional", 0.92
+            elif previous in {"с", "со"} and morph.features.get("case") == "gent":
+                role, dependency, confidence = "source", "prepositional", 0.9
+            elif previous in {"с", "со"} and morph.features.get("case") in {"ablt", None}:
+                if definition_index is not None and index > definition_index:
+                    role, dependency, confidence = "complement", "prepositional", 0.82
+                else:
+                    role, dependency, confidence = "instrument", "prepositional", 0.88
             elif definition_index is not None and index > definition_index and morph.pos_tag in self.NOUNS:
                 role, dependency, confidence = "definition", "defines", 0.84
             elif morph.pos_tag in self.VERBS:
@@ -85,12 +101,16 @@ class RoleResolver:
                 role, dependency, confidence = "attribute", "modifies", 0.80
             elif morph.pos_tag in self.NOUNS:
                 case = morph.features.get("case")
-                if (predicate_index is None and index == 0) or (
+                if predicate_index is None and has_source:
+                    role, dependency, confidence = "object", "theme", 0.84
+                elif (predicate_index is None and index == 0) or (
                     predicate_index is not None and index < predicate_index and case in {None, "nomn"}
                 ):
                     role, dependency, confidence = "subject", "subject", 0.86
-                elif predicate_index is not None and (index > predicate_index or case in {"accs", "gent", "datv", "ablt"}):
+                elif predicate_index is not None and (index > predicate_index or case in {"accs", "gent", "datv"}):
                     role, dependency, confidence = "object", "object", 0.78
+                elif case == "ablt":
+                    role, dependency, confidence = "instrument", "instrument", 0.76
             result.append({"role": role, "dependency_role": dependency, "confidence": confidence})
         return result
 
@@ -200,7 +220,7 @@ class WordFormStructureService:
 
 
 class TrainingPipelineV2:
-    parser_version = "ru-rule-v2"
+    parser_version = "ru-rule-v3"
 
     def __init__(self, repository: Optional[V2Repository] = None) -> None:
         self.repository = repository or V2Repository()
@@ -222,6 +242,7 @@ class TrainingPipelineV2:
             global_space, global_created = self.repository.get_or_create_space(conn, "global_field", seed=1337)
             if global_created:
                 journal.record("SPACE_CREATED", "space", global_space["id"], None, global_space, "model root")
+            self._migrate_existing_scenes(conn)
             scene_results = [
                 self._train_sentence(conn, sentence, int(global_space["id"]), source_type, journal)
                 for sentence in tokenization.sentences
@@ -249,6 +270,33 @@ class TrainingPipelineV2:
             "reused_scenes": by_type("SCENE_REUSED"),
             "stats": stats,
         }
+
+    def _migrate_existing_scenes(self, conn: Any) -> None:
+        rows = conn.execute(
+            "SELECT cloud_id FROM scenes WHERE parser_version <> ? ORDER BY cloud_id",
+            (self.parser_version,),
+        ).fetchall()
+        for row in rows:
+            components = conn.execute(
+                """SELECT sc.id, sc.token_index, wf.normalized_form
+                FROM scene_components sc JOIN word_forms wf ON wf.cloud_id=sc.word_form_cloud_id
+                WHERE sc.scene_cloud_id=? ORDER BY sc.token_index""",
+                (row["cloud_id"],),
+            ).fetchall()
+            tokens = [WordToken(text=item["normalized_form"], normalized=item["normalized_form"], position=index) for index, item in enumerate(components)]
+            morphologies = [self.morphology.parse(token.normalized) for token in tokens]
+            roles = self.roles.resolve(tokens, morphologies)
+            predicate_id = next((int(item["id"]) for item, role in zip(components, roles) if role["role"] == "predicate"), None)
+            for component, morphology, role in zip(components, morphologies, roles):
+                conn.execute(
+                    """UPDATE scene_components SET grammatical_role=?, dependency_role=?, confidence=?,
+                    morphology_json=?, head_component_id=? WHERE id=?""",
+                    (role["role"], role["dependency_role"], role["confidence"],
+                     encode({"lemma": morphology.lemma, "pos": morphology.pos_tag, **morphology.features}),
+                     predicate_id if predicate_id and role["role"] not in {"preposition", "service", "predicate"} else None,
+                     component["id"]),
+                )
+            conn.execute("UPDATE scenes SET parser_version=?, updated_at=? WHERE cloud_id=?", (self.parser_version, utcnow(), row["cloud_id"]))
 
     def _cloud(
         self,
@@ -334,6 +382,27 @@ class TrainingPipelineV2:
             ).fetchone()[0]
             if int(component_count) != len(sentence.tokens):
                 raise ValueError("reused scene has invalid component count")
+            existing_components = conn.execute(
+                "SELECT id, token_index FROM scene_components WHERE scene_cloud_id=? ORDER BY token_index",
+                (scene["id"],),
+            ).fetchall()
+            component_ids = [int(row["id"]) for row in existing_components]
+            for index, (word, lexeme, morphology, role) in enumerate(token_data):
+                conn.execute(
+                    """UPDATE scene_components
+                    SET word_form_cloud_id=?, lexeme_cloud_id=?, grammatical_role=?,
+                        dependency_role=?, confidence=?, morphology_json=?
+                    WHERE scene_cloud_id=? AND token_index=?""",
+                    (word["id"], lexeme["id"], role["role"], role["dependency_role"],
+                     role["confidence"], encode({"lemma": morphology.lemma, "pos": morphology.pos_tag, **morphology.features}),
+                     scene["id"], index),
+                )
+            predicate = next((component_ids[i] for i, item in enumerate(roles) if item["role"] == "predicate"), None)
+            if predicate:
+                for component_id, role in zip(component_ids, roles):
+                    if component_id != predicate and role["role"] not in {"preposition", "service"}:
+                        conn.execute("UPDATE scene_components SET head_component_id=? WHERE id=?", (predicate, component_id))
+            conn.execute("UPDATE scenes SET parser_version=?, updated_at=? WHERE cloud_id=?", (self.parser_version, utcnow(), scene["id"]))
         else:
             component_ids: List[int] = []
             for index, (word, lexeme, morphology, role) in enumerate(token_data):

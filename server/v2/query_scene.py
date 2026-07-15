@@ -22,8 +22,8 @@ QUESTION_ROLES = {
     "почему": "cause", "зачем": "purpose", "чем": "instrument",
     "сколько": "quantity",
 }
-SUPPORTED_ROLES = ("agent", "action", "modal", "object", "location", "time", "instrument")
-ANSWER_ROLE_ORDER = ("agent", "modal", "action", "object", "location", "time", "instrument")
+SUPPORTED_ROLES = ("agent", "action", "modal", "object", "location", "destination", "source", "time", "instrument")
+ANSWER_ROLE_ORDER = ("agent", "modal", "action", "object", "location", "destination", "source", "time", "instrument")
 MESSAGE_MODES = {"NEW_QUERY", "LOCAL_RESONANCE", "FOLLOW_UP", "CORRECTION"}
 MODAL_WORDS = {
     "можно": {"semantic_function": "possibility"},
@@ -40,11 +40,12 @@ ACTION_NEIGHBORS = {
     "ловить": {"поймать": 0.82},
 }
 ROLE_LABELS = {
-    "agent": "КТО?", "object": "ЧТО?", "location": "ГДЕ?", "time": "КОГДА?", "instrument": "ЧЕМ?",
+    "agent": "КТО?", "object": "ЧТО?", "location": "ГДЕ?", "destination": "КУДА?", "source": "ОТКУДА?", "time": "КОГДА?", "instrument": "ЧЕМ?",
 }
-LOCATION_PREPOSITIONS = {"в", "во", "на", "из", "от", "к"}
-INSTRUMENT_PREPOSITIONS = {"с", "со"}
+REFERENTIALS = {"там": "location", "туда": "destination", "оттуда": "source"}
+CONTEXT_ROLES = ("location", "destination", "source")
 AGENT_BLACKLIST = {"рынок", "рыба", "кухня", "сеть", "мяч", "птица"}
+ROLE_MATCH_ALIASES = {"location": {"location", "destination"}, "destination": {"location", "destination"}}
 
 
 class TokenResolutionState(str, Enum):
@@ -79,18 +80,21 @@ class QuerySceneService:
         tokens = tokenize_hierarchical(text).all_tokens
         items = []
         question_word = ""
+        referential = None
         for index, token in enumerate(tokens):
             morph = self.morphology.parse(token.normalized)
             normalized = token.normalized.casefold()
             is_question = normalized in QUESTION_ROLES and not question_word and intent["intent"] not in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}
             if is_question:
                 question_word = normalized
+            if normalized in REFERENTIALS:
+                referential = normalized
             modal = MODAL_WORDS.get(normalized)
             items.append({
                 "index": index, "surface": token.text, "normalized": normalized,
                 "lemma": morph.lemma, "part_of_speech": morph.pos_tag,
                 "grammatical_features": morph.features,
-                "component_type": "question_operator" if is_question else "query_modal" if modal else "query_token",
+                "component_type": "question_operator" if is_question else "context_reference" if normalized in REFERENTIALS else "query_modal" if modal else "query_token",
                 "role": "modal" if modal else None,
                 "semantic_function": modal["semantic_function"] if modal else None,
                 "expected_role": QUESTION_ROLES.get(normalized) if is_question else None,
@@ -106,7 +110,7 @@ class QuerySceneService:
         requested_role = QUESTION_ROLES.get(question_word, "")
         if intent["intent"] in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}:
             requested_role = ""
-        roles = self._roles(items)
+        roles = self._roles(items, requested_role=QUESTION_ROLES.get(question_word, ""))
         for role, value in roles.items():
             if value.get("status") == "empty":
                 continue
@@ -135,6 +139,7 @@ class QuerySceneService:
             "predicate": self._token_value(predicate) if predicate else None,
             "roles": roles,
             "tokens": items,
+            "referential": referential,
         }
         slots = []
         for role in SUPPORTED_ROLES:
@@ -165,13 +170,34 @@ class QuerySceneService:
                 raise KeyError(hive_id)
             hive = conn.execute("SELECT conversation_id FROM hives WHERE id=?", (hive_id,)).fetchone()
             message = conn.execute("SELECT id FROM hive_messages WHERE hive_id=? ORDER BY turn_index DESC LIMIT 1", (hive_id,)).fetchone()
+            dialogue_context = self._context(conn, hive_id)
+            parsed = self._apply_context(parsed, dialogue_context)
             parsed = self._resolve_token_states(conn, parsed)
             mode = mode if mode in MESSAGE_MODES else "NEW_QUERY"
+            context_resolution = parsed["query_frame"].get("context_resolution", {})
+            if parsed["query_frame"].get("referential") and context_resolution.get("source") != "query_explicit":
+                mode = "FOLLOW_UP"
+            dialogue_context = self._update_context(dialogue_context, parsed)
             self._clear_temporary_query_objects(conn, hive_id)
             if parsed["intent_classification"]["intent"] in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}:
-                return self._activate_conversational(conn, hive_id, text, mode, hive, message, parsed)
-            memory_scenes = self._memory_scenes(conn)
-            evaluated = [self._score_scene(parsed["query_frame"], scene) for scene in memory_scenes]
+                return self._activate_conversational(conn, hive_id, text, mode, hive, message, parsed, dialogue_context)
+            memory_scenes = self._memory_scenes(conn, hive_id)
+            evaluated = [self._score_scene(parsed["query_frame"], scene, conn) for scene in memory_scenes]
+            imported = []
+            local_candidates = self._candidates(parsed["query_frame"], evaluated)
+            local_semantic = max((float(item["scores"].get("semantic_total", 0.0)) for item in local_candidates), default=0.0)
+            if parsed["query_frame"].get("requested_role") and local_semantic < .65 and parsed["query_frame"].get("context_resolution", {}).get("status") != "UNRESOLVED_CONTEXT":
+                global_scenes = self._memory_scenes(conn, None)
+                local_ids = {scene["id"] for scene in memory_scenes}
+                global_evaluated = [self._score_scene(parsed["query_frame"], scene, conn) for scene in global_scenes if scene["id"] not in local_ids]
+                useful = [item for item in global_evaluated if item["result_type"] != "NO_HIT"]
+                for scene in sorted(useful, key=lambda item: (-item["scores"].get("semantic_total", 0.0), item["id"]))[:8]:
+                    self._import_scene(conn, hive_id, scene, text, parsed, hive, message)
+                    scene["retrieval_scope"] = "IMPORTED"
+                    scene["provenance"] = {"source": "global_field", "imported_for": text, "imported_at": utcnow()}
+                    imported.append(scene)
+                memory_scenes.extend(imported)
+                evaluated.extend(imported)
             candidates = self._candidates(parsed["query_frame"], evaluated)
             for slot in parsed["query_scene"]["slots"]:
                 if slot["status"] == "empty":
@@ -202,10 +228,15 @@ class QuerySceneService:
                 "active_query_session_id": active_session_id,
                 "query_session": query_session,
                 "query_sessions": sessions,
-                "created_for_surface": text,
+                "created_for_surface": text, "dialogue_context": dialogue_context,
+                "context_resolution": parsed["query_frame"].get("context_resolution", {"status": "NOT_APPLICABLE"}),
+                "retrieval_scope": {"local": len(memory_scenes) - len(imported), "imported": len(imported), "global_limit": 8},
                 **parsed, "memory_scenes": evaluated, "candidates": candidates,
                 "result_type": result_type,
-                "memory_sources": [], "inspection_projections": [], "generation_candidates": [],
+                "memory_sources": [
+                    {"id": f"memory-source-{scene['cloud_id']}", "component_class": "memory_source", "source_scene_id": int(scene["cloud_id"]), "source_text": scene.get("source_text", ""), "retrieval_scope": "IMPORTED", "provenance": deepcopy(scene.get("provenance", {})), "query_frame_id": parsed["query_frame"]["id"]}
+                    for scene in imported
+                ], "inspection_projections": [], "generation_candidates": [],
                 "role_searches": [{"id": f"role-search-{uuid.uuid4().hex[:10]}", "target_role": parsed["query_frame"].get("requested_role"), "role_candidates": [], "selected_role_candidate": None, "query_frame_id": parsed["query_frame"]["id"], "query_scene_id": parsed["query_scene"]["id"]}] if parsed["query_frame"].get("requested_role") else [],
                 "sentence_plan": None, "morphology_trace": [],
                 "vibration": {"current_step": 0, "max_steps": 5, "status": "READY", "history": []},
@@ -224,6 +255,8 @@ class QuerySceneService:
                                 "requested_role": parsed["query_frame"].get("requested_role"),
                                 "roles": deepcopy(parsed["query_frame"].get("roles", {})),
                                 "tokens": deepcopy(parsed["query_frame"].get("tokens", [])),
+                                "dialogue_context": deepcopy(dialogue_context),
+                                "context_resolution": deepcopy(parsed["query_frame"].get("context_resolution", {})),
                             },
                         },
                         {
@@ -239,17 +272,28 @@ class QuerySceneService:
                     ],
                 },
             }
+            best_scores = candidates[0].get("scores", {}) if candidates else {}
+            state.update({
+                "semantic_total": float(best_scores.get("semantic_total", 0.0)),
+                "gravity": float(best_scores.get("gravity", 0.0)),
+                "decision_score": float(best_scores.get("decision_score", 0.0)),
+            })
+            if parsed["query_frame"].get("context_resolution", {}).get("status") == "UNRESOLVED_CONTEXT":
+                state["result_type"] = "UNRESOLVED_CONTEXT"
+                state["answer"].update({"status": "UNRESOLVED_CONTEXT", "answer_mode": "unknown", "status_message": "Ссылочный контекст не разрешён в текущем улье."})
             from .unknown_search import UnknownTokenSearchService
             placer = UnknownTokenSearchService(self.repository)
             placement_search = {"id": f"query-placement-{uuid.uuid4().hex[:10]}", "query_session_id": active_session_id, "query_frame_id": parsed["query_frame"]["id"], "query_scene_id": parsed["query_scene"]["id"], "message_id": str(message["id"] if message else ""), "created_for_surface": text}
             for candidate in candidates:
                 candidate.update({"conversation_id": str(hive["conversation_id"] or "") if hive else "", "message_id": str(message["id"] if message else ""), "query_session_id": active_session_id, "query_frame_id": parsed["query_frame"]["id"], "query_scene_id": parsed["query_scene"]["id"], "created_for_surface": text})
-                placer._place_role_candidate(conn, hive_id, candidate)
+                candidate["cell_id"] = placer._place_role_candidate(conn, hive_id, candidate)
                 for source_id in candidate.get("sources", []):
                     source = next((item for item in evaluated if item.get("id") == source_id), None)
                     scene_id = str(source_id).removeprefix("scene-")
                     if source and scene_id.isdigit() and source.get("result_type") in {"FULL_HIT", "ROLE_HIT"} and float(source.get("scores", {}).get("total_score", 0.0)) >= 0.55:
-                        placer._place_memory_source(conn, hive_id, int(scene_id), source, placement_search)
+                        source_cell_id = placer._place_memory_source(conn, hive_id, int(scene_id), source, placement_search)
+                        if candidate.get("answer_mode") == "explanation" and candidate.get("cell_id") is None:
+                            candidate["cell_id"] = source_cell_id
                         if not any(item.get("source_scene_id") == int(scene_id) for item in state["memory_sources"]):
                             state["memory_sources"].append({"id": f"memory-source-{scene_id}", "component_class": "memory_source", "source_scene_id": int(scene_id), "source_text": source.get("source_text", ""), "query_frame_id": parsed["query_frame"]["id"], "message_id": str(message["id"] if message else "")})
             self._set_pipeline(state, candidate_count=len(candidates), memory_source_count=len(state["memory_sources"]))
@@ -258,7 +302,7 @@ class QuerySceneService:
             self._save(conn, hive_id, state)
             return deepcopy(state)
 
-    def _activate_conversational(self, conn: Any, hive_id: str, text: str, mode: str, hive: Any, message: Any, parsed: Dict[str, Any]) -> Dict[str, Any]:
+    def _activate_conversational(self, conn: Any, hive_id: str, text: str, mode: str, hive: Any, message: Any, parsed: Dict[str, Any], dialogue_context: Dict[str, Any]) -> Dict[str, Any]:
         self._clear_context_objects(conn, hive_id)
         active_session_id = f"query-session-{uuid.uuid4().hex[:12]}"
         previous = self._load(conn, hive_id)
@@ -272,6 +316,9 @@ class QuerySceneService:
         state = {
             "id": hive_id, "status": "ACTIVE", "conversation_id": str(hive["conversation_id"] or "") if hive else "",
             "message_id": str(message["id"] if message else ""), "created_for_surface": text,
+            "dialogue_context": dialogue_context,
+            "context_resolution": parsed["query_frame"].get("context_resolution", {"status": "NOT_APPLICABLE"}),
+            "retrieval_scope": {"local": 0, "imported": 0, "global_limit": 8},
             "active_query_session_id": active_session_id,
             "query_session": {"id": active_session_id, "hive_id": hive_id, "message_id": str(message["id"] if message else ""), "source_text": text, "mode": mode, "status": "ACTIVE", "started_at": utcnow()},
             "query_sessions": sessions, **parsed,
@@ -293,6 +340,8 @@ class QuerySceneService:
         frame = parsed["query_frame"]
         for token in frame["tokens"]:
             if token["resolution_state"] == TokenResolutionState.QUESTION_OPERATOR.value:
+                continue
+            if token.get("component_type") == "context_reference" and token.get("context_resolution") == "RESOLVED":
                 continue
             row = conn.execute("""SELECT wf.cloud_id AS word_form_cloud_id, wf.lexeme_cloud_id, l.lemma
                 FROM word_forms wf LEFT JOIN lexemes l ON l.cloud_id=wf.lexeme_cloud_id
@@ -320,7 +369,85 @@ class QuerySceneService:
             if resolved_mode not in MESSAGE_MODES:
                 raise ValueError(f"unsupported resolved_mode: {resolved_mode}")
             return resolved_mode
+        parsed = self.parse(text).get("query_frame", {})
+        referential = parsed.get("referential")
+        explicit = (parsed.get("roles") or {}).get(REFERENTIALS.get(str(referential), ""), {})
+        if referential and not (explicit.get("status") == "fixed" and explicit.get("normalized") != referential):
+            return "FOLLOW_UP"
         return "NEW_QUERY"
+
+    def _context(self, conn: Any, hive_id: str) -> Dict[str, Any]:
+        row = conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+        metadata = decode(row["metadata_json"], {}) if row else {}
+        context = metadata.get("dialogue_context") or {}
+        return {role: deepcopy(context.get(role)) for role in CONTEXT_ROLES if context.get(role)}
+
+    @staticmethod
+    def _context_value(value: Dict[str, Any], role: str, source: str = "explicit") -> Dict[str, Any]:
+        return {
+            "role": role,
+            "lemma": value.get("lemma"),
+            "surface": value.get("surface"),
+            "normalized": value.get("normalized") or value.get("surface"),
+            "word_form_cloud_id": value.get("word_form_cloud_id"),
+            "lexeme_cloud_id": value.get("lexeme_cloud_id"),
+            "part_of_speech": value.get("part_of_speech", "NOUN"),
+            "grammatical_features": deepcopy(value.get("grammatical_features", {})),
+            "preposition": value.get("preposition", ""),
+            "source": source,
+            "updated_at": utcnow(),
+        }
+
+    def _update_context(self, context: Dict[str, Any], parsed: Dict[str, Any]) -> Dict[str, Any]:
+        updated = deepcopy(context)
+        roles = parsed.get("query_frame", {}).get("roles", {})
+        explicit_spatial = []
+        for role in CONTEXT_ROLES:
+            value = roles.get(role)
+            if value and value.get("status") == "fixed" and value.get("lemma") and value.get("source") != "dialogue_context":
+                updated[role] = self._context_value(value, role)
+                explicit_spatial.append((int(value.get("index", -1)), role, value))
+        if explicit_spatial:
+            _, original_role, latest = max(explicit_spatial, key=lambda item: item[0])
+            updated["location"] = {
+                **self._context_value(latest, "location"),
+                "original_role": original_role,
+            }
+        return updated
+
+    def _apply_context(self, parsed: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        frame = parsed["query_frame"]
+        referential = frame.get("referential")
+        if not referential:
+            frame["dialogue_context"] = deepcopy(context)
+            frame["context_resolution"] = {"status": "NOT_APPLICABLE", "referential": None}
+            return parsed
+        role = REFERENTIALS[referential]
+        value = context.get(role)
+        if not value:
+            explicit = frame.get("roles", {}).get(role)
+            if explicit and explicit.get("status") == "fixed" and explicit.get("lemma"):
+                value = self._context_value(explicit, role, source="query_explicit")
+        if value:
+            resolution_source = str(value.get("source") or "dialogue_context")
+            reference_token = next((token for token in frame.get("tokens", []) if token.get("normalized") == referential), {})
+            resolved = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": referential, "source": resolution_source, "index": reference_token.get("index")}
+            frame["roles"][role] = resolved
+            for token in frame.get("tokens", []):
+                if token.get("normalized") == referential:
+                    token.update({"role": role, "component_type": "context_reference", "context_resolution": "RESOLVED", "resolution_state": TokenResolutionState.LEXEME_MATCH.value, "lemma": value.get("lemma"), "semantic_lemma": value.get("lemma")})
+            frame["context_resolution"] = {"status": "RESOLVED", "referential": referential, "role": role, "source": resolution_source, "value": deepcopy(value)}
+        else:
+            frame["context_resolution"] = {"status": "UNRESOLVED_CONTEXT", "referential": referential, "role": role}
+        frame["dialogue_context"] = deepcopy(context)
+        return parsed
+
+    def _import_scene(self, conn: Any, hive_id: str, scene: Dict[str, Any], text: str, parsed: Dict[str, Any], hive: Any, message: Any) -> None:
+        from .unknown_search import UnknownTokenSearchService
+        UnknownTokenSearchService(self.repository)._place_memory_source(
+            conn, hive_id, int(scene["cloud_id"]), scene,
+            {"id": f"import-{uuid.uuid4().hex[:10]}", "query_session_id": "", "query_frame_id": parsed["query_frame"]["id"], "message_id": str(message["id"] if message else ""), "created_for_surface": text},
+        )
 
     def local_resonance(self, hive_id: str, surface: str, allow_global: bool = False) -> Dict[str, Any]:
         normalized = surface.strip().casefold()
@@ -429,27 +556,26 @@ class QuerySceneService:
             changes, evicted = [], []
             for candidate in active:
                 scores = candidate["scores"]
-                before = float(scores["total"])
-                competition = max(0.0, (sum(other["scores"]["total"] for other in active if other["id"] != candidate["id"]) / max(1, len(active) - 1) - before) * 0.25)
+                before = float(scores.get("decision_score", scores.get("semantic_total", scores["total"])))
+                competition = max(0.0, (sum(other["scores"].get("decision_score", other["scores"].get("semantic_total", other["scores"]["total"])) for other in active if other["id"] != candidate["id"]) / max(1, len(active) - 1) - before) * 0.25)
                 resonance = clamp(scores["source_confidence"] / total_source * len(active))
                 contradiction = float(scores.get("contradiction", 0.0))
-                after = clamp(
-                    before * config["inertia"]
-                    + scores["role_compatibility"] * config["role_force"]
-                    + scores["action_compatibility"] * config["action_force"]
-                    + scores["object_compatibility"] * config["object_force"]
-                    + scores["source_confidence"] * config["source_force"]
-                    + resonance * config["resonance_force"]
-                    - contradiction * config["contradiction_force"]
-                    - competition * config["competition_force"]
-                )
+                semantic_total = float(scores.get("semantic_total", scores.get("total", 0.0)))
+                gravity = clamp(float(scores.get("gravity", 0.0)))
+                retention = clamp(float(scores.get("retention", 0.0)))
+                decision_score = clamp(.65 * semantic_total + .20 * gravity + .10 * resonance + .05 * retention)
+                after = clamp(decision_score - contradiction * config["contradiction_force"] - competition * config["competition_force"])
                 scores["resonance"] = resonance
+                scores["gravity"] = gravity
+                scores["semantic_total"] = semantic_total
+                scores["decision_score"] = decision_score
                 scores["activation"] = after
                 scores["retention"] = clamp(scores.get("retention", before) * 0.65 + after * 0.35)
                 scores["evidence_confidence"] = float(scores.get("evidence_confidence", scores.get("source_confidence", before)))
                 scores["semantic_confidence"] = float(scores.get("semantic_confidence", scores.get("source_confidence", before)))
                 scores["answer_confidence"] = min(scores["semantic_confidence"], scores["evidence_confidence"], float(scores.get("source_confidence", before)), scores["retention"])
                 scores["total"] = after
+                candidate["stable_steps"] = candidate.get("stable_steps", 0) + 1 if abs(after - before) < .08 else 0
                 candidate["weak_steps"] = candidate.get("weak_steps", 0) + 1 if after < config["activation_threshold"] and scores["retention"] < config["retention_threshold"] else 0
                 if contradiction:
                     candidate["status"] = "conflict"
@@ -466,11 +592,13 @@ class QuerySceneService:
                     "candidate_id": candidate["id"], "before": round(before, 4), "after": round(after, 4),
                     "delta": round(after - before, 4), "reasons": self._reasons(candidate),
                 })
-            state["candidates"].sort(key=lambda item: (-item["scores"]["total"], item["lemma"]))
+            state["candidates"].sort(key=lambda item: (-item["scores"].get("decision_score", item["scores"]["total"]), item["lemma"]))
             winner = self._winner(state, config)
             if winner:
                 winner["status"] = "winner"
                 self._resolve(state, winner, step)
+            best_scores = state["candidates"][0].get("scores", {}) if state.get("candidates") else {}
+            state.update({"semantic_total": float(best_scores.get("semantic_total", 0.0)), "gravity": float(best_scores.get("gravity", 0.0)), "decision_score": float(best_scores.get("decision_score", 0.0))})
             event = {"step": step, "timestamp": 0, "candidate_changes": changes, "evicted_candidates": evicted, "winner": winner["id"] if winner else None}
             state.setdefault("reasoning_trace", {}).setdefault("stages", []).append({
                 "id": f"vibration-{step}", "stage": "VIBRATION", "status": "WINNER_FOUND" if winner else "RUNNING",
@@ -514,11 +642,16 @@ class QuerySceneService:
             self._save(conn, hive_id, state)
             return state
 
-    def _roles(self, tokens: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _roles(self, tokens: List[Dict[str, Any]], requested_role: str = "") -> Dict[str, Dict[str, Any]]:
         roles: Dict[str, Dict[str, Any]] = {}
         predicate_index = next((item["index"] for item in tokens if item["part_of_speech"] in {"VERB", "INFN"}), None)
+        has_source = any(
+            item.get("index", 0) > 0
+            and tokens[item["index"] - 1].get("normalized") in {"из", "от"}
+            for item in tokens
+        )
         for item in tokens:
-            if item["normalized"] in QUESTION_ROLES or item["normalized"] in GREETING_WORDS or item["normalized"] in {"не", "ли"}:
+            if item["normalized"] in QUESTION_ROLES or item["normalized"] in GREETING_WORDS or item["normalized"] in {"не", "ли"} or item["normalized"] in REFERENTIALS:
                 continue
             if item["normalized"] in MODAL_WORDS:
                 roles["modal"] = {"status": "fixed", "component_type": "query_modal", "role": "modal", "semantic_function": MODAL_WORDS[item["normalized"]]["semantic_function"], **item}
@@ -531,16 +664,22 @@ class QuerySceneService:
             previous = tokens[item["index"] - 1]["normalized"] if item["index"] else ""
             case = item["grammatical_features"].get("case")
             role = ""
-            if previous in LOCATION_PREPOSITIONS:
+            if previous in {"в", "во", "на"} and case in {"loct", None}:
                 role = "location"
-            elif previous in INSTRUMENT_PREPOSITIONS or case == "ablt":
+            elif previous in {"в", "во", "на", "к"} and case in {"accs", "datv", None}:
+                role = "destination"
+            elif previous in {"из", "от"} and case in {"gent", None}:
+                role = "source"
+            elif previous in {"с", "со"} and case == "gent":
+                role = "source"
+            elif previous in {"с", "со"} or case == "ablt":
                 role = "instrument"
             elif case == "nomn":
-                role = "agent"
+                role = "object" if predicate_index is None and (requested_role == "source" or has_source) else "agent"
             elif case in {"accs", "gent", "datv"} or predicate_index is not None:
                 role = "object"
             if role and role not in roles:
-                roles[role] = {"status": "fixed", **item, "preposition": previous if previous in LOCATION_PREPOSITIONS | INSTRUMENT_PREPOSITIONS else ""}
+                roles[role] = {"status": "fixed", **item, "preposition": previous if previous in {"в", "во", "на", "к", "из", "от", "с", "со"} else ""}
         return roles
 
     @staticmethod
@@ -556,13 +695,21 @@ class QuerySceneService:
             "semantic_function": value.get("semantic_function"),
         }
 
-    def _memory_scenes(self, conn: Any) -> List[Dict[str, Any]]:
-        rows = conn.execute("SELECT s.cloud_id, s.sentence_text, s.canonical_text FROM scenes s ORDER BY s.updated_at DESC").fetchall()
+    def _memory_scenes(self, conn: Any, hive_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if hive_id:
+            rows = conn.execute(
+                """SELECT DISTINCT s.cloud_id, s.sentence_text, s.canonical_text
+                FROM scenes s JOIN hive_cells hc ON hc.source_scene_cloud_id=s.cloud_id
+                WHERE hc.hive_id=? ORDER BY s.updated_at DESC""", (hive_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT s.cloud_id, s.sentence_text, s.canonical_text FROM scenes s ORDER BY s.updated_at DESC").fetchall()
         result = []
         for row in rows:
             components = []
             for component in conn.execute(
-                """SELECT sc.token_index, sc.grammatical_role, sc.morphology_json, wf.normalized_form,
+                """SELECT sc.token_index, sc.grammatical_role, sc.morphology_json, sc.lexeme_cloud_id,
+                   sc.word_form_cloud_id, wf.normalized_form,
                    l.lemma FROM scene_components sc JOIN word_forms wf ON wf.cloud_id=sc.word_form_cloud_id
                    LEFT JOIN lexemes l ON l.cloud_id=sc.lexeme_cloud_id
                    WHERE sc.scene_cloud_id=? ORDER BY sc.token_index""", (row["cloud_id"],)
@@ -571,6 +718,8 @@ class QuerySceneService:
                 components.append({
                     "index": int(component["token_index"]), "surface": component["normalized_form"],
                     "normalized": component["normalized_form"], "lemma": component["lemma"] or morphology.get("lemma") or component["normalized_form"],
+                    "lexeme_cloud_id": int(component["lexeme_cloud_id"]) if component["lexeme_cloud_id"] else None,
+                    "word_form_cloud_id": int(component["word_form_cloud_id"]) if component["word_form_cloud_id"] else None,
                     "part_of_speech": morphology.get("pos", "UNK"),
                     "grammatical_features": {key: value for key, value in morphology.items() if key != "pos" and key != "lemma"},
                 })
@@ -578,6 +727,8 @@ class QuerySceneService:
                 "id": f"scene-{row['cloud_id']}", "cloud_id": int(row["cloud_id"]), "type": "memory_scene",
                 "source_text": row["sentence_text"], "roles": self._roles(components),
                 "negation": any(item["normalized"] == "не" for item in components),
+                "retrieval_scope": "LOCAL" if hive_id else "GLOBAL",
+                "provenance": {"source": "hive_cells" if hive_id else "global_field"},
             })
         return result
 
@@ -592,7 +743,33 @@ class QuerySceneService:
             return ACTION_NEIGHBORS[memory][query]
         return COUNTERPART_ACTIONS.get(frozenset((query, memory)), 0.0)
 
-    def _score_scene(self, frame: Dict[str, Any], scene: Dict[str, Any]) -> Dict[str, Any]:
+    def _semantic_membership(self, conn: Any, left: Dict[str, Any], right: Dict[str, Any]) -> float:
+        if not conn or not left.get("lexeme_cloud_id") or not right.get("lexeme_cloud_id"):
+            return 0.0
+        row = conn.execute(
+            """SELECT MAX(sm.weight * sm.confidence) AS score
+            FROM semantic_memberships sm
+            WHERE sm.lexeme_cloud_id=? AND sm.concept_cloud_id IN
+              (SELECT concept_cloud_id FROM semantic_memberships WHERE lexeme_cloud_id=?)""",
+            (int(left["lexeme_cloud_id"]), int(right["lexeme_cloud_id"])),
+        ).fetchone()
+        return 0.85 if row and row["score"] is not None and float(row["score"]) > 0 else 0.0
+
+    def _value_match(self, query: Dict[str, Any], memory: Dict[str, Any], conn: Any = None) -> float:
+        if not query or not memory:
+            return 0.0
+        if query.get("normalized") and memory.get("normalized") and query["normalized"].casefold() == memory["normalized"].casefold():
+            return 1.0
+        if query.get("lemma") and memory.get("lemma") and query["lemma"].casefold() == memory["lemma"].casefold():
+            return 0.95
+        return self._semantic_membership(conn, query, memory)
+
+    def _role_match(self, role: str, query: Dict[str, Any], memory_roles: Dict[str, Dict[str, Any]], conn: Any = None) -> float:
+        aliases = ROLE_MATCH_ALIASES.get(role, {role})
+        values = [memory_roles.get(name, {}) for name in aliases]
+        return max((self._value_match(query, value, conn) for value in values), default=0.0)
+
+    def _score_scene(self, frame: Dict[str, Any], scene: Dict[str, Any], conn: Any = None) -> Dict[str, Any]:
         query_roles, memory_roles = frame["roles"], scene["roles"]
         requested = frame.get("requested_role")
         fixed_roles = {
@@ -603,9 +780,12 @@ class QuerySceneService:
         for role, query_value in fixed_roles.items():
             memory_value = memory_roles.get(role, {})
             if role == "action":
-                role_matches[role] = self._action_match(query_value.get("lemma", ""), memory_value.get("lemma", ""))
+                role_matches[role] = max(
+                    self._value_match(query_value, memory_value, conn),
+                    self._action_match(query_value.get("lemma", ""), memory_value.get("lemma", "")) * .85,
+                )
             else:
-                role_matches[role] = float(bool(memory_value and query_value.get("lemma") == memory_value.get("lemma")))
+                role_matches[role] = self._role_match(role, query_value, memory_roles, conn)
         action_match = role_matches.get("action", 0.0)
         object_match = role_matches.get("object", 0.0)
         location_match = role_matches.get("location", 0.0)
@@ -614,9 +794,28 @@ class QuerySceneService:
         grammar_match = 1.0 if anchor_match >= .99 else .65 if anchor_match > 0 else 0.0
         role_value = memory_roles.get(requested or "")
         requested_role_match = 0.0 if not role_value or scene["negation"] else 1.0
+        explanation_match = 0.0
+        if requested == "source" and not role_value:
+            object_value = query_roles.get("object", {})
+            destination_value = memory_roles.get("destination", {})
+            object_match_for_explanation = self._role_match("object", object_value, memory_roles, conn) if object_value else 0.0
+            destination_match = self._value_match(query_roles.get("location", {}), destination_value, conn) if destination_value else 0.0
+            if object_match_for_explanation >= .85 and destination_match >= .85 and not scene["negation"]:
+                explanation_match = min(object_match_for_explanation, destination_match)
+                requested_role_match = .85 * explanation_match
         structural_match = clamp(anchor_match * .65 + requested_role_match * .35)
         semantic_match = clamp(anchor_match * .75 + max(role_matches.values(), default=0.0) * .25)
-        total = clamp(anchor_match * .50 + requested_role_match * .20 + semantic_match * .15 + structural_match * .10 + grammar_match * .05)
+        role_coverage = sum(score >= .5 for score in role_matches.values()) / max(1, len(fixed_roles))
+        source_quality = .9 if scene.get("retrieval_scope") == "LOCAL" else .75 if scene.get("retrieval_scope") in {"IMPORTED", "GLOBAL"} else .8
+        context_conflict = any(
+            role in CONTEXT_ROLES and query_value.get("lemma")
+            and any(memory_roles.get(alias) for alias in ROLE_MATCH_ALIASES.get(role, {role}))
+            and self._role_match(role, query_value, memory_roles, conn) < .5
+            for role, query_value in fixed_roles.items()
+        )
+        source_contribution = source_quality if anchor_match or requested_role_match else 0.0
+        semantic_total = clamp(.55 * anchor_match + .20 * role_coverage + .20 * requested_role_match + .05 * source_contribution)
+        total = semantic_total
         matched_roles = [role for role, score in role_matches.items() if score >= .5]
         mismatched_roles = [role for role, score in role_matches.items() if score < .5]
         if scene["negation"] and (anchor_match or requested_role_match):
@@ -634,15 +833,20 @@ class QuerySceneService:
         return {**scene, "scores": {
             "object_match": object_match, "action_match": action_match, "agent_match": agent_match,
             "location_match": location_match, "requested_role_match": requested_role_match,
-            "anchor_match": anchor_match, "role_matches": role_matches,
+            "anchor_match": anchor_match, "anchor_score": anchor_match, "role_matches": role_matches,
             "grammar_match": grammar_match, "semantic_match": semantic_match, "structural_match": structural_match,
-            "source_confidence": 0.9, "retention": 1.0, "total_score": total,
+            "role_coverage": role_coverage, "requested_role_support": requested_role_match,
+            "source_quality": source_quality, "semantic_total": semantic_total,
+            "explanation_match": explanation_match, "context_conflict": context_conflict,
+            "source_confidence": source_quality, "retention": 1.0, "total_score": total,
         }, "matched_roles": matched_roles, "mismatched_roles": mismatched_roles,
             "selection_reason": "совпали опорные роли: " + ", ".join(matched_roles) if matched_roles else "опорные роли не совпали",
             "result_type": result_type}
 
     def _candidates(self, frame: Dict[str, Any], scenes: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         requested = frame.get("requested_role")
+        if frame.get("context_resolution", {}).get("status") == "UNRESOLVED_CONTEXT":
+            return []
         found: Dict[str, Dict[str, Any]] = {}
         if not requested:
             return []
@@ -650,20 +854,23 @@ class QuerySceneService:
             if not scene["scores"].get("anchor_match"):
                 continue
             value = scene["roles"].get(requested)
-            if not value:
+            explanation = requested == "source" and not value and scene["scores"].get("explanation_match", 0.0) >= .85
+            if not value and not explanation:
                 continue
             if requested == "agent" and (value.get("part_of_speech") not in {"NOUN", "NPRO"} or value.get("lemma") in AGENT_BLACKLIST):
                 continue
+            if explanation:
+                value = {"lemma": scene["id"], "surface": scene.get("source_text", ""), "part_of_speech": "SCENE", "grammatical_features": {}}
             lemma = value["lemma"]
             action = scene["scores"]["action_match"]
             object_match = scene["scores"]["object_match"]
             anchor_match = scene["scores"]["anchor_match"]
             contradiction = 1.0 if scene["negation"] else 0.0
             current = found.get(lemma)
-            support = clamp(scene["scores"]["total_score"] + .15)
+            support = clamp(scene["scores"].get("semantic_total", scene["scores"]["total_score"]) + .05)
             query_relevance = clamp(anchor_match * .65 + scene["scores"]["requested_role_match"] * .35)
             semantic_support = clamp(scene["scores"]["semantic_match"])
-            role_compatibility = .98
+            role_compatibility = 0.98 if not scene["negation"] else 0.0
             exact_match = float(scene["scores"]["object_match"] > 0 and scene["scores"]["action_match"] >= .99)
             activation = clamp(.05 + exact_match * .30 + query_relevance * .25 + semantic_support * .15 + role_compatibility * .15 + support * .10 + scene["scores"]["structural_match"] * .05)
             retention = clamp(scene["scores"]["source_confidence"] * .25 + support * .20 + query_relevance * .15 + role_compatibility * .10 + .05)
@@ -681,14 +888,19 @@ class QuerySceneService:
                 },
                 "target_role": requested, "part_of_speech": value.get("part_of_speech", "NOUN"),
                 "entity_type": "person" if requested == "agent" else "entity",
+                "answer_mode": "explanation" if explanation else "direct",
+                "answer_scene_id": scene["id"] if explanation else None,
+                "hard_forbidden": bool(scene["scores"].get("context_conflict")),
                 "sources": [scene["id"]], "primary_source_id": scene["id"],
                 "scores": {
                     "role_compatibility": role_compatibility, "query_relevance": query_relevance, "semantic_support": semantic_support, "structural_support": scene["scores"]["structural_match"], "exact_match": exact_match, "action_compatibility": action, "object_compatibility": object_match, "anchor_compatibility": anchor_match,
                     "grammar_compatibility": .99, "source_confidence": support, "resonance": 0.0,
                     "retention": retention, "activation": activation, "contradiction": contradiction,
                     "evidence_confidence": support, "semantic_confidence": support,
-                    "answer_confidence": support,
-                    "total": clamp(.28 * role_compatibility + .30 * anchor_match + .17 * semantic_support + .15 * support + .10 * scene["scores"]["requested_role_match"] - contradiction * .55),
+                    "answer_confidence": min(support, semantic_support or support),
+                    "semantic_total": scene["scores"].get("semantic_total", scene["scores"]["total_score"]),
+                    "gravity": 0.0, "decision_score": scene["scores"].get("semantic_total", scene["scores"]["total_score"]),
+                    "total": scene["scores"].get("semantic_total", scene["scores"]["total_score"]),
                 }, "competition_group_id": f"{frame.get('id')}:{requested}", "status": "conflict" if contradiction else "new", "weak_steps": 0,
                 "selection_reason": scene.get("selection_reason", ""),
             }
@@ -745,12 +957,15 @@ class QuerySceneService:
 
     @staticmethod
     def _winner(state: Dict[str, Any], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        active = [item for item in state["candidates"] if item["status"] not in {"evicted", "conflict"}]
+        active = [item for item in state["candidates"] if item["status"] not in {"evicted", "conflict"} and not item.get("hard_forbidden")]
         if not active:
             return None
         first, second = active[0], active[1] if len(active) > 1 else None
-        gap = first["scores"]["total"] - (second["scores"]["total"] if second else 0.0)
-        if first["scores"]["total"] >= config["confidence_threshold"] or gap >= config["winner_gap_threshold"]:
+        first_score = float(first["scores"].get("decision_score", first["scores"].get("total", 0.0)))
+        second_score = float(second["scores"].get("decision_score", second["scores"].get("total", 0.0))) if second else 0.0
+        gap = first_score - second_score
+        step = int(state.get("vibration", {}).get("current_step", 0)) + 1
+        if (step <= 1 and first_score >= .65 and gap >= .08) or (step >= 2 and first_score >= .55 and first.get("stable_steps", 0) >= 1 and gap >= .02):
             return first
         return None
 
@@ -770,7 +985,7 @@ class QuerySceneService:
         semantic_confidence = min((float(item.get("candidate_bridges", [{}])[0].get("confidence", item.get("selected_candidate", {}).get("scores", {}).get("semantic_total", 1.0))) for item in state.get("unknown_token_searches", []) if item.get("candidate_bridges")), default=1.0)
         source_confidence = float(winner["scores"].get("source_confidence", winner["scores"].get("total", 0.0)))
         role_evidence = float(winner["scores"].get("evidence_confidence", winner["scores"].get("total", 0.0)))
-        answer_confidence = min(float(winner["scores"].get("total", 0.0)), semantic_confidence, source_confidence, role_evidence, 1.0)
+        answer_confidence = min(float(winner["scores"].get("semantic_total", winner["scores"].get("total", 0.0))), semantic_confidence, source_confidence, role_evidence, 1.0)
         winner["scores"]["semantic_confidence"] = semantic_confidence
         winner["scores"]["answer_confidence"] = answer_confidence
         answer = {
@@ -778,6 +993,9 @@ class QuerySceneService:
             "resolved_value": winner["surface"], "confidence": answer_confidence,
             "supporting_scenes": winner["sources"], "surface_answer": None,
             "full_surface_answer": None, "status": "PLANNING",
+            "semantic_total": float(winner["scores"].get("semantic_total", 0.0)),
+            "gravity": float(winner["scores"].get("gravity", 0.0)),
+            "decision_score": float(winner["scores"].get("decision_score", winner["scores"].get("total", 0.0))),
         }
         if state.get("pipeline"):
             state["pipeline"]["memory_search"] = {"status": "ROLE_HIT", "candidate_count": len(state.get("candidates", []))}
@@ -882,8 +1100,30 @@ class QuerySceneService:
                 for part in (slot.get("preposition", ""), slot.get("surface", ""))
                 if part
             ).capitalize() + "."
+            if winner.get("answer_mode") == "explanation" and source_scene:
+                explanatory_text = str(source_scene.get("source_text", "")).strip()
+                explanatory_text = explanatory_text if explanatory_text.endswith((".", "!", "?")) else explanatory_text + "."
+                short = explanatory_text
+                full = explanatory_text
+                full_plan["slots"] = [
+                    {
+                        "order": index,
+                        "role": name,
+                        "slot_id": f"slot-{name}",
+                        "lemma": value.get("lemma"),
+                        "surface": value.get("surface"),
+                        "preposition": value.get("preposition", ""),
+                        "requested_features": {},
+                        "observed_features": deepcopy(value.get("grammatical_features", {})),
+                        "source_type": "known_word_form",
+                        "context_source": "memory_scene",
+                    }
+                    for index, name in enumerate(ANSWER_ROLE_ORDER)
+                    for value in [source_roles.get(name, {})]
+                    if value.get("surface")
+                ]
             answer = state["answer"]
-            confidence = float(winner["scores"].get("answer_confidence", winner["scores"]["total"]))
+            confidence = float(winner["scores"].get("semantic_total", winner["scores"].get("answer_confidence", winner["scores"]["total"])))
             validation = self.reverse_validate(state, full, answer_roles)
             answer.update({"status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED", "answer_mode": answer.get("answer_mode") if answer.get("answer_mode") not in {"pending", "unknown"} else "probable", "surface_answer": short, "full_surface_answer": full, "confidence": confidence, "short": {"surface": short, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}, "full": {"surface": full, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}})
             score_breakdown = self._score_breakdown()
@@ -991,6 +1231,7 @@ class QuerySceneService:
             "query": frame["source_text"], "answer_mode": mode, "resolved_role": role,
             "resolved_value": None, "confidence": 0.0, "supporting_scenes": [],
             "surface_answer": None, "status": "PENDING",
+            "semantic_total": 0.0, "gravity": 0.0, "decision_score": 0.0,
             "status_message": f"В памяти нет точного указания для роли «{ROLE_LABELS.get(role or '', role or '?')}»." if role else "",
         }
 
@@ -1010,6 +1251,15 @@ class QuerySceneService:
             "target_role": candidate.get("target_role"), "status": candidate.get("status"),
             "sources": list(candidate.get("sources", [])), "selection_reason": candidate.get("selection_reason", ""),
             "scores": deepcopy(candidate.get("scores", {})),
+            "semantic_total": candidate.get("scores", {}).get("semantic_total", 0.0),
+            "gravity": candidate.get("scores", {}).get("gravity", 0.0),
+            "decision_score": candidate.get("scores", {}).get("decision_score", 0.0),
+            "decision_contribution": {
+                "semantic_total": .65 * float(candidate.get("scores", {}).get("semantic_total", 0.0)),
+                "gravity": .20 * float(candidate.get("scores", {}).get("gravity", 0.0)),
+                "resonance": .10 * float(candidate.get("scores", {}).get("resonance", 0.0)),
+                "retention": .05 * float(candidate.get("scores", {}).get("retention", 0.0)),
+            },
         }
 
     @staticmethod
@@ -1026,6 +1276,8 @@ class QuerySceneService:
         row = conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
         metadata = json.loads(row["metadata_json"] or "{}") if row else {}
         metadata["query_working_memory"] = state
+        if state.get("dialogue_context") is not None:
+            metadata["dialogue_context"] = state["dialogue_context"]
         conn.execute("UPDATE hives SET metadata_json=?, updated_at=? WHERE id=?", (encode(metadata), utcnow(), hive_id))
 
     def _decorate_state(self, conn: Any, hive_id: str, state: Dict[str, Any]) -> Dict[str, Any]:

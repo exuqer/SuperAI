@@ -1,4 +1,5 @@
 from server.v2.hive import V2HiveService
+from server.v2.analytics import HiveAnalyticsService
 from server.v2.training import TrainingPipelineV2
 
 
@@ -123,3 +124,67 @@ def test_plain_greeting_is_not_routed_to_structural_resonance():
     assert result["query_frame"]["intent"] == "GREETING"
     assert result["answer"]["status"] == "RESOLVED_GREETING"
     assert result["answer"]["surface_answer"] == "Здравствуйте!"
+
+
+def test_source_question_prefers_complete_market_scene_and_excludes_service_word_noise():
+    memory = (
+        "Рыбу продают на рынке. Рыба из моря. Рыбак приносит рыбу на рынок. "
+        "Кошечка спит на солнце. В магазине продают мясо и кошачий корм."
+    )
+    TrainingPipelineV2().train(memory)
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    first = service.query(hive_id, "Что там на рынке?")
+    assert all("солнце" not in source["label"].casefold() for source in first["external_search"]["sources"])
+    assert service.vibration_run(hive_id, 3)["answer"]["full_surface_answer"] == "Продают рыбу на рынке."
+
+    second = service.query(hive_id, "А откуда рыба на рынке?")
+    assert second["resolved_mode"] == "NEW_QUERY"
+    assert second["query_frame"]["requested_role"] == "source"
+    assert second["candidates"][0]["answer_mode"] == "explanation"
+
+    final = service.vibration_run(hive_id, 3)
+    assert final["answer"]["status"] == "RESOLVED"
+    assert final["answer"]["full_surface_answer"] == "Рыбак приносит рыбу на рынок."
+    assert final["answer"]["semantic_total"] > 0.8
+    assert final["answer"]["decision_score"] > 0.6
+
+    current = HiveAnalyticsService().get(hive_id)["current"]
+    assert current["query_components"][-1] == {
+        "term": "откуда",
+        "role": "source",
+        "word_form_cloud_id": None,
+    }
+    assert current["snapshot"]["candidates"][0]["scene_label"] == "Рыбак приносит рыбу на рынок."
+    assert current["snapshot"]["candidates"][0]["semantic_score"] > 0.8
+    assert all("солнце" not in item["scene_label"].casefold() for item in current["snapshot"]["candidates"])
+
+
+def test_market_dialogue_context_resolves_tam_without_switching_to_store_goods():
+    memory = (
+        "Рыбу продают на рынке. Удочку продают в рыболовном магазине. "
+        "В магазине продают мясо и кошачий корм."
+    )
+    TrainingPipelineV2().train(memory)
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    service.query(hive_id, "Как дела на рынке?")
+    follow_up = service.query(hive_id, "Что продают там?")
+
+    assert follow_up["resolved_mode"] == "FOLLOW_UP"
+    assert follow_up["query_frame"]["context_resolution"]["status"] == "RESOLVED"
+    assert follow_up["query_frame"]["roles"]["location"]["lemma"] == "рынок"
+    answer = service.vibration_run(hive_id, 3)["answer"]
+    assert answer["surface_answer"] == "Рыбу."
+    assert answer["full_surface_answer"] == "Продают рыбу на рынке."
+
+
+def test_referential_query_without_dialogue_context_does_not_guess_a_location():
+    service, hive_id, result = _ask("Рыбу продают на рынке. Удочку продают в магазине.", "Что продают там?")
+
+    assert result["resolved_mode"] == "FOLLOW_UP"
+    assert result["query_frame"]["context_resolution"]["status"] == "UNRESOLVED_CONTEXT"
+    assert result["candidates"] == []
+    assert service.vibration_run(hive_id, 3)["answer"]["status"] == "UNRESOLVED"

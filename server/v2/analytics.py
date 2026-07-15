@@ -12,10 +12,15 @@ def clamp(value: float) -> float:
 
 
 ROLE_LABELS = {
+    "agent": "деятель",
+    "action": "действие",
     "subject": "подлежащее",
     "predicate": "сказуемое",
     "object": "дополнение",
     "location": "место",
+    "destination": "направление",
+    "source": "источник",
+    "instrument": "инструмент",
     "attribute": "определение",
 }
 
@@ -82,6 +87,160 @@ class HiveAnalyticsService:
                 "word_form_cloud_id": int(row["cloud_id"]) if row else None,
             })
         return components
+
+    @staticmethod
+    def _working_query_components(working: Dict[str, Any]) -> List[Dict[str, Any]]:
+        frame = working.get("query_frame") or {}
+        roles = frame.get("roles") or {}
+        requested_role = frame.get("requested_role")
+        components: List[Dict[str, Any]] = []
+        for role, value in roles.items():
+            if role == requested_role or not isinstance(value, dict) or value.get("status") != "fixed":
+                continue
+            term = str(value.get("normalized") or value.get("surface") or value.get("lemma") or "").casefold()
+            if not term:
+                continue
+            components.append({
+                "term": term,
+                "role": role,
+                "word_form_cloud_id": value.get("word_form_cloud_id"),
+            })
+        if requested_role:
+            components.append({
+                "term": str(frame.get("question_word") or "?").casefold(),
+                "role": str(requested_role),
+                "word_form_cloud_id": None,
+            })
+        return components
+
+    def _working_candidate_cards(
+        self,
+        conn: Any,
+        hive_id: str,
+        working: Dict[str, Any],
+        score_overrides: Optional[Dict[str, float]] = None,
+    ) -> List[Dict[str, Any]]:
+        candidates = working.get("candidates") or []
+        scenes = {
+            str(scene.get("id")): scene
+            for scene in working.get("memory_scenes") or []
+        }
+        cells = {
+            str(row["cell_id"]): dict(row)
+            for row in conn.execute(
+                """SELECT hc.id AS cell_id, hc.hive_placement_id, hc.source_scene_cloud_id,
+                          hc.dominant_cloud_id, hc.local_activation, hc.retention,
+                          p.local_gravity
+                   FROM hive_cells hc JOIN cloud_placements p ON p.id=hc.hive_placement_id
+                   WHERE hc.hive_id=?""",
+                (hive_id,),
+            )
+        }
+        cards: List[Dict[str, Any]] = []
+        for index, candidate in enumerate(candidates):
+            scores = candidate.get("scores") or {}
+            source_ids = [candidate.get("primary_source_id"), *(candidate.get("sources") or [])]
+            source = next((scenes[str(source_id)] for source_id in source_ids if str(source_id) in scenes), {})
+            source_roles = source.get("roles") or {}
+            matched_roles = source.get("matched_roles") or []
+            cell = cells.get(str(candidate.get("cell_id")), {})
+            semantic = clamp(scores.get("semantic_total", scores.get("total", 0.0)))
+            dynamic = clamp(
+                (
+                    .20 * clamp(scores.get("gravity", cell.get("local_gravity", 0.0)))
+                    + .10 * clamp(scores.get("resonance", 0.0))
+                    + .05 * clamp(scores.get("retention", cell.get("retention", 0.0)))
+                ) / .35
+            )
+            decision = clamp(
+                (score_overrides or {}).get(
+                    str(candidate.get("id")),
+                    scores.get("decision_score", scores.get("total", semantic)),
+                )
+            )
+            matched = [{
+                "term": str((source_roles.get(role) or {}).get("surface") or (source_roles.get(role) or {}).get("lemma") or role),
+                "role": role,
+                "label": str((source_roles.get(role) or {}).get("surface") or (source_roles.get(role) or {}).get("lemma") or role),
+            } for role in matched_roles]
+            answer = str(candidate.get("surface") or candidate.get("lemma") or "") or None
+            requested_role = str(candidate.get("target_role") or "unknown")
+            answer_components = [{
+                "answer": answer,
+                "role": requested_role,
+                "question_term": str((working.get("query_frame") or {}).get("question_word") or "?"),
+            }] if answer else []
+            source_text = str(source.get("source_text") or "")
+            explanation = str(candidate.get("selection_reason") or "").strip()
+            if not explanation:
+                explanation = "семантические опоры: " + ", ".join(matched_roles) if matched_roles else "кандидат поддержан сценой памяти"
+            cards.append({
+                "placement_id": int(cell.get("hive_placement_id") or -(index + 1)),
+                "cell_id": candidate.get("cell_id"),
+                "scene_cloud_id": int(source.get("cloud_id") or cell.get("source_scene_cloud_id") or 0),
+                "scene_label": source_text or ", ".join(str(item) for item in candidate.get("sources") or []) or "сцена запроса",
+                "answer": answer,
+                "matched_components": matched,
+                "answer_components": answer_components,
+                "semantic_score": round(semantic, 6),
+                "dynamic_score": round(dynamic, 6),
+                "viability": 0.1 if str(candidate.get("status")) in {"evicted", "conflict"} else 1.0,
+                "candidate_score": round(decision, 6),
+                "eviction_status": "EVICTED" if str(candidate.get("status")) in {"evicted", "conflict"} else "ACTIVE",
+                "explanation": explanation,
+            })
+        cards.sort(key=lambda item: (-item["candidate_score"], -item["semantic_score"], item["scene_label"]))
+        return cards
+
+    @staticmethod
+    def _overlay_working_candidates(snapshot: Dict[str, Any], working: Dict[str, Any]) -> None:
+        scenes = {
+            str(scene.get("id")): scene
+            for scene in working.get("memory_scenes") or []
+        }
+        scene_ids_by_cloud = {
+            int(scene.get("cloud_id")): scene_id
+            for scene_id, scene in scenes.items()
+            if scene.get("cloud_id") is not None
+        }
+        candidates = working.get("candidates") or []
+        for card in snapshot.get("candidates") or []:
+            scene_id = scene_ids_by_cloud.get(int(card.get("scene_cloud_id") or 0))
+            matching = [
+                candidate for candidate in candidates
+                if scene_id and scene_id in {str(source_id) for source_id in candidate.get("sources") or []}
+            ]
+            if not matching:
+                continue
+            candidate = max(
+                matching,
+                key=lambda item: float((item.get("scores") or {}).get("decision_score", (item.get("scores") or {}).get("total", 0.0))),
+            )
+            scores = candidate.get("scores") or {}
+            answer = candidate.get("surface") or candidate.get("lemma")
+            semantic = max(
+                float(card.get("semantic_score", 0.0)),
+                float(scores.get("object_compatibility", 0.0)),
+                float(scores.get("semantic_total", 0.0)),
+            )
+            card["answer"] = answer
+            card["answer_components"] = [{
+                "answer": answer,
+                "role": candidate.get("target_role") or "unknown",
+                "question_term": (working.get("query_frame") or {}).get("question_word") or "?",
+            }]
+            card["semantic_score"] = round(clamp(semantic), 6)
+            card["candidate_score"] = round(
+                (clamp(semantic) * .70 + float(card.get("dynamic_score", 0.0)) * .30)
+                * float(card.get("viability", 1.0)),
+                6,
+            )
+            card["explanation"] = candidate.get("selection_reason") or "кандидат роли из сцены памяти"
+        snapshot["candidates"].sort(key=lambda item: (
+            -float(item.get("candidate_score", 0.0)),
+            -float(item.get("semantic_score", 0.0)),
+            str(item.get("scene_label") or ""),
+        ))
 
     @staticmethod
     def _snapshot_payload(
@@ -241,8 +400,15 @@ class HiveAnalyticsService:
 
     def _analysis(self, conn: Any, hive_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
         clouds, scene_components, cells = self._catalog(conn, hive_id)
-        working = decode(conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()[0], {}).get("query_working_memory", {})
-        query_components = self._query_components(conn, run.get("query") or {})
+        metadata_row = conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+        working = decode(metadata_row["metadata_json"], {}).get("query_working_memory", {}) if metadata_row else {}
+        run_terms = [str(term).casefold() for term in (run.get("query") or {}).get("terms", [])]
+        working_terms = [
+            str(token.get("normalized") or "").casefold()
+            for token in (working.get("query_frame") or {}).get("tokens") or []
+        ]
+        same_query = bool(run_terms and run_terms == working_terms)
+        query_components = self._working_query_components(working) if same_query else self._query_components(conn, run.get("query") or {})
         snapshot_rows = [
             self._json_row(row)
             for row in conn.execute(
@@ -259,22 +425,8 @@ class HiveAnalyticsService:
                 created_at=str(snapshot["created_at"]), temperature=float(state.get("temperature", 0.0)),
                 delta=snapshot.get("delta", {}), events=snapshot.get("events", []),
             ))
-            if working.get("candidates") and not snapshots[-1].get("candidates"):
-                snapshots[-1]["candidates"] = [{
-                    "placement_id": node.get("placement_id"), "cell_id": node.get("cell_id"), "scene_cloud_id": 0,
-                    "scene_label": ", ".join(candidate.get("sources") or []), "answer": candidate.get("surface") or candidate.get("lemma"),
-                    "matched_components": [], "answer_components": [], "semantic_score": float(candidate.get("scores", {}).get("object_compatibility", 0.0)),
-                    "dynamic_score": float(node.get("local_activation", 0.0)), "viability": 1.0,
-                    "candidate_score": float(node.get("local_activation", 0.0)), "eviction_status": node.get("eviction_status", "ACTIVE"),
-                    "explanation": "кандидат роли из сцены памяти",
-                } for node, candidate in zip(snapshots[-1].get("nodes", []), sorted(working["candidates"], key=lambda item: -float(item.get("scores", {}).get("total", 0.0))))]
-            if working.get("candidates") and snapshots[-1].get("candidates"):
-                ranked = sorted(working["candidates"], key=lambda item: -float(item.get("scores", {}).get("total", 0.0)))
-                for index, card in enumerate(snapshots[-1]["candidates"]):
-                    if card.get("answer") is None and index < len(ranked):
-                        card["answer"] = ranked[index].get("surface") or ranked[index].get("lemma")
-                    if index < len(ranked) and card.get("answer") == (ranked[index].get("surface") or ranked[index].get("lemma")):
-                        card["semantic_score"] = max(float(card.get("semantic_score", 0.0)), float(ranked[index].get("scores", {}).get("object_compatibility", 0.0)))
+            if same_query and working.get("candidates"):
+                self._overlay_working_candidates(snapshots[-1], working)
         events = [
             self._json_row(row)
             for row in conn.execute(
@@ -298,7 +450,8 @@ class HiveAnalyticsService:
     def _current(self, conn: Any, hive: Dict[str, Any]) -> Dict[str, Any]:
         hive_id = str(hive["id"])
         clouds, scene_components, cells = self._catalog(conn, hive_id)
-        query_components = self._query_components(conn, hive.get("query") or {})
+        working = (hive.get("metadata") or {}).get("query_working_memory") or {}
+        query_components = self._working_query_components(working) or self._query_components(conn, hive.get("query") or {})
         nodes = [
             dict(row)
             for row in conn.execute(
@@ -309,7 +462,7 @@ class HiveAnalyticsService:
             nodes = [
                 dict(row)
                 for row in conn.execute(
-                    """SELECT hc.hive_placement_id AS placement_id, hc.dominant_cloud_id AS cloud_id, hc.component_class,
+                    """SELECT hc.id AS cell_id, hc.hive_placement_id AS placement_id, hc.dominant_cloud_id AS cloud_id, hc.component_class,
                               c.cloud_type AS node_type, p.x, p.y, p.z, 0 AS velocity_x, 0 AS velocity_y,
                               0 AS velocity_z, hc.local_activation, p.local_gravity, hc.stored_strength,
                               hc.retention AS local_stability, hc.retention,
@@ -322,24 +475,26 @@ class HiveAnalyticsService:
                     (hive_id,),
                 )
             ]
-            if hive.get("metadata", {}).get("query_working_memory", {}).get("candidates"):
-                nodes = [node for node in nodes if node.get("component_class") in {"role_candidate", "semantic_bridge"}]
+        candidate_cell_ids = {
+            str(candidate.get("cell_id"))
+            for candidate in working.get("candidates") or []
+            if candidate.get("cell_id")
+        }
+        if candidate_cell_ids:
+            candidate_nodes = [
+                node for node in nodes
+                if str(node.get("cell_id") or cells.get(int(node.get("placement_id") or 0))) in candidate_cell_ids
+            ]
+            if candidate_nodes:
+                nodes = candidate_nodes
         snapshot = self._snapshot_payload(
             nodes, clouds, scene_components, cells, query_components,
             step=int(hive.get("reasoning_step") or 0), phase="CURRENT",
             created_at=str(hive.get("updated_at") or ""),
             temperature=float(hive.get("current_temperature") or 0.0),
         )
-        working = (hive.get("metadata") or {}).get("query_working_memory") or {}
-        if working.get("candidates") and not snapshot.get("candidates"):
-            snapshot["candidates"] = [{
-                "placement_id": node.get("placement_id"), "cell_id": node.get("cell_id"), "scene_cloud_id": 0,
-                "scene_label": ", ".join(candidate.get("sources") or []), "answer": candidate.get("surface") or candidate.get("lemma"),
-                "matched_components": [], "answer_components": [], "semantic_score": float(candidate.get("scores", {}).get("object_compatibility", 0.0)),
-                "dynamic_score": float(candidate.get("scores", {}).get("total", 0.0)), "viability": 1.0,
-                "candidate_score": float(candidate.get("scores", {}).get("total", 0.0)), "eviction_status": "ACTIVE",
-                "explanation": "кандидат роли из сцены памяти",
-            } for node, candidate in zip(nodes, sorted(working["candidates"], key=lambda item: -float(item.get("scores", {}).get("total", 0.0))))]
+        if working.get("query_frame"):
+            snapshot["candidates"] = self._working_candidate_cards(conn, hive_id, working)
         return {
             "query_components": query_components,
             "snapshot": snapshot,
@@ -347,13 +502,7 @@ class HiveAnalyticsService:
         }
 
     def _query_vibration_analysis(self, conn: Any, hive: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Expose query-scene vibration as a first-class analytics timeline.
-
-        Query-scene vibration deliberately does not invoke the global physics
-        engine, so it has no ``hive_reasoning_runs`` rows.  Its persisted
-        working-memory history is nevertheless a real sequence of candidate
-        state changes and must remain visible in the laboratory.
-        """
+        """Expose query-scene vibration as a first-class analytics timeline."""
         working = (hive.get("metadata") or {}).get("query_working_memory") or {}
         vibration = working.get("vibration") or {}
         history = vibration.get("history") or []
@@ -363,23 +512,16 @@ class HiveAnalyticsService:
 
         hive_id = str(hive["id"])
         run_id = f"query-vibration-{hive_id}"
-        query_frame = working.get("query_frame") or {}
-        query_components = []
-        for token in query_frame.get("tokens") or []:
-            role = next((name for name, value in (query_frame.get("roles") or {}).items() if value.get("index") == token.get("index")), "unknown")
-            row = conn.execute("SELECT cloud_id FROM word_forms WHERE normalized_form=? LIMIT 1", (str(token.get("normalized") or "").casefold(),)).fetchone()
-            query_components.append({"term": str(token.get("normalized") or "").casefold(), "role": role, "word_form_cloud_id": int(row["cloud_id"]) if row else None})
+        query_components = self._working_query_components(working)
 
         cell_rows = [dict(row) for row in conn.execute(
             """SELECT hc.id AS cell_id, hc.hive_placement_id, hc.dominant_cloud_id,
-                      c.canonical_name FROM hive_cells hc JOIN clouds c ON c.id=hc.dominant_cloud_id
+                      hc.local_activation, hc.retention, p.local_gravity, c.canonical_name
+               FROM hive_cells hc JOIN clouds c ON c.id=hc.dominant_cloud_id
+               JOIN cloud_placements p ON p.id=hc.hive_placement_id
                WHERE hc.hive_id=?""", (hive_id,)
         )]
-        cells_by_cloud = {int(row["dominant_cloud_id"]): row for row in cell_rows}
-        lexeme_ids = {
-            str(row["lemma"]): int(row["cloud_id"])
-            for row in conn.execute("SELECT lemma, cloud_id FROM lexemes")
-        }
+        cells_by_id = {str(row["cell_id"]): row for row in cell_rows}
         first_changes = history[0].get("candidate_changes") or []
         scores = {str(item.get("candidate_id")): float(item.get("before", 0.0)) for item in first_changes}
         for candidate in candidates:
@@ -390,8 +532,8 @@ class HiveAnalyticsService:
             for index, candidate in enumerate(candidates):
                 candidate_id = str(candidate.get("id"))
                 lemma = str(candidate.get("lemma") or candidate.get("surface") or f"candidate-{index}")
-                cloud_id = lexeme_ids.get(lemma, 0)
-                cell = cells_by_cloud.get(cloud_id, {})
+                cell = cells_by_id.get(str(candidate.get("cell_id")), {})
+                cloud_id = int(cell.get("dominant_cloud_id") or 0)
                 score = clamp(values.get(candidate_id, float((candidate.get("scores") or {}).get("total", 0.0))))
                 status = str(candidate.get("status") or "new")
                 nodes.append({
@@ -401,28 +543,14 @@ class HiveAnalyticsService:
                     "local_gravity": score, "stored_strength": score,
                     "local_stability": score, "retention": score, "energy": score,
                     "eviction_status": "EVICTED" if status == "evicted" else "ACTIVE",
-                    "label": lemma, "cell_id": cell.get("cell_id"), "candidate": candidate,
+                    "label": lemma, "cell_id": candidate.get("cell_id"), "candidate_id": candidate_id,
                 })
             return nodes
 
         def snapshot(step: int, phase: str, values: Dict[str, float], event_items: List[Dict[str, Any]]) -> Dict[str, Any]:
             nodes = nodes_for(values)
             count = max(1, len(nodes))
-            cards = []
-            for node in nodes:
-                candidate = node.pop("candidate")
-                cards.append({
-                    "placement_id": node["placement_id"], "cell_id": node["cell_id"], "scene_cloud_id": 0,
-                    "scene_label": ", ".join(candidate.get("sources") or []) or "сцена запроса",
-                    "answer": candidate.get("surface") or candidate.get("lemma"),
-                    "matched_components": [], "answer_components": [],
-                    "semantic_score": round(float((candidate.get("scores") or {}).get("object_compatibility", 0.0)), 6),
-                    "dynamic_score": round(float(node["local_activation"]), 6), "viability": 1.0,
-                    "candidate_score": round(float(node["local_activation"]), 6),
-                    "eviction_status": node["eviction_status"],
-                    "explanation": "; ".join((candidate.get("sources") or [])[:2]) or "кандидат роли из сцены памяти",
-                })
-            cards.sort(key=lambda item: -item["candidate_score"])
+            cards = self._working_candidate_cards(conn, hive_id, working, values)
             return {
                 "step": step, "phase": phase, "created_at": str(hive.get("updated_at") or ""),
                 "temperature": 1.0 / max(1, step + 1),

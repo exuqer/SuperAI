@@ -67,7 +67,7 @@ class V2HiveService:
                 "hive": working_hive.get("hive", {}), "local_resonance": working_hive.get("local_resonance"),
                 "resonance_probes": working_hive.get("resonance_probes", []),
                 "resonance_scope": "LOCAL_THEN_GLOBAL" if allow_global else "LOCAL_ONLY",
-                **{key: working_hive.get(key) for key in ("query_frame", "query_scene", "memory_scenes", "candidates", "answer", "pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure")},
+                    **{key: working_hive.get(key) for key in ("query_frame", "query_scene", "memory_scenes", "candidates", "answer", "pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "dialogue_context", "context_resolution", "retrieval_scope", "semantic_total", "gravity", "decision_score")},
             }
         result = self.service.query(hive_id, text)
         parsed = self.query_scenes.parse(text)
@@ -78,8 +78,8 @@ class V2HiveService:
             "query_scene": working_hive["query_scene"],
             "memory_scenes": working_hive["memory_scenes"],
             "candidates": working_hive["candidates"],
-            "answer": working_hive["answer"],
-        })
+                    "answer": working_hive["answer"],
+                })
         if parsed["query_frame"].get("requested_role"):
             searches = self.unknown_searches.resolve_query_unknowns(hive_id)
             if searches:
@@ -97,7 +97,7 @@ class V2HiveService:
             else:
                 working_hive = self.query_scenes.get(hive_id)
         result["cells"] = working_hive.get("cells", result.get("cells", []))
-        result.update({key: working_hive.get(key) for key in ("pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "resonance_probes", "local_resonance") if key in working_hive})
+        result.update({key: working_hive.get(key) for key in ("pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "resonance_probes", "local_resonance", "dialogue_context", "context_resolution", "retrieval_scope", "semantic_total", "gravity", "decision_score") if key in working_hive})
         result["dynamics"] = self.dynamics.get(hive_id)
         working_hive = self.query_scenes.get(hive_id)
         result["resolved_mode"] = mode
@@ -168,8 +168,9 @@ class V2HiveService:
             return {"step": int(dynamics.get("step", 0)), "candidates": [], "history_event": None, "hive": state}
         except KeyError:
             pass
+        dynamics = self.dynamics.step(hive_id, config)
         result = self.query_scenes.step(hive_id, config)
-        result["dynamics"] = self.dynamics.step(hive_id, config)
+        result["dynamics"] = dynamics
         result["hive"] = self.query_scenes.get(hive_id)
         result["hive"]["dynamics"] = result["dynamics"]
         return result
@@ -186,13 +187,23 @@ class V2HiveService:
             return {"status": "FINISHED", "steps_completed": max(1, int(steps)), "winner": None, "answer": None, "hive": state}
         except KeyError:
             pass
-        result = self.query_scenes.run(hive_id, steps, config)
-        for _ in range(int(result.get("steps_completed", 0))):
+        completed = 0
+        last = None
+        for _ in range(max(1, int(steps))):
             self.dynamics.step(hive_id, config)
-        result["dynamics"] = self.dynamics.get(hive_id)
-        result["hive"] = self.query_scenes.get(hive_id)
-        result["hive"]["dynamics"] = result["dynamics"]
-        return result
+            last = self.query_scenes.step(hive_id, config)
+            completed += 1
+            if last["hive"]["vibration"]["status"] in {"FINISHED", "finished"}:
+                break
+        state = self.query_scenes.get(hive_id)
+        dynamics = self.dynamics.get(hive_id)
+        state["dynamics"] = dynamics
+        winner = next((item for item in state.get("candidates", []) if item.get("status") == "winner"), None)
+        if winner and state.get("answer", {}).get("status") == "PLANNING":
+            self.query_scenes.generate_resolved_answer(hive_id)
+            state = self.query_scenes.get(hive_id)
+            state["dynamics"] = dynamics
+        return {"status": state["vibration"]["status"], "steps_completed": completed, "winner": winner, "answer": state.get("answer"), "hive": state}
 
     def dynamics_state(self, hive_id: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.dynamics.get(hive_id, config)

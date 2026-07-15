@@ -148,7 +148,7 @@
               <button :class="{ active: !isLiveView }" @click="viewMode = 'history'">Выбранный шаг</button>
               <InfoTooltip label="Текущий запрос" text="Живой срез обновляется сразу после обработки сообщения. Он не запускает и не имитирует встряску." />
             </div>
-            <p class="method">70% совпадение слов и ролей · 30% динамика вибрации · жизнеспособность по статусу узла.</p>
+            <p class="method">65% семантика и роли · 20% гравитация · 10% резонанс · 5% удержание.</p>
             <div v-if="!displaySnapshot?.candidates.length" class="empty-inline">В выбранном состоянии нет сцен-кандидатов.</div>
             <div v-else class="candidate-list">
               <button
