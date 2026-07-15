@@ -11,6 +11,7 @@ from server.tokenizer import SentenceTokens, WordToken, tokenize_hierarchical
 from .repository import V2Repository, encode, utcnow
 from .morphology import MorphologyService
 from .unknown_search import StructuralIndexService
+from .semantic_fog import SemanticFogService
 
 
 ROLE_VALUES = {
@@ -229,6 +230,7 @@ class TrainingPipelineV2:
         self.structures = WordFormStructureService(self.repository)
         self.morphology_space = MorphologyService(self.repository)
         self.structural_index = StructuralIndexService()
+        self.semantic_fog = SemanticFogService(self.repository)
 
     def train(self, text: str, source_type: str = "training") -> Dict[str, Any]:
         tokenization = tokenize_hierarchical(text)
@@ -247,6 +249,7 @@ class TrainingPipelineV2:
                 self._train_sentence(conn, sentence, int(global_space["id"]), source_type, journal)
                 for sentence in tokenization.sentences
             ]
+            semantic_backfill = self.semantic_fog.backfill(conn, int(global_space["id"]))
             success = bool(scene_results)
             conn.execute(
                 "UPDATE training_runs SET success = ?, completed_at = ? WHERE id = ?",
@@ -269,6 +272,7 @@ class TrainingPipelineV2:
             "created_structures": by_type("STRUCTURE_CREATED"),
             "reused_scenes": by_type("SCENE_REUSED"),
             "stats": stats,
+            "semantic_backfill": semantic_backfill,
         }
 
     def _migrate_existing_scenes(self, conn: Any) -> None:

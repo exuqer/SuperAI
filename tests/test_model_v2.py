@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from server.server import app
 from server.v2.physics import PlacementPhysicsV2
 from server.v2.repository import V2Repository
+from server.v2.schema import SCHEMA_VERSION
 from server.v2.training import TrainingPipelineV2
 from server.v2.validation import ModelInvariantValidator
 
@@ -45,11 +46,19 @@ def test_retraining_strengthens_without_growing_structure_or_scene():
     repository = V2Repository()
     with repository.transaction() as conn:
         before = repository.stats(conn)
+        fish_cloud_id = conn.execute(
+            "SELECT id FROM clouds WHERE cloud_type='lexeme' AND canonical_name='рыба'"
+        ).fetchone()[0]
+        first_mass = conn.execute("SELECT mass FROM clouds WHERE id=?", (fish_cloud_id,)).fetchone()[0]
     second = pipeline.train("Кот ест рыбу.")
     with repository.transaction() as conn:
         after = repository.stats(conn)
         scene = conn.execute("SELECT * FROM scenes").fetchone()
         assert scene["observation_count"] == 2
+        second_mass = conn.execute("SELECT mass FROM clouds WHERE id=?", (fish_cloud_id,)).fetchone()[0]
+    pipeline.train("Кот ест рыбу.")
+    with repository.transaction() as conn:
+        third_mass = conn.execute("SELECT mass FROM clouds WHERE id=?", (fish_cloud_id,)).fetchone()[0]
     for key in (
         "clouds_total", "spaces_total", "placements_total", "scene_components_total",
         "structural_components_total",
@@ -59,6 +68,7 @@ def test_retraining_strengthens_without_growing_structure_or_scene():
     assert second["created_clouds"] == []
     assert second["strengthened_clouds"]
     assert second["reused_scenes"]
+    assert 0 < third_mass - second_mass < second_mass - first_mass
 
 
 def test_scene_dto_is_normalized_and_structure_is_lazy():
@@ -117,13 +127,17 @@ def test_trained_model_snapshot_contains_canonical_data_without_hive_runtime():
         snapshot = client.get("/api/v2/model")
     assert snapshot.status_code == 200
     data = snapshot.json()
-    assert data["schema_version"] == 2
+    assert data["schema_version"] == SCHEMA_VERSION
     assert data["stats"]["clouds_total"] == len(data["model"]["clouds"])
     assert data["model"]["scene_components"]
     assert "metadata" in data["model"]["clouds"][0]
     assert "metadata_json" not in data["model"]["clouds"][0]
     assert "hives" not in data["model"]
     assert data["model"]["word_form_features"]
+    assert "semantic_evidence" in data["model"]
+    assert "concept_fog_registry" in data["model"]
+    assert "concept_candidate_registry" in data["model"]
+    assert "semantic_backfill_state" in data["model"]
 
 
 def test_definition_sentence_roles():
@@ -143,3 +157,22 @@ def test_definition_sentence_roles():
         ("с", "preposition"),
         ("ручкой", "complement"),
     ]
+
+
+def test_concept_cloud_exposes_its_owned_fog_space():
+    TrainingPipelineV2().train("Кошка это кошечка.")
+    repository = V2Repository()
+    with repository.transaction() as conn:
+        fog = conn.execute(
+            "SELECT concept_cloud_id,concept_space_id FROM concept_fog_registry"
+        ).fetchone()
+        global_placement = conn.execute(
+            """SELECT 1 FROM cloud_placements p JOIN spaces s ON s.id=p.space_id
+            WHERE p.cloud_id=? AND s.space_type='global_field'""",
+            (fog["concept_cloud_id"],),
+        ).fetchone()
+    with TestClient(app) as client:
+        payload = client.get(f"/api/v2/clouds/{fog['concept_cloud_id']}").json()
+    assert global_placement
+    assert payload["owned_spaces"][0]["id"] == fog["concept_space_id"]
+    assert payload["owned_spaces"][0]["space_type"] == "concept_space"

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import uuid
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .repository import V2Repository, decode, encode, utcnow
 
@@ -355,7 +355,8 @@ class MorphologyService:
             query = "SELECT * FROM hive_generation_candidates WHERE hive_id=?"
             args: List[Any] = [hive_id]
             if candidate_id is not None:
-                query += " AND id=?"; args.append(candidate_id)
+                query += " AND id=?"
+                args.append(candidate_id)
             query += " ORDER BY score_total DESC, id"
             rows = [self._candidate_row(row) for row in conn.execute(query, args)]
             if candidate_id is not None and not rows:

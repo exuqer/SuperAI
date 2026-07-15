@@ -229,12 +229,20 @@ class V2LocalMemoryService:
             and str(item.get("expected_role") or "") not in {"preposition", "conjunction", "particle", "question"}
         ]
         ranked: List[Tuple[float, Dict[str, Any]]] = []
-        scene_rows = conn.execute(
-            """SELECT p.*, c.cloud_type, c.canonical_name, c.mass, c.stability
-               FROM cloud_placements p JOIN spaces s ON s.id = p.space_id
-               JOIN clouds c ON c.id = p.cloud_id
-               WHERE s.space_type = 'global_field' AND c.cloud_type = 'scene'"""
-        ).fetchall()
+        lexeme_ids = sorted({int(item["lexeme_cloud_id"]) for item in query_components})
+        scene_rows = []
+        if lexeme_ids:
+            marks = ",".join("?" for _ in lexeme_ids)
+            scene_rows = conn.execute(
+                f"""SELECT DISTINCT p.*, c.cloud_type, c.canonical_name, c.mass, c.stability
+                   FROM cloud_placements p JOIN spaces s ON s.id = p.space_id
+                   JOIN clouds c ON c.id = p.cloud_id
+                   JOIN scene_components sc ON sc.scene_cloud_id=c.id
+                   WHERE s.space_type = 'global_field' AND c.cloud_type = 'scene'
+                     AND sc.lexeme_cloud_id IN ({marks})
+                   ORDER BY c.mass DESC, c.id DESC LIMIT ?""",
+                (*lexeme_ids, max(32, self.config.max_sources * 8)),
+            ).fetchall()
         for row in scene_rows:
             components = conn.execute(
                 """SELECT lexeme_cloud_id, grammatical_role
@@ -275,13 +283,27 @@ class V2LocalMemoryService:
                 if item.get("normalized_form")
                 and str(item.get("normalized_form") or "").casefold() not in SEARCH_STOP_WORDS
             }
-            rows = conn.execute(
-                """SELECT p.*, c.cloud_type, c.canonical_name, c.mass, c.stability
-                   FROM cloud_placements p JOIN spaces s ON s.id = p.space_id
-                   JOIN clouds c ON c.id = p.cloud_id
-                   WHERE s.space_type = 'global_field'
-                     AND c.cloud_type IN ('word_form','lexeme','concept_candidate')"""
-            ).fetchall()
+            rows = []
+            if terms:
+                marks = ",".join("?" for _ in terms)
+                rows = conn.execute(
+                    f"""SELECT p.*, c.cloud_type, c.canonical_name, c.mass, c.stability
+                       FROM cloud_placements p JOIN spaces s ON s.id = p.space_id
+                       JOIN clouds c ON c.id = p.cloud_id
+                       WHERE s.space_type = 'global_field'
+                         AND c.cloud_type IN ('word_form','lexeme','concept_candidate')
+                         AND (
+                           c.cloud_type <> 'concept_candidate'
+                           OR EXISTS (
+                             SELECT 1 FROM concept_candidate_registry ccr
+                             WHERE ccr.concept_candidate_cloud_id=c.id
+                               AND ccr.is_search_eligible=1
+                           )
+                         )
+                         AND lower(c.canonical_name) IN ({marks})
+                       ORDER BY c.mass DESC, c.id DESC LIMIT ?""",
+                    (*sorted(terms), max(32, self.config.max_sources * 8)),
+                ).fetchall()
             for row in rows:
                 words = set(str(row["canonical_name"]).casefold().split())
                 overlap = len(words & terms) / max(1, len(terms))
@@ -543,7 +565,8 @@ class V2LocalMemoryService:
                 hns.age_steps, hns.weakening_steps
                 FROM hive_cells hc JOIN cloud_placements p ON p.id = hc.hive_placement_id
                 LEFT JOIN hive_node_states hns ON hns.hive_id = hc.hive_id AND hns.placement_id = hc.hive_placement_id
-                WHERE hc.hive_id = ? ORDER BY hc.retention DESC""",
+                WHERE hc.hive_id = ?
+                ORDER BY hc.retention DESC, hc.created_at ASC, hc.id ASC""",
                 (hive_id,),
             )]
             for cell in cells:

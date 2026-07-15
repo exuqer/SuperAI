@@ -2,7 +2,10 @@
 
 export interface CloudV2 {
   id: number;
-  cloud_type: 'character' | 'word_form' | 'lexeme' | 'scene' | 'concept_candidate' | 'concept';
+  cloud_type:
+    | 'character' | 'word_form' | 'lexeme' | 'scene' | 'concept_candidate' | 'concept'
+    | 'morpheme_candidate' | 'morpheme' | 'morph_operator' | 'morph_pattern'
+    | 'sentence_frame';
   canonical_name: string;
   mass: number;
   density: number;
@@ -33,7 +36,9 @@ export interface PlacementV2 {
 
 export interface SpaceV2 {
   id: number;
-  space_type: 'global_field' | 'scene_space' | 'word_structure_space' | 'concept_space' | 'hive_space';
+  space_type:
+    | 'global_field' | 'scene_space' | 'word_structure_space' | 'morphology_space'
+    | 'sentence_frame_space' | 'concept_space' | 'hive_space' | 'hive_subspace';
   owner_cloud_id: number | null;
   parent_space_id: number | null;
   dimensionality?: number;
@@ -78,6 +83,10 @@ export interface StatsV2 {
   scene_components_total: number;
   structural_components_total: number;
   concepts_total: number;
+  semantic_evidence_total: number;
+  concept_fogs_total: number;
+  concept_candidates_total: number;
+  semantic_backfill_scenes_total: number;
 }
 
 export interface NormalizedSpaceV2 {

@@ -12,4 +12,7 @@
 
 `GET /api/v2/clouds/{id}/structure` отдельно возвращает `structure_space`, ordered `components` и словарь дочерних clouds.
 
-`POST /api/v2/training/learn` возвращает `training_run_id`, созданные и усиленные clouds, spaces, placements, structures, activations и reused scenes.
+`GET /api/v2/clouds/{id}` возвращает облако и `owned_spaces`; для `concept` это позволяет
+открыть принадлежащее ему `concept_space`.
+
+`POST /api/v2/training/learn` возвращает `training_run_id`, созданные и усиленные clouds, spaces, placements, structures, activations, reused scenes и результат semantic backfill.

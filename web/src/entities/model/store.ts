@@ -19,8 +19,11 @@ const spaceLabels: Record<SpaceV2['space_type'], string> = {
   global_field: 'Глобальное поле',
   scene_space: 'Пространство сцены',
   word_structure_space: 'Структура словоформы',
+  morphology_space: 'Морфологическое пространство',
+  sentence_frame_space: 'Пространство каркаса',
   concept_space: 'Пространство понятия',
   hive_space: 'Пространство улья',
+  hive_subspace: 'Проекция улья',
 };
 
 export const useModelStore = defineStore('model', () => {
@@ -37,6 +40,10 @@ export const useModelStore = defineStore('model', () => {
     scene_components_total: 0,
     structural_components_total: 0,
     concepts_total: 0,
+    semantic_evidence_total: 0,
+    concept_fogs_total: 0,
+    concept_candidates_total: 0,
+    semantic_backfill_scenes_total: 0,
   });
   const breadcrumb = ref<Array<{ space: SpaceV2; label: string }>>([]);
   const selectedPlacementId = ref<number | null>(null);
@@ -143,6 +150,12 @@ export const useModelStore = defineStore('model', () => {
         space: structure.structure_space,
         label: `${cloud.canonical_name} · структура`,
       });
+      return;
+    }
+    if (cloud.cloud_type === 'concept') {
+      const payload = await api.get<{ cloud: CloudV2; owned_spaces: SpaceV2[] }>(`/api/v2/clouds/${cloud.id}`);
+      const fog = payload.owned_spaces.find(space => space.space_type === 'concept_space');
+      if (fog) await loadSpace(fog.id);
     }
   }
 

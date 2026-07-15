@@ -53,8 +53,20 @@ def create_app() -> FastAPI:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Application lifespan handler."""
-    # Startup: initialize database
+    # Startup schema migration is also the safe place to backfill semantic
+    # evidence for scenes saved by an older version.  Query processing stays
+    # bounded and never performs a full-model migration.
     init_db()
+    from server.v2.repository import V2Repository
+    from server.v2.semantic_fog import SemanticFogService
+
+    repository = V2Repository()
+    with repository.transaction() as conn:
+        global_space = conn.execute(
+            "SELECT id FROM spaces WHERE space_type='global_field' LIMIT 1"
+        ).fetchone()
+        if global_space:
+            SemanticFogService(repository).backfill(conn, int(global_space["id"]))
     yield
     # Shutdown: cleanup if needed
 

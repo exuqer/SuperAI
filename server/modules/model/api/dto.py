@@ -63,6 +63,10 @@ class StatsResponse(BaseModel):
     scene_components_total: int
     structural_components_total: int
     concepts_total: int
+    semantic_evidence_total: int
+    concept_fogs_total: int
+    concept_candidates_total: int
+    semantic_backfill_scenes_total: int
 
 
 class NormalizedSpaceResponse(BaseModel):

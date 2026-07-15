@@ -47,6 +47,18 @@ def test_legacy_database_is_migrated_before_morphology_training(isolated_databas
         assert conn.execute("SELECT canonical_name FROM clouds WHERE id=1").fetchone()[0] == "старый"
         assert conn.execute("SELECT space_type FROM spaces WHERE id=1").fetchone()[0] == "global_field"
         assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+        semantic_tables = {
+            row[0]
+            for row in conn.execute(
+                """SELECT name FROM sqlite_master WHERE type='table' AND name IN
+                ('semantic_evidence','concept_fog_registry','concept_candidate_registry',
+                 'semantic_backfill_state')"""
+            )
+        }
+        assert semantic_tables == {
+            "semantic_evidence", "concept_fog_registry", "concept_candidate_registry",
+            "semantic_backfill_state",
+        }
 
     result = TrainingPipelineV2().train("Мяч. Мячи.")
     assert result["scenes"]

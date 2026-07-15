@@ -32,10 +32,17 @@ class ModelService:
         return self.repository.trained_model_snapshot()
 
     def get_cloud(self, cloud_id: int) -> dict[str, Any]:
-        cloud = self.repository.get_cloud(cloud_id)
-        if not cloud:
-            raise NotFoundError("cloud", cloud_id)
-        return {"cloud": cloud}
+        with self.repository.transaction() as conn:
+            cloud = conn.execute("SELECT * FROM clouds WHERE id = ?", (cloud_id,)).fetchone()
+            if not cloud:
+                raise NotFoundError("cloud", cloud_id)
+            owned_spaces = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM spaces WHERE owner_cloud_id=? ORDER BY id", (cloud_id,)
+                )
+            ]
+            return {"cloud": dict(cloud), "owned_spaces": owned_spaces}
 
     def get_structure(self, cloud_id: int) -> dict[str, Any]:
         with self.repository.transaction() as conn:

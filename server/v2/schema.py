@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _needs_constraint_migration(conn: sqlite3.Connection, table: str, expected_value: str) -> bool:
@@ -279,6 +279,60 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(lexeme_cloud_id, concept_cloud_id)
         );
 
+        CREATE TABLE IF NOT EXISTS semantic_evidence (
+            id INTEGER PRIMARY KEY,
+            source_scene_cloud_id INTEGER,
+            left_lexeme_cloud_id INTEGER NOT NULL,
+            right_lexeme_cloud_id INTEGER NOT NULL,
+            evidence_type TEXT NOT NULL CHECK (evidence_type IN
+                ('definition','shared_category','contextual_similarity')),
+            weight REAL NOT NULL CHECK (weight BETWEEN 0 AND 1),
+            evidence_weight REAL NOT NULL DEFAULT 0 CHECK (evidence_weight BETWEEN 0 AND 1),
+            independence REAL NOT NULL DEFAULT 1 CHECK (independence BETWEEN 0 AND 1),
+            evidence_key TEXT,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(source_scene_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(left_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(right_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            UNIQUE(source_scene_cloud_id, left_lexeme_cloud_id, right_lexeme_cloud_id, evidence_type)
+        );
+        CREATE INDEX IF NOT EXISTS semantic_evidence_left_idx ON semantic_evidence(left_lexeme_cloud_id);
+        CREATE INDEX IF NOT EXISTS semantic_evidence_right_idx ON semantic_evidence(right_lexeme_cloud_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS semantic_evidence_key_idx ON semantic_evidence(evidence_key) WHERE evidence_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS concept_fog_registry (
+            concept_cloud_id INTEGER PRIMARY KEY,
+            concept_space_id INTEGER NOT NULL UNIQUE,
+            evidence_type TEXT NOT NULL,
+            stability REAL NOT NULL DEFAULT 0 CHECK (stability BETWEEN 0 AND 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(concept_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(concept_space_id) REFERENCES spaces(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS concept_candidate_registry (
+            concept_candidate_cloud_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'candidate' CHECK (status IN ('candidate','rejected','stabilized')),
+            stability_score REAL NOT NULL DEFAULT 0 CHECK (stability_score BETWEEN 0 AND 1),
+            is_search_eligible INTEGER NOT NULL DEFAULT 0 CHECK (is_search_eligible IN (0,1)),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(concept_candidate_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS semantic_backfill_state (
+            source_scene_cloud_id INTEGER PRIMARY KEY,
+            semantic_extractor_version INTEGER NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            result_fingerprint TEXT NOT NULL,
+            processed_at TEXT NOT NULL,
+            FOREIGN KEY(source_scene_cloud_id) REFERENCES scenes(cloud_id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS scenes (
             cloud_id INTEGER PRIMARY KEY,
             scene_space_id INTEGER NOT NULL UNIQUE,
@@ -529,6 +583,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    evidence_columns = {row[1] for row in conn.execute("PRAGMA table_info(semantic_evidence)").fetchall()}
+    if "evidence_weight" not in evidence_columns:
+        conn.execute("ALTER TABLE semantic_evidence ADD COLUMN evidence_weight REAL NOT NULL DEFAULT 0")
+    if "independence" not in evidence_columns:
+        conn.execute("ALTER TABLE semantic_evidence ADD COLUMN independence REAL NOT NULL DEFAULT 1")
+    if "evidence_key" not in evidence_columns:
+        conn.execute("ALTER TABLE semantic_evidence ADD COLUMN evidence_key TEXT")
+    conn.execute("UPDATE semantic_evidence SET evidence_weight=weight WHERE evidence_weight=0 AND weight>0")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS semantic_evidence_key_idx ON semantic_evidence(evidence_key) WHERE evidence_key IS NOT NULL")
     # Additive upgrades for databases created by schema v1.
     hive_columns = {
         "conversation_id": "TEXT NOT NULL DEFAULT ''",

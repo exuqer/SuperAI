@@ -76,10 +76,18 @@ class V2Repository:
 
     def strengthen_cloud(self, conn: Any, cloud_id: int, amount: float = 0.1) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         before = dict(conn.execute("SELECT * FROM clouds WHERE id = ?", (cloud_id,)).fetchone())
+        previous_count = int(before["observation_count"])
+        next_count = previous_count + 1
+        # Frequency contributes with logarithmic saturation.  Stable base
+        # mass remains type/quality dependent, so raw repetition can never be
+        # the sole mass signal or grow without bound linearly.
+        frequency_increment = amount * (
+            math.log1p(next_count) - math.log1p(previous_count)
+        ) / math.log(2.0)
         conn.execute(
             """UPDATE clouds SET mass = mass + ?, observation_count = observation_count + 1,
             stability = MIN(1.0, stability + 0.01), updated_at = ? WHERE id = ?""",
-            (amount, utcnow(), cloud_id),
+            (frequency_increment, utcnow(), cloud_id),
         )
         after = dict(conn.execute("SELECT * FROM clouds WHERE id = ?", (cloud_id,)).fetchone())
         return before, after
@@ -212,6 +220,10 @@ class V2Repository:
             "scene_components_total": scalar("SELECT COUNT(*) FROM scene_components"),
             "structural_components_total": scalar("SELECT COUNT(*) FROM structural_components"),
             "concepts_total": clouds_by_type.get("concept", 0),
+            "semantic_evidence_total": scalar("SELECT COUNT(*) FROM semantic_evidence"),
+            "concept_fogs_total": scalar("SELECT COUNT(*) FROM concept_fog_registry"),
+            "concept_candidates_total": scalar("SELECT COUNT(*) FROM concept_candidate_registry"),
+            "semantic_backfill_scenes_total": scalar("SELECT COUNT(*) FROM semantic_backfill_state"),
         }
 
     def normalized_space(self, space_id: int) -> Dict[str, Any]:
@@ -251,7 +263,7 @@ class V2Repository:
         tables = (
             "clouds", "spaces", "cloud_placements", "structural_components",
             "lexemes", "word_forms", "word_form_features", "cloud_compositions",
-            "morph_pattern_data", "semantic_memberships", "scenes",
+            "morph_pattern_data", "semantic_memberships", "semantic_evidence", "concept_fog_registry", "concept_candidate_registry", "semantic_backfill_state", "scenes",
             "scene_components", "training_runs", "training_observations",
             "training_change_events",
         )
@@ -259,6 +271,9 @@ class V2Repository:
             "lexemes": "cloud_id",
             "word_forms": "cloud_id",
             "morph_pattern_data": "cloud_id",
+            "concept_fog_registry": "concept_cloud_id",
+            "concept_candidate_registry": "concept_candidate_cloud_id",
+            "semantic_backfill_state": "source_scene_cloud_id",
             "scenes": "cloud_id",
         }
 
@@ -293,7 +308,7 @@ class V2Repository:
                 "hive_cell_matches", "hive_resonance_events", "hive_query_decisions",
                 "hive_messages", "hive_cell_components", "hive_cells", "hives",
                 "training_change_events", "training_observations", "training_runs",
-                "scene_components", "scenes", "semantic_memberships", "word_forms",
+                "scene_components", "scenes", "semantic_memberships", "semantic_evidence", "semantic_backfill_state", "concept_candidate_registry", "concept_fog_registry", "word_forms",
                 "lexemes", "structural_components", "cloud_placements", "spaces", "clouds",
             ):
                 conn.execute(f"DELETE FROM {table}")

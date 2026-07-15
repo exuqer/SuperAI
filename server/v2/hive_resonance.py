@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
 import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Optional

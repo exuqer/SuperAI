@@ -33,6 +33,12 @@ def test_vibration_resolves_full_role_hit_into_answer_frame():
     assert final["hive"]["vibration"]["history"]
 
 
+def test_observed_noun_is_not_rejected_as_agent_by_builtin_vocabulary():
+    service, hive_id, result = _ask("Рыба ест траву.", "Кто ест траву?")
+    assert [item["lemma"] for item in result["candidates"]] == ["рыба"]
+    assert service.vibration_run(hive_id, 3)["answer"]["resolved_value"] == "рыба"
+
+
 def test_question_roles_object_location_and_instrument():
     service, hive_id, _ = _ask("Кот ест рыбу на кухне. Рыбак ловит рыбу сетью.", "Что ест кот?")
     object_answer = service.vibration_run(hive_id, 3)["answer"]
@@ -52,14 +58,16 @@ def test_question_roles_object_location_and_instrument():
     assert instrument_answer["full_surface_answer"] == "Рыбак ловит рыбу сетью."
 
 
-def test_full_answer_puts_selected_agent_into_agent_slot():
+def test_unmatched_explicit_anchor_stays_visible_but_is_not_answer_candidate():
     service, hive_id, _ = _ask("Кот ест рыбу.", "Кто там ест на рынке что?")
 
     answer = service.vibration_run(hive_id, 3)["answer"]
 
-    assert answer["resolved_value"] == "кот"
-    assert answer["surface_answer"] == "Кот."
-    assert answer["full_surface_answer"] == "Кот ест на рынке."
+    state = service.query_working_state(hive_id)
+    assert answer["resolved_value"] is None
+    assert state["candidates"] == []
+    assert state["memory_scenes"][0]["anchor_validation"]["status"] == "FAILED"
+    assert "location" in state["memory_scenes"][0]["anchor_validation"]["failed_roles"]
 
 
 def test_new_statement_replaces_the_previous_query_scene():
@@ -114,7 +122,13 @@ def test_greeting_with_scene_question_uses_location_as_semantic_anchor():
     assert final["hive"]["sentence_plan"]["slots"][0]["observed_features"]["case"] == "accs"
     assert final["hive"]["morphology_trace"][0]["selection_mode"] == "reuse_observed_training_form"
     stages = [item["stage"] for item in final["hive"]["reasoning_trace"]["stages"]]
-    assert stages[:4] == ["INTENT_CLASSIFICATION", "QUERY_FRAME", "MEMORY_SCENE_SEARCH", "CANDIDATE_RANKING"]
+    assert stages[:4] == [
+        "INTENT_CLASSIFICATION", "QUERY_FRAME", "CONTEXT_INHERITANCE",
+        "QUERY_SCENE_COMPLETION",
+    ]
+    assert "MEMORY_SCENE_SEARCH" in stages
+    assert "CANDIDATE_RANKING" in stages
+    assert stages.index("MEMORY_SCENE_SEARCH") + 1 == stages.index("CANDIDATE_RANKING")
     assert "VIBRATION" in stages
     assert "ANSWER_ASSEMBLY" in stages
 

@@ -126,6 +126,7 @@
             <button class="open" @click="modelStore.zoomIntoPlacement(modelStore.selectedPlacement.id)">Открыть структуру</button>
           </section>
           <button v-if="modelStore.selectedCloud.cloud_type === 'scene'" class="open" @click="modelStore.zoomIntoPlacement(modelStore.selectedPlacement.id)">Открыть сцену</button>
+          <button v-if="modelStore.selectedCloud.cloud_type === 'concept'" class="open" @click="modelStore.zoomIntoPlacement(modelStore.selectedPlacement.id)">Открыть туманность</button>
         </template>
         <div v-else class="empty">Идентичность облака и локальные координаты показываются раздельно.</div>
       </aside>
@@ -145,10 +146,12 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import SpaceVisualization from '@/components/SpaceVisualization.vue'
 import { useModelStore } from '@/entities/model/store'
 
 const modelStore = useModelStore()
+const route = useRoute()
 const text = ref('')
 const renderer = ref<InstanceType<typeof SpaceVisualization> | null>(null)
 const showModelData = ref(false)
@@ -214,7 +217,11 @@ async function copyModelData() {
   }
 }
 
-onMounted(() => modelStore.loadField())
+onMounted(async () => {
+  const conceptSpace = Number(route.query.conceptSpace || 0)
+  if (conceptSpace > 0) await modelStore.loadSpace(conceptSpace)
+  else await modelStore.loadField()
+})
 </script>
 
 <style scoped>

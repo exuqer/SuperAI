@@ -28,6 +28,10 @@ export function mapVisualization(source: Record<string, any>) {
     text: item.source_text || item.sentence_text || item.label || 'Источник памяти',
     score: Math.round(Number(item.scores?.total_score ?? item.score ?? item.total_score ?? 0) * 100),
     selected: selectedSourceIds.has(String(item.cloud_id || String(item.id || '').replace('scene-', ''))),
+    anchorValidation: item.anchor_validation || item.scores?.anchor_validation || {},
+    roleMatchDetails: item.role_match_details || item.scores?.role_match_details || {},
+    conceptSpaceIds: Array.from(new Set(Object.values(item.role_match_details || item.scores?.role_match_details || {}).flatMap((detail: any) => detail?.concept_space_ids || []))),
+    semanticApproximation: Object.values(item.role_match_details || item.scores?.role_match_details || {}).some((detail: any) => ['stable_concept', 'related_concept', 'shared_category'].includes(detail?.match_type)),
   }));
   return {
     scene: {
@@ -50,6 +54,7 @@ export function mapVisualization(source: Record<string, any>) {
       ]),
       candidates,
       sources,
+      counts: { found: sources.length, validated: sources.filter((item: any) => item.anchorValidation?.status === 'PASSED').length, candidates: candidates.length },
       history: source.vibrationHistory || [],
     },
     answerBuild: {

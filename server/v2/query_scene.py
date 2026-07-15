@@ -31,14 +31,6 @@ MODAL_WORDS = {
     "надо": {"semantic_function": "necessity"},
     "нужно": {"semantic_function": "necessity"},
 }
-COUNTERPART_ACTIONS = {
-    frozenset(("покупать", "продавать")): 0.34,
-    frozenset(("купить", "продать")): 0.34,
-}
-ACTION_NEIGHBORS = {
-    "покупать": {"купить": 0.82, "приобретать": 0.78, "брать": 0.55, "оплачивать": 0.58, "заказывать": 0.52},
-    "ловить": {"поймать": 0.82},
-}
 ROLE_LABELS = {
     "agent": "КТО?", "object": "ЧТО?", "location": "ГДЕ?", "destination": "КУДА?", "source": "ОТКУДА?", "time": "КОГДА?", "instrument": "ЧЕМ?",
 }
@@ -46,7 +38,6 @@ REFERENTIALS = {"там": "location", "туда": "destination", "оттуда":
 CONTEXT_ROLES = ("location", "destination", "source")
 DIALOGUE_CONTEXT_ROLES = ("agent", "action", "modal", "object", *CONTEXT_ROLES, "time", "instrument")
 ENTITY_REFERENCE_LEMMAS = {"он", "она", "оно", "они"}
-AGENT_BLACKLIST = {"рынок", "рыба", "кухня", "сеть", "мяч", "птица"}
 ROLE_MATCH_ALIASES = {"location": {"location", "destination"}, "destination": {"location", "destination"}}
 
 
@@ -112,15 +103,33 @@ class QuerySceneService:
                 if row:
                     item.update({"lexeme": row["lemma"] or item["lemma"], "word_form_cloud_id": int(row["word_form_cloud_id"]), "lexeme_cloud_id": int(row["lexeme_cloud_id"]) if row["lexeme_cloud_id"] else None, "resolution_state": TokenResolutionState.EXACT_FORM_MATCH.value})
         requested_role = QUESTION_ROLES.get(question_word, "")
-        normalized_tokens = [item["normalized"] for item in items]
-        ellipsis_follow_up = (
-            question_word == "что"
-            and "ещё" in normalized_tokens
-            and set(normalized_tokens).issubset({"а", "ещё", "что"})
-        )
+        continuation_markers = {
+            item["normalized"] for item in items
+            if item["normalized"] in {"ещё", "кроме"} or item.get("lemma") == "другой"
+        }
+        ellipsis_follow_up = bool(continuation_markers) and bool(requested_role)
         if intent["intent"] in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}:
             requested_role = ""
         roles = self._roles(items, requested_role=QUESTION_ROLES.get(question_word, ""))
+        explicit_exclusions: List[Dict[str, Any]] = []
+        for marker in (item for item in items if item["normalized"] == "кроме"):
+            excluded = next(
+                (
+                    item for item in items
+                    if item["index"] > marker["index"]
+                    and item["part_of_speech"] in {"NOUN", "NPRO"}
+                    and item["component_type"] != "question_operator"
+                ),
+                None,
+            )
+            if excluded:
+                excluded["component_type"] = "continuation_exclusion"
+                explicit_exclusions.append({
+                    **deepcopy(excluded),
+                    "mode": "STABLE_CONCEPT",
+                    "source": "query_explicit",
+                    "origin_query_session_id": None,
+                })
         for role, value in roles.items():
             if value.get("status") == "empty":
                 continue
@@ -141,7 +150,7 @@ class QuerySceneService:
             "id": frame_id,
             "source_text": text, "original_text": text,
             "normalized_text": normalized_text,
-            "query_type": "role_question" if requested_role else "statement",
+            "query_type": "continuation_role_question" if ellipsis_follow_up else "role_question" if requested_role else "statement",
             "question_word": question_word or None,
             "requested_role": requested_role or None,
             "intent": intent["intent"],
@@ -151,7 +160,10 @@ class QuerySceneService:
             "tokens": items,
             "referential": referential,
             "ellipsis_follow_up": ellipsis_follow_up,
-            "excluded_roles": {},
+            "continuation_markers": sorted(continuation_markers),
+            "continuation_of": None,
+            "inherited_roles": [],
+            "excluded_roles": {requested_role: explicit_exclusions} if requested_role and explicit_exclusions else {},
             "reconstructed_query": None,
             "entity_referentials": [
                 {"index": item["index"], "surface": item["surface"], "normalized": item["normalized"], "lemma": item["lemma"]}
@@ -188,7 +200,8 @@ class QuerySceneService:
             hive = conn.execute("SELECT conversation_id FROM hives WHERE id=?", (hive_id,)).fetchone()
             message = conn.execute("SELECT id FROM hive_messages WHERE hive_id=? ORDER BY turn_index DESC LIMIT 1", (hive_id,)).fetchone()
             dialogue_context = self._context(conn, hive_id)
-            parsed = self._apply_context(parsed, dialogue_context)
+            previous_state = self._load(conn, hive_id)
+            parsed = self._apply_context(parsed, dialogue_context, previous_state)
             parsed = self._resolve_token_states(conn, parsed)
             mode = mode if mode in MESSAGE_MODES else "NEW_QUERY"
             context_resolution = parsed["query_frame"].get("context_resolution", {})
@@ -201,29 +214,36 @@ class QuerySceneService:
             if parsed["query_frame"].get("query_type") == "statement" and message:
                 self._store_dialogue_scene(conn, hive_id, str(message["id"]), "user", text, parsed["query_frame"])
             memory_scenes = self._memory_scenes(conn, hive_id)
+            local_scene_count = len(memory_scenes)
             evaluated = [self._score_scene(parsed["query_frame"], scene, conn) for scene in memory_scenes]
             imported = []
-            local_candidates = self._candidates(parsed["query_frame"], evaluated)
+            global_visible = []
+            local_candidates = self._candidates(parsed["query_frame"], evaluated, conn)
             local_semantic = max((float(item["scores"].get("semantic_total", 0.0)) for item in local_candidates), default=0.0)
-            if parsed["query_frame"].get("requested_role") and (local_semantic < .65 or not local_candidates) and parsed["query_frame"].get("context_resolution", {}).get("status") != "UNRESOLVED_CONTEXT":
-                global_scenes = self._memory_scenes(conn, None)
+            if parsed["query_frame"].get("requested_role") and parsed["query_frame"].get("context_resolution", {}).get("status") != "UNRESOLVED_CONTEXT":
+                global_scenes = self._memory_scenes(conn, None, parsed["query_frame"])
                 local_ids = {scene["id"] for scene in memory_scenes}
                 global_evaluated = [self._score_scene(parsed["query_frame"], scene, conn) for scene in global_scenes if scene["id"] not in local_ids]
                 useful = [item for item in global_evaluated if item["result_type"] != "NO_HIT"]
-                for scene in sorted(useful, key=lambda item: (-item["scores"].get("semantic_total", 0.0), item["id"]))[:8]:
-                    self._import_scene(conn, hive_id, scene, text, parsed, hive, message)
-                    scene["retrieval_scope"] = "IMPORTED"
-                    scene["provenance"] = {"source": "global_field", "imported_for": text, "imported_at": utcnow()}
-                    imported.append(scene)
-                memory_scenes.extend(imported)
-                evaluated.extend(imported)
-            candidates = self._candidates(parsed["query_frame"], evaluated)
+                global_visible = sorted(useful, key=lambda item: (-item["scores"].get("semantic_total", 0.0), item["id"]))[:8]
+                should_import = local_semantic < .65 or not local_candidates
+                for scene in global_visible:
+                    if should_import:
+                        self._import_scene(conn, hive_id, scene, text, parsed, hive, message)
+                        scene["retrieval_scope"] = "IMPORTED"
+                        scene["provenance"] = {"source": "global_field", "imported_for": text, "imported_at": utcnow()}
+                        imported.append(scene)
+                    else:
+                        scene["retrieval_scope"] = "GLOBAL"
+                        scene["provenance"] = {"source": "global_field", "visible_for_validation": True}
+                evaluated.extend(global_visible)
+            candidates = self._candidates(parsed["query_frame"], evaluated, conn)
             for slot in parsed["query_scene"]["slots"]:
                 if slot["status"] == "empty":
                     slot["candidates"] = [candidate["id"] for candidate in candidates]
             result_type = self._result_type(evaluated, candidates)
             active_session_id = f"query-session-{uuid.uuid4().hex[:12]}"
-            previous = self._load(conn, hive_id)
+            previous = previous_state
             sessions = list(previous.get("query_sessions", []))
             if previous.get("query_session"):
                 previous["query_session"]["status"] = "ARCHIVED"
@@ -238,6 +258,16 @@ class QuerySceneService:
                 "status": "ACTIVE",
                 "started_at": utcnow(),
             }
+            context_stage = {
+                "id": "context-inheritance", "stage": "CONTEXT_INHERITANCE",
+                "status": parsed["query_frame"].get("context_resolution", {}).get("status", "NOT_APPLICABLE"),
+                "output": {
+                    "continuation_of": parsed["query_frame"].get("continuation_of"),
+                    "inherited_roles": deepcopy(parsed["query_frame"].get("inherited_roles", [])),
+                    "excluded_roles": deepcopy(parsed["query_frame"].get("excluded_roles", {})),
+                    "reconstructed_query": parsed["query_frame"].get("reconstructed_query"),
+                },
+            }
             state = {
                 "id": hive_id, "status": "ACTIVE", "energy": self._energy(evaluated),
                 "conversation_id": str(hive["conversation_id"] or "") if hive else "",
@@ -249,7 +279,13 @@ class QuerySceneService:
                 "query_sessions": sessions,
                 "created_for_surface": text, "dialogue_context": dialogue_context,
                 "context_resolution": parsed["query_frame"].get("context_resolution", {"status": "NOT_APPLICABLE"}),
-                "retrieval_scope": {"local": len(memory_scenes) - len(imported), "imported": len(imported), "global_limit": 8},
+                "retrieval_scope": {
+                    "local": local_scene_count,
+                    "global_visible": len(global_visible),
+                    "imported": len(imported),
+                    "global_search_limit": 64,
+                    "global_import_limit": 8,
+                },
                 **parsed, "memory_scenes": evaluated, "candidates": candidates,
                 "result_type": result_type,
                 "memory_sources": [
@@ -277,6 +313,12 @@ class QuerySceneService:
                                 "dialogue_context": deepcopy(dialogue_context),
                                 "context_resolution": deepcopy(parsed["query_frame"].get("context_resolution", {})),
                             },
+                        },
+                        context_stage,
+                        {
+                            "id": "query-scene-completion", "stage": "QUERY_SCENE_COMPLETION",
+                            "status": parsed["query_scene"].get("status", "RESOLVED"),
+                            "output": {"slots": deepcopy(parsed["query_scene"].get("slots", []))},
                         },
                         {
                             "id": "memory-scene-search", "stage": "MEMORY_SCENE_SEARCH",
@@ -441,7 +483,7 @@ class QuerySceneService:
             }
         return updated
 
-    def _apply_context(self, parsed: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_context(self, parsed: Dict[str, Any], context: Dict[str, Any], previous_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         frame = parsed["query_frame"]
         referential = frame.get("referential")
         resolutions: List[Dict[str, Any]] = []
@@ -485,23 +527,99 @@ class QuerySceneService:
             else:
                 unresolved.append({"referential": reference.get("normalized"), "role": role, "context_role": context_role})
         if frame.get("ellipsis_follow_up"):
-            reconstructed_roles: List[str] = []
-            for role in ("agent", "action"):
-                value = context.get(role)
-                if not value:
-                    unresolved.append({"referential": "ещё", "role": role, "context_role": role})
-                    continue
-                frame["roles"][role] = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": "ещё", "source": str(value.get("source") or "dialogue_context"), "index": None}
-                reconstructed_roles.append(role)
-                resolutions.append({"referential": "ещё", "role": role, "context_role": role, "source": str(value.get("source") or "dialogue_context"), "value": deepcopy(value)})
-            previous_object = context.get("object")
-            if previous_object:
-                frame["excluded_roles"] = {"object": [deepcopy(previous_object)]}
-            if len(reconstructed_roles) == 2:
-                action = frame["roles"]["action"].get("surface") or frame["roles"]["action"].get("lemma")
-                agent = frame["roles"]["agent"].get("surface") or frame["roles"]["agent"].get("lemma")
-                excluded = previous_object.get("surface") or previous_object.get("lemma") if previous_object else ""
-                frame["reconstructed_query"] = f"Что ещё {action} {agent}" + (f", кроме {excluded}" if excluded else "") + "?"
+            # The active session is still available before it is archived.  A
+            # previously archived session is retained as a fallback, so a
+            # continuation never relies solely on a mutable dialogue summary.
+            previous_state = previous_state or {}
+            session = previous_state.get("query_session") or (previous_state.get("query_sessions") or [None])[-1]
+            previous_frame = previous_state.get("query_frame") or {}
+            previous_roles = previous_frame.get("roles") or {}
+            requested = frame.get("requested_role")
+            inherited: List[str] = []
+            explicit_anchors = {
+                role: value
+                for role, value in frame.get("roles", {}).items()
+                if role != requested and value.get("status") == "fixed" and value.get("lemma")
+            }
+            current_exclusions = deepcopy(frame.get("excluded_roles") or {})
+            if not session or not previous_frame:
+                self_contained_except = (
+                    set(frame.get("continuation_markers", [])) == {"кроме"}
+                    and bool(current_exclusions.get(requested or ""))
+                    and bool(explicit_anchors)
+                )
+                if self_contained_except:
+                    resolutions.append({
+                        "referential": "кроме",
+                        "role": requested,
+                        "context_role": requested,
+                        "source": "query_explicit",
+                        "value": deepcopy(current_exclusions.get(requested or "", [])),
+                    })
+                else:
+                    unresolved.append({"referential": next(iter(frame.get("continuation_markers", [])), "ещё"), "role": requested or "context", "reason": "missing_previous_query_session"})
+            else:
+                frame["continuation_of"] = session.get("id")
+                for role, value in previous_roles.items():
+                    # Current explicit language wins.  The role being asked
+                    # for remains empty; it is not copied from the answer.
+                    current = frame.get("roles", {}).get(role, {})
+                    if role == requested or (current.get("status") == "fixed" and current.get("lemma")):
+                        continue
+                    if value.get("status") == "fixed" and value.get("lemma"):
+                        inherited_value = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": "continuation", "source": "previous_query", "index": None}
+                        frame["roles"][role] = inherited_value
+                        inherited.append(role)
+                        resolutions.append({"referential": "continuation", "role": role, "context_role": role, "source": "previous_query", "value": deepcopy(inherited_value)})
+                # Older lightweight context can fill a role absent from the
+                # frame, but it may not replace explicit or session evidence.
+                for role in DIALOGUE_CONTEXT_ROLES:
+                    if role == requested or role in frame["roles"]:
+                        continue
+                    value = context.get(role)
+                    if value and value.get("lemma"):
+                        frame["roles"][role] = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": "continuation", "source": "dialogue_context", "index": None}
+                        inherited.append(role)
+                if not inherited and not explicit_anchors and not current_exclusions.get(requested or ""):
+                    unresolved.append({"referential": next(iter(frame.get("continuation_markers", [])), "ещё"), "role": requested or "context", "reason": "no_inheritable_roles"})
+                frame["inherited_roles"] = inherited
+
+                # Exclusions are cumulative.  The previous selected answer is
+                # added even after its session has been archived, preventing a
+                # chain of "ещё" questions from returning to the same value.
+                excluded = deepcopy(previous_frame.get("excluded_roles") or {})
+                for role, values in current_exclusions.items():
+                    excluded.setdefault(role, []).extend(deepcopy(values))
+                answer = previous_state.get("answer") or {}
+                resolved = str(answer.get("resolved_value") or "").casefold().strip(". ")
+                previous_value = next((item for item in previous_state.get("candidates", []) if resolved and resolved in {str(item.get("lemma") or "").casefold(), str(item.get("surface") or "").casefold().strip(". ")}), None)
+                if previous_value and requested:
+                    excluded.setdefault(requested, []).append({
+                        "lemma": previous_value.get("lemma"), "surface": previous_value.get("surface"),
+                        "lexeme_cloud_id": previous_value.get("lexeme_cloud_id"), "normalized": previous_value.get("lemma"),
+                        "mode": "STABLE_CONCEPT", "origin_query_session_id": session.get("id"),
+                    })
+                elif requested and answer.get("resolved_value"):
+                    excluded.setdefault(requested, []).append({"lemma": answer["resolved_value"], "normalized": answer["resolved_value"], "surface": answer.get("surface_answer", ""), "mode": "EXACT_LEMMA", "origin_query_session_id": session.get("id")})
+                elif requested and previous_roles.get(requested, {}).get("lemma"):
+                    # A statement has no selected answer yet, but the stated
+                    # role is still the value meant by "ещё".
+                    excluded.setdefault(requested, []).append({**deepcopy(previous_roles[requested]), "mode": "STABLE_CONCEPT", "origin_query_session_id": session.get("id")})
+                for role, values in excluded.items():
+                    unique: Dict[str, Dict[str, Any]] = {}
+                    for value in values:
+                        key = str(value.get("lexeme_cloud_id") or value.get("lemma") or value.get("normalized") or value.get("surface") or "").casefold()
+                        if key:
+                            unique[key] = value
+                    excluded[role] = list(unique.values())
+                frame["excluded_roles"] = excluded
+            action = frame["roles"].get("action", {}).get("surface") or frame["roles"].get("action", {}).get("lemma")
+            agent = frame["roles"].get("agent", {}).get("surface") or frame["roles"].get("agent", {}).get("lemma")
+            pieces = [item for item in (action, agent) if item]
+            exclusions = [item.get("surface") or item.get("lemma") for item in frame.get("excluded_roles", {}).get(requested, [])]
+            marker = "ещё " if "ещё" in frame.get("continuation_markers", []) else ""
+            question = (frame.get("question_word") or "что").capitalize()
+            frame["reconstructed_query"] = " ".join([f"{question} {marker}".rstrip(), *pieces]) + (f", кроме {', '.join(item for item in exclusions if item)}" if exclusions else "") + "?"
         if unresolved:
             primary = unresolved[0]
             frame["context_resolution"] = {"status": "UNRESOLVED_CONTEXT", **primary, "references": resolutions + unresolved}
@@ -783,6 +901,10 @@ class QuerySceneService:
             if item["part_of_speech"] not in {"NOUN", "NPRO", "NUMR"}:
                 continue
             previous = tokens[item["index"] - 1]["normalized"] if item["index"] else ""
+            if previous == "кроме":
+                # The governed noun is an exclusion for the requested slot,
+                # not a positive scene anchor.
+                continue
             if item.get("entity_referential") and previous == "у":
                 continue
             case = item["grammatical_features"].get("case")
@@ -798,7 +920,16 @@ class QuerySceneService:
             elif previous in {"с", "со"} or case == "ablt":
                 role = "instrument"
             elif case == "nomn":
-                role = "object" if predicate_index is None and (requested_role == "source" or has_source) else "agent"
+                role = (
+                    "object"
+                    if (predicate_index is None and (requested_role == "source" or has_source))
+                    or (
+                        predicate_index is not None
+                        and item["index"] > predicate_index
+                        and "agent" in roles
+                    )
+                    else "agent"
+                )
             elif case in {"accs", "gent", "datv"} or predicate_index is not None:
                 role = "object"
             if role and role not in roles:
@@ -818,7 +949,13 @@ class QuerySceneService:
             "semantic_function": value.get("semantic_function"),
         }
 
-    def _memory_scenes(self, conn: Any, hive_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _memory_scenes(
+        self,
+        conn: Any,
+        hive_id: Optional[str] = None,
+        frame: Optional[Dict[str, Any]] = None,
+        limit: int = 64,
+    ) -> List[Dict[str, Any]]:
         if hive_id:
             rows = conn.execute(
                 """SELECT DISTINCT s.cloud_id, s.sentence_text, s.canonical_text
@@ -826,7 +963,45 @@ class QuerySceneService:
                 WHERE hc.hive_id=? ORDER BY s.updated_at DESC""", (hive_id,)
             ).fetchall()
         else:
-            rows = conn.execute("SELECT s.cloud_id, s.sentence_text, s.canonical_text FROM scenes s ORDER BY s.updated_at DESC").fetchall()
+            anchor_ids = sorted({
+                int(value["lexeme_cloud_id"])
+                for role, value in (frame or {}).get("roles", {}).items()
+                if role != (frame or {}).get("requested_role")
+                and value.get("status") == "fixed"
+                and value.get("lexeme_cloud_id")
+            })
+            search_ids = set(anchor_ids)
+            if anchor_ids:
+                marks = ",".join("?" for _ in anchor_ids)
+                related = conn.execute(
+                    f"""SELECT DISTINCT sm2.lexeme_cloud_id
+                    FROM semantic_memberships sm1
+                    JOIN concept_fog_registry cfr ON cfr.concept_cloud_id=sm1.concept_cloud_id
+                    JOIN semantic_memberships sm2 ON sm2.concept_cloud_id=sm1.concept_cloud_id
+                    WHERE sm1.lexeme_cloud_id IN ({marks})""",
+                    anchor_ids,
+                ).fetchall()
+                search_ids.update(int(row["lexeme_cloud_id"]) for row in related)
+            if search_ids:
+                ranked_ids = sorted(search_ids)
+                marks = ",".join("?" for _ in ranked_ids)
+                rows = conn.execute(
+                    f"""SELECT s.cloud_id, s.sentence_text, s.canonical_text
+                    FROM scenes s
+                    ORDER BY CASE WHEN EXISTS (
+                        SELECT 1 FROM scene_components sc
+                        WHERE sc.scene_cloud_id=s.cloud_id AND sc.lexeme_cloud_id IN ({marks})
+                    ) THEN 0 ELSE 1 END,
+                    s.updated_at DESC, s.cloud_id DESC
+                    LIMIT ?""",
+                    (*ranked_ids, max(1, int(limit))),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT s.cloud_id, s.sentence_text, s.canonical_text
+                    FROM scenes s ORDER BY s.updated_at DESC, s.cloud_id DESC LIMIT ?""",
+                    (max(1, int(limit)),),
+                ).fetchall()
         result = []
         for row in rows:
             components = []
@@ -869,42 +1044,63 @@ class QuerySceneService:
                 })
         return result
 
-    def _action_match(self, query: str, memory: str) -> float:
-        if not query or not memory:
-            return 0.0
-        if query == memory:
-            return 1.0
-        if memory in ACTION_NEIGHBORS.get(query, {}):
-            return ACTION_NEIGHBORS[query][memory]
-        if query in ACTION_NEIGHBORS.get(memory, {}):
-            return ACTION_NEIGHBORS[memory][query]
-        return COUNTERPART_ACTIONS.get(frozenset((query, memory)), 0.0)
-
-    def _semantic_membership(self, conn: Any, left: Dict[str, Any], right: Dict[str, Any]) -> float:
+    def _semantic_membership_detail(self, conn: Any, left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
         if not conn or not left.get("lexeme_cloud_id") or not right.get("lexeme_cloud_id"):
-            return 0.0
-        row = conn.execute(
-            """SELECT MAX(sm.weight * sm.confidence) AS score
-            FROM semantic_memberships sm
+            return {"score": 0.0, "role_match_score": 0.0, "match_type": "none", "concepts": [], "supporting_scenes": []}
+        rows = conn.execute(
+            """SELECT sm.concept_cloud_id, cfr.concept_space_id, cfr.evidence_type, cfr.stability, cfr.evidence_count
+            FROM semantic_memberships sm JOIN concept_fog_registry cfr ON cfr.concept_cloud_id=sm.concept_cloud_id
             WHERE sm.lexeme_cloud_id=? AND sm.concept_cloud_id IN
               (SELECT concept_cloud_id FROM semantic_memberships WHERE lexeme_cloud_id=?)""",
             (int(left["lexeme_cloud_id"]), int(right["lexeme_cloud_id"])),
-        ).fetchone()
-        return 0.85 if row and row["score"] is not None and float(row["score"]) > 0 else 0.0
+        ).fetchall()
+        if not rows:
+            return {"score": 0.0, "role_match_score": 0.0, "match_type": "none", "concepts": [], "supporting_scenes": []}
+        order = {"definition": (0.85, "stable_concept"), "contextual_similarity": (0.65, "related_concept"), "shared_category": (0.45, "shared_category")}
+        best = max(rows, key=lambda row: order.get(str(row["evidence_type"]), (0.0, "none"))[0])
+        score, match_type = order.get(str(best["evidence_type"]), (0.0, "none"))
+        if str(best["evidence_type"]) == "shared_category":
+            scenes = conn.execute(
+                """SELECT DISTINCT source_scene_cloud_id FROM semantic_evidence
+                WHERE evidence_type='definition'
+                  AND CAST(json_extract(evidence_json,'$.defined_lexeme_id') AS INTEGER) IN (?,?)
+                ORDER BY source_scene_cloud_id LIMIT 8""",
+                (int(left["lexeme_cloud_id"]), int(right["lexeme_cloud_id"])),
+            ).fetchall()
+        else:
+            scenes = conn.execute(
+                """SELECT DISTINCT source_scene_cloud_id FROM semantic_evidence
+                WHERE (left_lexeme_cloud_id IN (?,?) AND right_lexeme_cloud_id IN (?,?))
+                ORDER BY source_scene_cloud_id LIMIT 8""",
+                (int(left["lexeme_cloud_id"]), int(right["lexeme_cloud_id"]), int(left["lexeme_cloud_id"]), int(right["lexeme_cloud_id"])),
+            ).fetchall()
+        evidence_scene_ids = [f"scene-{row['source_scene_cloud_id']}" for row in scenes if row["source_scene_cloud_id"] is not None]
+        return {"score": score, "role_match_score": score, "match_type": match_type, "concepts": [int(best["concept_cloud_id"])], "concept_ids": [int(best["concept_cloud_id"])], "concept_space_ids": [int(best["concept_space_id"])], "supporting_scenes": evidence_scene_ids, "evidence_scene_ids": evidence_scene_ids}
+
+    def _semantic_membership(self, conn: Any, left: Dict[str, Any], right: Dict[str, Any]) -> float:
+        return float(self._semantic_membership_detail(conn, left, right)["score"])
+
+    def _value_match_detail(self, query: Dict[str, Any], memory: Dict[str, Any], conn: Any = None) -> Dict[str, Any]:
+        if not query or not memory:
+            return {"score": 0.0, "role_match_score": 0.0, "match_type": "none", "concepts": [], "supporting_scenes": []}
+        if query.get("normalized") and memory.get("normalized") and query["normalized"].casefold() == memory["normalized"].casefold():
+            return {"score": 1.0, "role_match_score": 1.0, "match_type": "exact_form", "concepts": [], "supporting_scenes": []}
+        if query.get("lemma") and memory.get("lemma") and query["lemma"].casefold() == memory["lemma"].casefold():
+            return {"score": .95, "role_match_score": .95, "match_type": "lemma", "concepts": [], "supporting_scenes": []}
+        return self._semantic_membership_detail(conn, query, memory)
 
     def _value_match(self, query: Dict[str, Any], memory: Dict[str, Any], conn: Any = None) -> float:
-        if not query or not memory:
-            return 0.0
-        if query.get("normalized") and memory.get("normalized") and query["normalized"].casefold() == memory["normalized"].casefold():
-            return 1.0
-        if query.get("lemma") and memory.get("lemma") and query["lemma"].casefold() == memory["lemma"].casefold():
-            return 0.95
-        return self._semantic_membership(conn, query, memory)
+        return float(self._value_match_detail(query, memory, conn)["score"])
 
     def _role_match(self, role: str, query: Dict[str, Any], memory_roles: Dict[str, Dict[str, Any]], conn: Any = None) -> float:
         aliases = ROLE_MATCH_ALIASES.get(role, {role})
         values = [memory_roles.get(name, {}) for name in aliases]
         return max((self._value_match(query, value, conn) for value in values), default=0.0)
+
+    def _role_match_detail(self, role: str, query: Dict[str, Any], memory_roles: Dict[str, Dict[str, Any]], conn: Any = None) -> Dict[str, Any]:
+        aliases = ROLE_MATCH_ALIASES.get(role, {role})
+        details = [self._value_match_detail(query, memory_roles.get(name, {}), conn) for name in aliases]
+        return max(details, key=lambda item: float(item["role_match_score"])) if details else {"score": 0.0, "role_match_score": 0.0, "match_type": "none", "concepts": [], "supporting_scenes": []}
 
     def _score_scene(self, frame: Dict[str, Any], scene: Dict[str, Any], conn: Any = None) -> Dict[str, Any]:
         query_roles, memory_roles = frame["roles"], scene["roles"]
@@ -914,15 +1110,12 @@ class QuerySceneService:
             if role != requested and value.get("status") == "fixed" and value.get("lemma")
         }
         role_matches: Dict[str, float] = {}
+        role_match_details: Dict[str, Dict[str, Any]] = {}
         for role, query_value in fixed_roles.items():
-            memory_value = memory_roles.get(role, {})
-            if role == "action":
-                role_matches[role] = max(
-                    self._value_match(query_value, memory_value, conn),
-                    self._action_match(query_value.get("lemma", ""), memory_value.get("lemma", "")) * .85,
-                )
-            else:
-                role_matches[role] = self._role_match(role, query_value, memory_roles, conn)
+            detail = self._role_match_detail(role, query_value, memory_roles, conn)
+            memory_value = next((memory_roles.get(name, {}) for name in ROLE_MATCH_ALIASES.get(role, {role}) if memory_roles.get(name)), {})
+            role_match_details[role] = {**detail, "required": True, "query_value": query_value.get("lemma"), "scene_value": memory_value.get("lemma")}
+            role_matches[role] = float(detail["role_match_score"])
         action_match = role_matches.get("action", 0.0)
         object_match = role_matches.get("object", 0.0)
         location_match = role_matches.get("location", 0.0)
@@ -955,12 +1148,32 @@ class QuerySceneService:
         total = semantic_total
         matched_roles = [role for role, score in role_matches.items() if score >= .5]
         mismatched_roles = [role for role, score in role_matches.items() if score < .5]
+        role_thresholds = {role: .45 for role in fixed_roles}
+        failed_anchors = [role for role, score in role_matches.items() if score < role_thresholds[role]]
+        query_modal = query_roles.get("modal", {})
+        memory_modal = memory_roles.get("modal", {})
+        modality_match = not query_modal or (bool(memory_modal) and query_modal.get("semantic_function") == memory_modal.get("semantic_function"))
+        temporal_match = not query_roles.get("time") or role_matches.get("time", 0.0) >= .45
+        polarity_match = not scene["negation"]
+        anchor_validation = {
+            "status": "PASSED" if requested_role_match and not failed_anchors and polarity_match and modality_match and temporal_match else "FAILED",
+            "required_roles": sorted(fixed_roles), "failed_roles": failed_anchors,
+            "role_thresholds": role_thresholds, "requested_role_present": bool(role_value),
+            "polarity_match": polarity_match, "modality_match": modality_match, "temporal_match": temporal_match,
+            "critical_roles_passed": all(role_matches.get(role, 0.0) >= .45 for role in ("agent", "action") if role in fixed_roles),
+            "supporting_roles_passed": all(role_matches.get(role, 0.0) >= .45 for role in fixed_roles if role not in {"agent", "action"}),
+        }
         if scene["negation"] and (anchor_match or requested_role_match):
             result_type = "CONFLICT_HIT"
         elif requested_role_match and fixed_roles and all(score >= .99 for score in role_matches.values()):
             result_type = "FULL_HIT"
         elif requested_role_match and anchor_match > 0:
             result_type = "ROLE_HIT"
+        elif requested_role_match:
+            # Broad retrieval may find a scene because it contains a value for
+            # the requested role.  Keep it visible for diagnostics even when
+            # its mandatory anchors fail; candidate admission remains strict.
+            result_type = "PARTIAL_HIT"
         elif anchor_match > 0:
             result_type = "PARTIAL_HIT"
         elif semantic_match:
@@ -971,16 +1184,38 @@ class QuerySceneService:
             "object_match": object_match, "action_match": action_match, "agent_match": agent_match,
             "location_match": location_match, "requested_role_match": requested_role_match,
             "anchor_match": anchor_match, "anchor_score": anchor_match, "role_matches": role_matches,
+            "role_match_details": role_match_details, "anchor_validation": anchor_validation,
             "grammar_match": grammar_match, "semantic_match": semantic_match, "structural_match": structural_match,
             "role_coverage": role_coverage, "requested_role_support": requested_role_match,
             "source_quality": source_quality, "semantic_total": semantic_total,
             "explanation_match": explanation_match, "context_conflict": context_conflict,
             "source_confidence": source_quality, "retention": 1.0, "total_score": total,
-        }, "matched_roles": matched_roles, "mismatched_roles": mismatched_roles,
-            "selection_reason": "совпали опорные роли: " + ", ".join(matched_roles) if matched_roles else "опорные роли не совпали",
+        }, "role_match_details": role_match_details, "anchor_validation": anchor_validation,
+            "matched_roles": matched_roles, "mismatched_roles": mismatched_roles,
+            "selection_reason": "сцена прошла проверку опорных ролей" if anchor_validation["status"] == "PASSED" else ("несовместимая полярность или модальность" if not polarity_match or not modality_match else ("не пройдены опорные роли: " + ", ".join(failed_anchors) if failed_anchors else "не найдена запрошенная роль")),
             "result_type": result_type}
 
-    def _candidates(self, frame: Dict[str, Any], scenes: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _stable_concept_ids(self, conn: Any, value: Dict[str, Any]) -> List[int]:
+        if not conn or not value.get("lexeme_cloud_id"):
+            return list(value.get("concept_ids") or [])
+        return [int(row["concept_cloud_id"]) for row in conn.execute(
+            """SELECT sm.concept_cloud_id FROM semantic_memberships sm
+            JOIN concept_fog_registry cfr ON cfr.concept_cloud_id=sm.concept_cloud_id
+            WHERE sm.lexeme_cloud_id=? AND cfr.evidence_type IN ('definition','contextual_similarity')""",
+            (int(value["lexeme_cloud_id"]),),
+        ).fetchall()]
+
+    def _is_excluded(self, conn: Any, value: Dict[str, Any], exclusions: Iterable[Dict[str, Any]]) -> bool:
+        value_concepts = set(self._stable_concept_ids(conn, value))
+        for excluded in exclusions:
+            mode = excluded.get("mode", "STABLE_CONCEPT")
+            if self._value_match(value, excluded, conn) >= .95:
+                return True
+            if mode == "STABLE_CONCEPT" and value_concepts & set(self._stable_concept_ids(conn, excluded)):
+                return True
+        return False
+
+    def _candidates(self, frame: Dict[str, Any], scenes: Iterable[Dict[str, Any]], conn: Any = None) -> List[Dict[str, Any]]:
         requested = frame.get("requested_role")
         if frame.get("context_resolution", {}).get("status") == "UNRESOLVED_CONTEXT":
             return []
@@ -988,16 +1223,25 @@ class QuerySceneService:
         if not requested:
             return []
         for scene in scenes:
-            if not scene["scores"].get("anchor_match"):
-                continue
             value = scene["roles"].get(requested)
             explanation = requested == "source" and not value and scene["scores"].get("explanation_match", 0.0) >= .85
             if not value and not explanation:
+                scene["candidate_status"] = "rejected"
+                scene["decision_reason"] = "requested_role_missing"
+                continue
+            validation = scene.get("anchor_validation") or scene["scores"].get("anchor_validation", {})
+            if not explanation and validation.get("status") != "PASSED":
+                scene["candidate_status"] = "rejected"
+                scene["decision_reason"] = "anchor_validation_failed"
                 continue
             excluded_values = frame.get("excluded_roles", {}).get(requested, [])
-            if not explanation and any(self._value_match(value, excluded) >= .9 for excluded in excluded_values):
+            excluded = not explanation and self._is_excluded(conn, value, excluded_values)
+            validation["exclusion_passed"] = not excluded
+            if excluded:
+                scene["candidate_status"] = "rejected"
+                scene["decision_reason"] = "excluded_by_previous_answer"
                 continue
-            if requested == "agent" and (value.get("part_of_speech") not in {"NOUN", "NPRO"} or value.get("lemma") in AGENT_BLACKLIST):
+            if requested == "agent" and value.get("part_of_speech") not in {"NOUN", "NPRO"}:
                 continue
             if explanation:
                 value = {"lemma": scene["id"], "surface": scene.get("source_text", ""), "part_of_speech": "SCENE", "grammatical_features": {}}
@@ -1017,6 +1261,8 @@ class QuerySceneService:
             candidate = {
                 "id": f"candidate-{lemma}-{uuid.uuid5(uuid.NAMESPACE_URL, lemma).hex[:8]}",
                 "concept_id": f"concept-{lemma}", "lemma": lemma, "surface": value["surface"],
+                "lexeme_cloud_id": value.get("lexeme_cloud_id"),
+                "word_form_cloud_id": value.get("word_form_cloud_id"),
                 "preposition": value.get("preposition", ""),
                 "grammatical_features": deepcopy(value.get("grammatical_features", {})),
                 "form_provenance": {
@@ -1051,6 +1297,8 @@ class QuerySceneService:
                     found[lemma] = candidate
             else:
                 found[lemma] = candidate
+            scene["candidate_status"] = "accepted"
+            scene["decision_reason"] = "all_required_anchors_matched"
         return sorted(found.values(), key=lambda item: (-item["scores"]["total"], item["lemma"]))
 
     @staticmethod
@@ -1384,6 +1632,8 @@ class QuerySceneService:
             "scene_id": scene.get("id"), "source_text": scene.get("source_text"),
             "result_type": scene.get("result_type"), "matched_roles": scene.get("matched_roles", []),
             "mismatched_roles": scene.get("mismatched_roles", []), "selection_reason": scene.get("selection_reason", ""),
+            "role_match_details": deepcopy(scene.get("role_match_details", scene.get("scores", {}).get("role_match_details", {}))),
+            "anchor_validation": deepcopy(scene.get("anchor_validation", scene.get("scores", {}).get("anchor_validation", {}))),
             "scores": deepcopy(scene.get("scores", {})),
         }
 
@@ -1429,7 +1679,8 @@ class QuerySceneService:
         cells = [dict(row) for row in conn.execute(
             """SELECT hc.*, c.canonical_name AS lemma, p.local_activation AS energy, p.x, p.y
             FROM hive_cells hc JOIN clouds c ON c.id=hc.dominant_cloud_id
-            JOIN cloud_placements p ON p.id=hc.hive_placement_id WHERE hc.hive_id=? ORDER BY hc.id""", (hive_id,)
+            JOIN cloud_placements p ON p.id=hc.hive_placement_id WHERE hc.hive_id=?
+            ORDER BY hc.retention DESC, hc.created_at ASC, hc.id ASC""", (hive_id,)
         )]
         for item in cells:
             item["metadata"] = decode(item.get("metadata_json"), {})
