@@ -16,6 +16,7 @@ import type {
   QuerySceneV2,
   HiveInspectionProjectionV2,
   HiveLocalResonanceV2,
+  HiveResonanceSessionV2,
   QueryMessageMode,
   DynamicsStateV2,
 } from '@/entities/hive/types';
@@ -23,7 +24,7 @@ import type {
 interface HiveStateResponse {
   hive: HiveV2;
   cells: HiveCellV2[];
-  messages: Array<Omit<HiveMessageV2, 'role'>>;
+  messages: HiveMessageV2[];
 }
 
 interface HiveQueryResponse extends HiveStateResponse {
@@ -51,6 +52,7 @@ interface HiveQueryResponse extends HiveStateResponse {
   active_query?: Record<string, unknown>;
   dynamics?: DynamicsStateV2;
   reasoning_trace?: Record<string, any>;
+  resonance_session?: HiveResonanceSessionV2;
 }
 
 interface ReasoningResponse {
@@ -124,6 +126,7 @@ export const useHiveStore = defineStore('hive', () => {
   const roleSearches = ref<Array<Record<string, unknown>>>([]);
   const localResonance = ref<HiveLocalResonanceV2 | null>(null);
   const resonanceProbes = ref<Array<Record<string, unknown>>>([]);
+  const resonanceSession = ref<HiveResonanceSessionV2 | null>(null);
   const activeQuery = ref<Record<string, unknown> | null>(null);
   const resolvedMode = ref<QueryMessageMode | null>(null);
   const hiveStructure = ref<Record<string, unknown> | null>(null);
@@ -140,7 +143,8 @@ export const useHiveStore = defineStore('hive', () => {
   const activeCellIds = computed(() => {
     return new Set(decision.value?.matches?.map(match => match.cell_id) || []);
   });
-  const workingCellCount = computed(() => cells.value.filter(cell => ['semantic_bridge', 'role_candidate', 'reasoning_support'].includes(cell.component_class)).length);
+  const workingCellCount = computed(() => Number((hive.value?.capacity as Record<string, number> | undefined)?.working_cells
+    ?? cells.value.filter(cell => cell.component_class !== 'memory_source').length));
   const memorySourceCount = computed(() => cells.value.filter(cell => cell.component_class === 'memory_source').length);
 
   async function run<T>(operation: () => Promise<T>): Promise<T> {
@@ -187,7 +191,8 @@ export const useHiveStore = defineStore('hive', () => {
     if (!hive.value) return null;
     try {
       const state = await api.get<any>(`/api/v2/hives/${hive.value.id}/query-state`);
-      if (!state?.query_scene) return null;
+      resonanceSession.value = state?.resonance_session || null;
+      if (!state?.query_scene) return state || null;
       queryFrame.value = state.query_frame;
       queryScene.value = state.query_scene;
       memoryScenes.value = state.memory_scenes || [];
@@ -289,6 +294,7 @@ export const useHiveStore = defineStore('hive', () => {
         { text, ...(mode ? { resolved_mode: mode } : {}), resonance_scope: resonanceScope }
       );
       applyState(result);
+      syncMessages(result.messages);
       decision.value = result.decision;
       metrics.value = result.metrics || null;
       externalSearch.value = result.external_search || null;
@@ -309,6 +315,7 @@ export const useHiveStore = defineStore('hive', () => {
       roleSearches.value = result.role_searches || [];
       localResonance.value = result.local_resonance || null;
       resonanceProbes.value = result.resonance_probes || [];
+      resonanceSession.value = result.resonance_session || null;
       activeQuery.value = result.active_query || null;
       dynamics.value = (result as any).dynamics || null;
       reasoningTrace.value = result.reasoning_trace || null;
@@ -319,21 +326,6 @@ export const useHiveStore = defineStore('hive', () => {
       if (result.resolved_mode !== 'LOCAL_RESONANCE' && queryScene.value && queryAnswer.value?.status !== 'RESOLVED') {
         await runReasoning();
       }
-      messages.value.push({
-        id: `assistant-${result.message_id}`,
-        hive_id: hive.value.id,
-        turn_index: messages.value.length + 1,
-        text: result.resolved_mode === 'LOCAL_RESONANCE'
-          ? localResonance.value?.status === 'COMPLETED_NO_MATCH'
-            ? `Локальный резонанс: «${text}» не найден в памяти улья. Во вкладке «Локальный резонанс» можно включить глобальную память.`
-            : `Локальный резонанс: форма «${text}» найдена; лемма «${localResonance.value?.matched_lexeme || '—'}».`
-          : queryAnswer.value?.full_surface_answer
-            || queryAnswer.value?.surface_answer
-            || 'Подходящий ответ в доступной памяти не найден.',
-        parsed_json: {},
-        created_at: new Date().toISOString(),
-        role: 'assistant',
-      });
     } catch (cause) {
       error.value = 'Не удалось обработать сообщение. Проверьте сервер.';
       messages.value = messages.value.filter(message => message.id !== userMessageId);
@@ -352,6 +344,7 @@ export const useHiveStore = defineStore('hive', () => {
         if (queryScene.value) {
           const result = await api.post<{ hive: any }>(`/api/v2/hives/${hive.value!.id}/vibrate/run`, { steps: reasoningSteps.value, config: {} });
           queryFrame.value = result.hive.query_frame;
+          syncMessages(result.hive.messages || []);
           queryScene.value = result.hive.query_scene;
           memoryScenes.value = result.hive.memory_scenes;
           queryCandidates.value = result.hive.candidates;
@@ -427,6 +420,20 @@ export const useHiveStore = defineStore('hive', () => {
       localResonance.value = state.local_resonance || localResonance.value;
       resonanceProbes.value = state.resonance_probes || resonanceProbes.value;
       hiveStructure.value = state.hive_structure || hiveStructure.value;
+      cacheState();
+      return result;
+    });
+  }
+
+  async function importResonanceConcept(conceptId: string) {
+    if (!hive.value || !resonanceSession.value) return null;
+    return run(async () => {
+      const result = await api.post<any>(`/api/v2/hives/${hive.value!.id}/import-concept`, {
+        session_id: resonanceSession.value!.id,
+        concept_id: conceptId,
+      });
+      resonanceSession.value = result.session || resonanceSession.value;
+      await hierarchy(false);
       cacheState();
       return result;
     });
@@ -531,11 +538,15 @@ export const useHiveStore = defineStore('hive', () => {
     hive.value = state.hive;
     cells.value = state.cells || [];
     if (!preserveMessages && state.messages?.length) {
-      messages.value = state.messages.map(message => ({ ...message, role: 'user' }));
+      syncMessages(state.messages);
     }
     if (selectedCell.value) {
       selectedCell.value = cells.value.find(c => c.id === selectedCell.value?.id) || null;
     }
+  }
+
+  function syncMessages(items: HiveMessageV2[]) {
+    messages.value = items.map(message => ({ ...message, role: message.role || 'user' }));
   }
 
   function cacheState() {
@@ -571,9 +582,8 @@ export const useHiveStore = defineStore('hive', () => {
     if (!id) return createHive();
     try {
       const state = await api.get<HiveStateResponse>(`/api/v2/hives/${id}`);
-      applyState(state, messages.value.length > 0);
+      applyState(state, false);
       await loadQueryState();
-      if (!messages.value.length && state.messages?.length) applyState(state, false);
     } catch {
       storage.removeActiveHive();
       return createHive();
@@ -613,6 +623,7 @@ export const useHiveStore = defineStore('hive', () => {
     roleSearches,
     localResonance,
     resonanceProbes,
+    resonanceSession,
     activeQuery,
     resolvedMode,
     hiveStructure,
@@ -640,6 +651,7 @@ export const useHiveStore = defineStore('hive', () => {
     query,
     rerunLocalResonance,
     importResonanceMatch,
+    importResonanceConcept,
     runReasoning,
     runReasoningStep,
     stopReasoning,

@@ -4,7 +4,7 @@
       <button v-for="tab in tabs" :key="tab.id" :class="{ active: mode === tab.id }" @click="setMode(tab.id)">{{ tab.label }}<i v-if="tab.id === 'answer' && visualization.answerBuild.reverseValidation.status === 'PASSED'">●</i></button>
     </nav>
 
-    <div class="mode-status"><span>{{ isProbe ? 'РЕЗОНАНСНЫЙ СИГНАЛ' : 'АКТИВНЫЙ ЗАПРОС' }}</span><b>{{ isProbe ? resonanceProbe?.input : (visualization.scene.activeQuery || '—') }}</b><em>{{ stateLabel }}</em></div>
+    <div class="mode-status"><span>{{ isProbe ? 'ЛЕКСИЧЕСКИЙ СИГНАЛ' : 'АКТИВНЫЙ ЗАПРОС' }}</span><b>{{ isProbe ? resonanceProbe?.input : (visualization.scene.activeQuery || '—') }}</b><em>{{ stateLabel }}</em></div>
 
     <div v-if="mode === 'scene'" class="scene-view">
       <div class="scene-flow">
@@ -74,10 +74,11 @@
     </div>
 
     <div v-else-if="mode === 'resonance'" class="resonance-view">
-      <div class="resonance-scope" role="group" aria-label="Область резонанса"><button :class="{ active: resonanceScope === 'LOCAL_ONLY' }" :disabled="hiveStore.loading" @click="setResonanceScope('LOCAL_ONLY')">Локальная память</button><button :class="{ active: resonanceScope === 'LOCAL_THEN_GLOBAL' }" :disabled="hiveStore.loading" @click="setResonanceScope('LOCAL_THEN_GLOBAL')">Глобальная память</button></div>
-      <section class="probe-route"><b>Сигнал: {{ resonanceProbe?.input || visualization.resonance.probe_text || '—' }}</b><span>Тип: {{ resonanceProbe?.probe_type || '—' }}</span><span>Стадия: {{ visualization.resonance.status }}</span><span>Точная форма: {{ resonanceProbe?.local_search?.matches?.length || resonanceProbe?.global_search?.matches?.length ? 'найдена' : 'не найдена' }}</span><span>Структура: {{ resonanceProbe?.signature?.possible_stems?.join(', ') || '—' }}</span></section>
-      <section v-if="resonanceMatches.length" class="resonance-results"><article v-for="match in resonanceMatches" :key="match.id" class="resonance-card"><div><strong>{{ match.value }}</strong><b>{{ Math.round(match.score * 100) }}%</b></div><span>тип: {{ match.type }}</span><span>совпадение: {{ match.match_type }}</span><span>общий фрагмент: {{ match.shared_structure }}</span><small>связанных сцен: {{ match.related_scenes?.length || 0 }}</small><button @click="hiveStore.importResonanceMatch(match.id)">Перенести в улей</button></article></section>
-      <small v-else>Локальных и глобальных откликов пока нет.</small>
+      <section class="probe-route"><b>ЛЕКСИЧЕСКОЕ СОПОСТАВЛЕНИЕ</b><span>Вход: {{ resonanceSession?.input || resonanceProbe?.input || visualization.resonance.probe_text || '—' }}</span><span>Кандидатов: {{ lexicalCandidates.length }}</span><span>Это только поиск начальных сигналов: он не является резонансом.</span></section>
+      <section v-if="lexicalCandidates.length" class="resonance-results"><article v-for="match in lexicalCandidates" :key="match.id || match.conceptId" class="resonance-card"><div><strong>{{ match.value }}</strong><b>{{ Math.round(Number(match.lexicalScore ?? match.score ?? 0) * 100) }}%</b></div><span>тип: {{ match.type }}</span><span>найдено по: {{ match.matchedBy || match.match_type }}</span><span>источник: {{ match.source || 'локальная память' }}</span><button v-if="resonanceSession && match.source === 'global'" @click="hiveStore.importResonanceConcept(String(match.conceptId))">Перенести в улей</button><button v-else-if="match.id && resonanceProbe" @click="hiveStore.importResonanceMatch(match.id)">Перенести в улей</button></article></section>
+      <section class="probe-route"><b>РЕЗОНАНС УЛЬЯ</b><span>Статус: {{ resonanceSession?.status || 'waiting' }}</span><span>Такт: {{ resonanceSession?.tick || 0 }} / {{ resonanceSession?.max_ticks || 0 }}</span><span>Температура: {{ Math.round(Number(resonanceSession?.temperature || 0) * 100) }}%</span><span>Энергия: {{ totalResonanceEnergy.toFixed(2) }} · стабильность: {{ Math.round(Number(resonanceSession?.stability || 0) * 100) }}%</span><span>Активных: {{ resonanceSession?.active_concepts?.length || 0 }} · подавленных: {{ resonanceSession?.suppressed_concepts?.length || 0 }}</span><span>Завершение: {{ resonanceSession?.completion_reason || '—' }}</span></section>
+      <section v-if="resonanceSession?.active_concepts?.length" class="resonance-results"><article v-for="concept in resonanceSession.active_concepts" :key="String(concept.concept_id)" class="resonance-card"><div><strong>{{ concept.label }}</strong><b>{{ Math.round(Number(concept.activation || 0) * 100) }}%</b></div><span>получено: {{ Number(concept.received_energy || 0).toFixed(3) }} · подавление: {{ Number(concept.suppression || 0).toFixed(3) }}</span><span>источники: {{ sourceSummary(concept.sources) }}</span></article></section>
+      <small v-else>Резонансная сессия ещё не запускалась или энергия затухла.</small>
     </div>
 
     <div v-else class="answer-view">
@@ -116,12 +117,15 @@ const showForces = ref(true);
 const showTrajectories = ref(true);
 const selectedDynamicsNode = ref<any>(null);
 const selected = ref<unknown>(null);
-const resonanceScope = ref<'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL'>('LOCAL_THEN_GLOBAL');
-const tabs = computed(() => isProbe.value ? [{ id: 'resonance' as HiveMode, label: 'Резонанс' }, { id: 'structure' as HiveMode, label: 'Структура' }, { id: 'dynamics' as HiveMode, label: 'Импорт в улей' }] : [{ id: 'scene' as HiveMode, label: 'Сцена' }, { id: 'resonance' as HiveMode, label: 'Локальный резонанс' }, { id: 'structure' as HiveMode, label: 'Устройство улья' }, { id: 'dynamics' as HiveMode, label: 'Динамика' }, { id: 'search' as HiveMode, label: 'Поиск пчёл' }, { id: 'answer' as HiveMode, label: 'Сборка ответа' }]);
+const tabs = computed(() => isProbe.value ? [{ id: 'resonance' as HiveMode, label: 'Лексическое сопоставление' }, { id: 'structure' as HiveMode, label: 'Структура' }, { id: 'dynamics' as HiveMode, label: 'Импорт в улей' }] : [{ id: 'scene' as HiveMode, label: 'Сцена' }, { id: 'resonance' as HiveMode, label: 'Резонанс улья' }, { id: 'structure' as HiveMode, label: 'Устройство улья' }, { id: 'dynamics' as HiveMode, label: 'Динамика' }, { id: 'search' as HiveMode, label: 'Поиск пчёл' }, { id: 'answer' as HiveMode, label: 'Сборка ответа' }]);
 const visualization = computed(() => mapVisualization({ queryScene: hiveStore.queryScene, queryFrame: hiveStore.queryFrame, activeQuery: hiveStore.activeQuery, queryCandidates: hiveStore.queryCandidates, memoryScenes: hiveStore.memoryScenes, memorySources: hiveStore.memorySources, unknownTokenSearches: hiveStore.unknownTokenSearches, localResonance: hiveStore.localResonance, resonanceProbes: hiveStore.resonanceProbes, hiveStructure: (hiveStore as any).hiveStructure, vibrationHistory: hiveStore.vibrationHistory, sentencePlan: hiveStore.sentencePlan, fullSentencePlan: hiveStore.fullSentencePlan, generationCandidates: hiveStore.generationCandidates, morphologyTrace: hiveStore.morphologyTrace, reverseValidation: hiveStore.reverseValidation, queryAnswer: hiveStore.queryAnswer }));
 const resonanceProbe = computed<any>(() => visualization.value.resonance.probe);
 const isProbe = computed(() => Boolean(resonanceProbe.value));
 const resonanceMatches = computed<any[]>(() => resonanceProbe.value?.local_results?.length ? resonanceProbe.value.local_results : resonanceProbe.value?.global_results || []);
+const resonanceSession = computed<any>(() => hiveStore.resonanceSession);
+const lexicalCandidates = computed<any[]>(() => resonanceSession.value?.lexical_candidates || resonanceMatches.value);
+const totalResonanceEnergy = computed(() => (resonanceSession.value?.active_concepts || []).reduce((sum: number, concept: any) => sum + Number(concept.activation || 0), 0));
+function sourceSummary(sources: any[] | undefined) { return sources?.map(source => `${source.label}: ${Math.round(Number(source.influence) * 100)}%`).join(', ') || 'начальная активация'; }
 const bridge = computed(() => visualization.value.scene.bridge);
 const sceneSlots = computed(() => visualization.value.scene.slots);
 const activePlan = computed(() => (answerTab.value === 'short' ? visualization.value.answerBuild.shortPlan : visualization.value.answerBuild.fullPlan) || { slots: [] });
@@ -191,7 +195,6 @@ function forcePath(node: any) { const x = node.position.x * 1000; const y = node
 function anchorX(anchor: any) { return Number(anchor.position?.x || .5) * 1000; }
 function anchorY(anchor: any) { return Number(anchor.position?.y || .5) * 620; }
 function setMode(nextMode: HiveMode) { mode.value = nextMode; if (nextMode === 'structure') void hiveStore.hierarchy(); }
-async function setResonanceScope(scope: 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL') { resonanceScope.value = scope; await hiveStore.rerunLocalResonance(scope); }
 function traceSummary(stage: any) {
   if (stage.stage === 'MEMORY_SCENE_SEARCH') return `${Array.isArray(stage.output) ? stage.output.filter((item: any) => item.result_type !== 'NO_HIT').length : 0} релевантных сцен`;
   if (stage.stage === 'CANDIDATE_RANKING') return `${Array.isArray(stage.output) ? stage.output.length : 0} кандидатов`;

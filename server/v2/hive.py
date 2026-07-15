@@ -14,7 +14,8 @@ from .query_scene import QuerySceneService
 from .unknown_search import UnknownTokenSearchService
 from .morphology import MorphologyService
 from .dynamics import HiveDynamicsService
-from .resonance import InputIntentClassifier, ResonanceProbeService, PROBE_INTENTS
+from .resonance import InputIntentClassifier, LexicalCandidateResolver, PROBE_INTENTS
+from .hive_resonance import HiveResonanceEngine
 
 
 class V2HiveService:
@@ -24,7 +25,9 @@ class V2HiveService:
         self.unknown_searches = UnknownTokenSearchService(self.service.repository)
         self.dynamics = HiveDynamicsService(self.service.repository)
         self.intent_classifier = InputIntentClassifier(self.service.repository)
-        self.resonance = ResonanceProbeService(self.service.repository)
+        self.lexical = LexicalCandidateResolver(self.service.repository)
+        self.resonance = self.lexical
+        self.hive_resonance = HiveResonanceEngine(self.service.repository)
 
     def create(self, max_cells: int = 24, conversation_id: str = "") -> Dict[str, Any]:
         return self.service.create_hive(max_cells, conversation_id)
@@ -42,12 +45,12 @@ class V2HiveService:
         intent = self.intent_classifier.classify(text)
         if intent in PROBE_INTENTS:
             scope = resonance_scope if resonance_scope in {"LOCAL_ONLY", "LOCAL_THEN_GLOBAL", "GLOBAL_ONLY"} else "LOCAL_THEN_GLOBAL"
-            probe = self.resonance.create(hive_id, text, scope)
-            self.resonance.run(hive_id, probe["id"])
-            state = self.resonance.state(hive_id)
+            probe = self.lexical.create(hive_id, text, scope)
+            self.lexical.run(hive_id, probe["id"])
+            state = self.lexical.state(hive_id)
             return {
                 "message_id": probe["message_id"], "intent": intent, "resolved_mode": intent,
-                "decision": {"decision": "LEXICAL_RESONANCE_PROBE", "external_search_required": False, "reasons": ["input classified before scene parsing"], "matches": []},
+                "decision": {"decision": "LEXICAL_CANDIDATE_PROBE", "external_search_required": False, "reasons": ["input classified before scene parsing"], "matches": []},
                 "metrics": {"external_search": False, "local_resonance": True, "working_cells": state["stats"]["working_cells"]},
                 "external_search": {"sources": [], "bees": [], "iterations": 0, "anchors": []}, "merge_results": [], "resonance_events": [],
                 **state,
@@ -57,7 +60,7 @@ class V2HiveService:
             allow_global = resonance_scope == "LOCAL_THEN_GLOBAL"
             working_hive = self.query_scenes.local_resonance(hive_id, text, allow_global=allow_global)
             working_hive["dynamics"] = self.dynamics.get(hive_id)
-            return {
+            result = {
                 "message_id": working_hive.get("query_session", {}).get("message_id", ""),
                 "resolved_mode": mode,
                 "decision": {"decision": "LOCAL_RESONANCE", "external_search_required": False, "reasons": ["single-token probe routed to active hive"], "matches": []},
@@ -69,6 +72,11 @@ class V2HiveService:
                 "resonance_scope": "LOCAL_THEN_GLOBAL" if allow_global else "LOCAL_ONLY",
                     **{key: working_hive.get(key) for key in ("query_frame", "query_scene", "memory_scenes", "candidates", "answer", "pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "dialogue_context", "context_resolution", "retrieval_scope", "semantic_total", "gravity", "decision_score")},
             }
+            session = self.hive_resonance.create(
+                hive_id, text, use_global_memory=resonance_scope != "LOCAL_ONLY",
+            )
+            result["resonance_session"] = self.hive_resonance.run(session["id"])
+            return result
         result = self.service.query(hive_id, text)
         parsed = self.query_scenes.parse(text)
         self.query_scenes.activate(hive_id, text, mode)
@@ -103,6 +111,10 @@ class V2HiveService:
         result["resolved_mode"] = mode
         result["hive"] = {**result.get("hive", {}), "intent": working_hive.get("hive", {}).get("intent"), "pipeline": working_hive.get("pipeline", {}), "capacity": working_hive.get("hive", {}).get("capacity", result.get("hive", {}).get("capacity")), "energy": working_hive.get("hive", {}).get("energy", result.get("hive", {}).get("energy")), "max_cells": result.get("hive", {}).get("max_cells", 24)}
         result["hive"].pop("total_energy", None)
+        session = self.hive_resonance.create(
+            hive_id, text, use_global_memory=resonance_scope != "LOCAL_ONLY",
+        )
+        result["resonance_session"] = self.hive_resonance.run(session["id"])
         return result
 
     def unknown_search_start(self, hive_id: str, surface: str, token_index: int, query_role: str = "", query_scene_id: str = "") -> Dict[str, Any]:
@@ -133,25 +145,38 @@ class V2HiveService:
         return self.query_scenes.parse(text)
 
     def classify_resonance(self, text: str) -> Dict[str, str]:
-        return self.resonance.classify(text)
+        return self.lexical.classify(text)
 
-    def resonance_create(self, hive_id: str, text: str, scope: str = "LOCAL_THEN_GLOBAL") -> Dict[str, Any]:
-        return self.resonance.create(hive_id, text, scope)
+    def lexical_candidates(self, hive_id: str, text: str, use_global_memory: bool = True) -> Dict[str, Any]:
+        return {"candidates": self.lexical.resolve(hive_id, text, use_global=use_global_memory)}
+
+    def resonance_create(self, hive_id: str, text: str, scope: str = "LOCAL_THEN_GLOBAL", **options: Any) -> Dict[str, Any]:
+        options.setdefault("use_global_memory", scope != "LOCAL_ONLY")
+        return self.hive_resonance.create(hive_id, text, **options)
 
     def resonance_step(self, hive_id: str, probe_id: str) -> Dict[str, Any]:
-        return self.resonance.step(hive_id, probe_id)
+        return self.hive_resonance.step(probe_id)
 
     def resonance_run(self, hive_id: str, probe_id: str) -> Dict[str, Any]:
-        return self.resonance.run(hive_id, probe_id)
+        return self.hive_resonance.run(probe_id)
 
     def resonance_get(self, hive_id: str, probe_id: str) -> Dict[str, Any]:
-        return self.resonance.get(hive_id, probe_id)
+        return self.hive_resonance.get_for_hive(hive_id, probe_id)
 
     def resonance_import(self, hive_id: str, probe_id: str, match_id: str, include_scenes: bool = False) -> Dict[str, Any]:
-        return self.resonance.import_match(hive_id, probe_id, match_id, include_scenes)
+        return self.lexical.import_match(hive_id, probe_id, match_id, include_scenes)
 
     def resonance_related_scenes(self, hive_id: str, probe_id: str, match_id: str = "") -> Dict[str, Any]:
-        return self.resonance.related_scenes(hive_id, probe_id, match_id)
+        return self.lexical.related_scenes(hive_id, probe_id, match_id)
+
+    def resonance_stop(self, session_id: str) -> Dict[str, Any]:
+        return self.hive_resonance.stop(session_id)
+
+    def resonance_snapshots(self, session_id: str) -> List[Dict[str, Any]]:
+        return self.hive_resonance.snapshots(session_id)
+
+    def import_resonance_concept(self, session_id: str, concept_id: str) -> Dict[str, Any]:
+        return self.hive_resonance.import_concept(session_id, concept_id)
 
     def activate_query(self, hive_id: str, text: str, resolved_mode: str = "NEW_QUERY") -> Dict[str, Any]:
         result = self.query_scenes.activate(hive_id, text, resolved_mode)
@@ -203,6 +228,10 @@ class V2HiveService:
             self.query_scenes.generate_resolved_answer(hive_id)
             state = self.query_scenes.get(hive_id)
             state["dynamics"] = dynamics
+        if state.get("answer", {}).get("status") == "RESOLVED":
+            self.query_scenes.persist_assistant_answer(hive_id)
+            state = self.query_scenes.get(hive_id)
+            state["dynamics"] = dynamics
         return {"status": state["vibration"]["status"], "steps_completed": completed, "winner": winner, "answer": state.get("answer"), "hive": state}
 
     def dynamics_state(self, hive_id: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -229,12 +258,18 @@ class V2HiveService:
     def query_working_state(self, hive_id: str) -> Dict[str, Any]:
         try:
             state = self.resonance.state(hive_id)
-            state["dynamics"] = self.dynamics.get(hive_id)
-            return state
         except KeyError:
-            pass
-        state = self.query_scenes.get(hive_id)
+            state = self.query_scenes.get(hive_id)
         state["dynamics"] = self.dynamics.get(hive_id)
+        with self.service.repository.transaction() as conn:
+            row = conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+            working = json.loads(row["metadata_json"] or "{}").get("query_working_memory", {}) if row else {}
+        session_id = working.get("active_resonance_session_id")
+        if session_id:
+            try:
+                state["resonance_session"] = self.hive_resonance.get_for_hive(hive_id, session_id)
+            except KeyError:
+                pass
         return state
 
     def generate(self, hive_id: str, sentence_plan: Dict[str, Any]) -> Dict[str, Any]:

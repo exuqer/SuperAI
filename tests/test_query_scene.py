@@ -1,3 +1,5 @@
+import uuid
+
 from server.v2.hive import V2HiveService
 from server.v2.analytics import HiveAnalyticsService
 from server.v2.training import TrainingPipelineV2
@@ -188,3 +190,69 @@ def test_referential_query_without_dialogue_context_does_not_guess_a_location():
     assert result["query_frame"]["context_resolution"]["status"] == "UNRESOLVED_CONTEXT"
     assert result["candidates"] == []
     assert service.vibration_run(hive_id, 3)["answer"]["status"] == "UNRESOLVED"
+
+
+def test_resolved_answer_is_kept_for_possessive_follow_up_and_source_ranking():
+    memory = (
+        "Кот ест рыбу. Рыбу продают на рынке. Рыбак приносит рыбу на рынок. "
+        "Рыбак ловит рыбу удочкой. Рыба из моря."
+    )
+    TrainingPipelineV2().train(memory)
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    service.query(hive_id, "Кто ест рыбу?")
+    first_answer = service.vibration_run(hive_id, 3)["answer"]
+    assert first_answer["full_surface_answer"] == "Кот ест рыбу."
+
+    follow_up = service.query(hive_id, "Откуда у него рыба?")
+
+    assert follow_up["resolved_mode"] == "FOLLOW_UP"
+    assert follow_up["query_frame"]["context_resolution"]["status"] == "RESOLVED"
+    assert follow_up["query_frame"]["context_resolution"]["role"] == "possessor"
+    assert follow_up["query_frame"]["context_resolution"]["value"]["lemma"] == "кот"
+    assert follow_up["query_frame"]["roles"]["object"]["lemma"] == "рыба"
+    assert all(value.get("lemma") != "он" for value in follow_up["query_frame"]["roles"].values())
+    assert follow_up["candidates"][0]["lemma"] == "море"
+    assert follow_up["candidates"][0]["scores"]["semantic_total"] > 0.9
+
+    final = service.vibration_run(hive_id, 3)
+    assert final["answer"]["surface_answer"] == "Из моря."
+    assert final["answer"]["full_surface_answer"] == "Рыба из моря."
+
+    current = HiveAnalyticsService().get(hive_id)["current"]
+    assert current["snapshot"]["candidates"][0]["scene_label"] == "Рыба из моря."
+
+
+def test_ellipsis_follow_up_uses_persistent_dialogue_fact_and_excludes_last_object():
+    TrainingPipelineV2().train("Лисичка ест ягоду. Лисичка ест грушу.")
+    service = V2HiveService()
+    hive_id = service.create(conversation_id=f"ellipsis-dialogue-memory-{uuid.uuid4()}")["hive"]["id"]
+
+    service.query(hive_id, "Лисичка ест ягоду.")
+    follow_up = service.query(hive_id, "А ещё что?")
+
+    assert follow_up["resolved_mode"] == "FOLLOW_UP"
+    assert follow_up["query_frame"]["reconstructed_query"] == "Что ещё ест Лисичка, кроме ягоду?"
+    assert follow_up["query_frame"]["roles"]["agent"]["lemma"] == "лисичка"
+    assert follow_up["query_frame"]["roles"]["action"]["lemma"] == "есть"
+    assert follow_up["query_frame"]["excluded_roles"]["object"][0]["lemma"] == "ягода"
+    assert [candidate["lemma"] for candidate in follow_up["candidates"]] == ["груша"]
+    assert any(scene["provenance"]["source"] == "dialogue_memory" for scene in follow_up["memory_scenes"])
+
+
+def test_resolved_assistant_turn_is_persisted_once_with_session_memory():
+    TrainingPipelineV2().train("Белочка ест орех.")
+    service = V2HiveService()
+    conversation_id = f"assistant-turn-dialogue-memory-{uuid.uuid4()}"
+    hive_id = service.create(conversation_id=conversation_id)["hive"]["id"]
+
+    service.query(hive_id, "Что ест белочка?")
+    service.vibration_run(hive_id, 3)
+    service.vibration_run(hive_id, 3)
+
+    restored = service.create(conversation_id=conversation_id)
+    messages = restored["messages"]
+    assert restored["hive"]["id"] == hive_id
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[-1]["text"] == "Белочка ест орех."

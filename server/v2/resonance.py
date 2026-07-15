@@ -60,8 +60,8 @@ class InputIntentClassifier:
         return "SCENE_STATEMENT" if known else "STRUCTURAL_PROBE"
 
 
-class ResonanceProbeService:
-    """Runs indexed local/global resonance without creating scene objects."""
+class LexicalCandidateResolver:
+    """Finds lexical candidates; it does not perform hive resonance."""
 
     def __init__(self, repository: Optional[V2Repository] = None) -> None:
         self.repository = repository or V2Repository()
@@ -69,6 +69,60 @@ class ResonanceProbeService:
 
     def classify(self, text: str) -> Dict[str, str]:
         return {"intent": self.classifier.classify(text)}
+
+    def resolve(self, hive_id: str, text: str, *, use_global: bool = True,
+                max_candidates: int = 12) -> List[Dict[str, Any]]:
+        """Resolve lexical candidates for every meaningful token in *text*.
+
+        The result deliberately contains lexical scores only.  Dynamic activation,
+        competition, and stabilization belong to ``HiveResonanceEngine``.
+        """
+        tokens = list(dict.fromkeys(re.findall(r"[\wё-]+", text.casefold(), flags=re.IGNORECASE)))
+        candidates: Dict[int, Dict[str, Any]] = {}
+        with self.repository.transaction() as conn:
+            hive = conn.execute("SELECT id FROM hives WHERE id=?", (hive_id,)).fetchone()
+            if not hive:
+                raise KeyError(hive_id)
+            for token in tokens:
+                lemma = self.classifier.morphology.parse(token).lemma.casefold()
+                probe = {"surface": token, "signature": self._signature(token)}
+                lemma_probe = {"surface": lemma, "signature": self._signature(lemma)}
+                local: List[Dict[str, Any]] = []
+                for level, level_probe in (("EXACT", probe), ("LEMMA", lemma_probe), ("STRUCTURE", probe)):
+                    found = self._search(conn, hive_id, level_probe, "LOCAL", level)
+                    if found:
+                        local = found
+                        break
+                found = local
+                scope = "LOCAL"
+                if not found and use_global:
+                    for level, level_probe in (("EXACT", probe), ("LEMMA", lemma_probe), ("STRUCTURE", probe)):
+                        found = self._search(conn, hive_id, level_probe, "GLOBAL", level)
+                        if found:
+                            scope = "GLOBAL"
+                            break
+                for item in found:
+                    matched_by = {
+                        "EXACT_FORM_MATCH": "exact",
+                        "EXACT_LEXEME_MATCH": "lemma",
+                        "STEM_MATCH": "root",
+                    }.get(item["match_type"], "structure")
+                    score = float(item["score"])
+                    result = {
+                        **item,
+                        "conceptId": str(item["candidate_cloud_id"]),
+                        "matchedBy": matched_by,
+                        "lexicalScore": score,
+                        "lexical_score": score,
+                        "source": scope.casefold(),
+                        "temporary": scope == "GLOBAL",
+                        "input_token": token,
+                    }
+                    cloud_id = int(item["candidate_cloud_id"])
+                    existing = candidates.get(cloud_id)
+                    if existing is None or score > float(existing["lexicalScore"]):
+                        candidates[cloud_id] = result
+        return sorted(candidates.values(), key=lambda item: (-float(item["lexicalScore"]), item["value"]))[:max_candidates]
 
     def create(self, hive_id: str, text: str, scope: str = "LOCAL_THEN_GLOBAL") -> Dict[str, Any]:
         scope = scope if scope in SCOPES else "LOCAL_THEN_GLOBAL"
@@ -401,3 +455,8 @@ class ResonanceProbeService:
     def _cells(conn: Any, hive_id: str) -> List[Dict[str, Any]]:
         rows = conn.execute("""SELECT hc.*, c.canonical_name AS label FROM hive_cells hc JOIN clouds c ON c.id=hc.dominant_cloud_id WHERE hc.hive_id=? ORDER BY hc.created_at""", (hive_id,)).fetchall()
         return [dict(row) for row in rows]
+
+
+# Compatibility for integrations that still use the former service name.  New
+# code must use LexicalCandidateResolver to make its lexical-only role explicit.
+ResonanceProbeService = LexicalCandidateResolver

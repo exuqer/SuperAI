@@ -44,6 +44,21 @@ function response() {
   };
 }
 
+function currentOnlyResponse() {
+  const currentSnapshot = snapshot(1);
+  return {
+    hive_id: 'hive-analytics',
+    runs: [],
+    current: {
+      query_components: [{ term: 'кто', role: 'subject', word_form_cloud_id: null }],
+      snapshot: currentSnapshot,
+      updated_at: '2026-07-14T16:01:00Z',
+    },
+    primary: null,
+    comparison: null,
+  };
+}
+
 describe('AnalyticsPage', () => {
   afterEach(() => {
     localStorage.clear();
@@ -69,5 +84,25 @@ describe('AnalyticsPage', () => {
     await wrapper.find('.candidate-row').trigger('click');
     await flushPromises();
     expect(router.currentRoute.value).toMatchObject({ name: 'chat', query: { cell: 'cell-fisher' } });
+  });
+
+  it('shows detailed live metrics when no vibration run exists', async () => {
+    storage.setActiveHive('hive-analytics');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(currentOnlyResponse()), { status: 200 })));
+    const router = createRouter({ history: createMemoryHistory(), routes: [
+      { path: '/', name: 'chat', component: { template: '<div />' } },
+      { path: '/analytics', name: 'analytics', component: AnalyticsPage },
+    ] });
+    await router.push('/analytics');
+    await router.isReady();
+    const wrapper = mount(AnalyticsPage, { global: { plugins: [router] } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Подробная статистика текущего запроса');
+    expect(wrapper.text()).toContain('Активация');
+    expect(wrapper.text()).toContain('Энергия');
+    expect(wrapper.text()).toContain('Текущая картина');
+    expect(wrapper.findAll('.candidate-row')).toHaveLength(1);
+    expect(wrapper.findAll('.node-row')).toHaveLength(1);
   });
 });

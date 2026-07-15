@@ -18,8 +18,10 @@ from server.modules.hive.api.dto import (
     HiveGenerateRequest,
     HiveValidateSurfaceRequest,
     HiveVibrationRequest,
+    LexicalCandidatesRequest,
     ResonanceRequest,
     ResonanceImportRequest,
+    ResonanceConceptImportRequest,
 )
 
 router = APIRouter(prefix="/api/v2/hives", tags=["hives"])
@@ -31,7 +33,7 @@ def get_hive_service() -> HiveService:
 
 
 @router.post("/resonance/classify")
-async def classify_resonance(request: ResonanceRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+async def classify_resonance(request: HiveQueryRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
     return service.classify_resonance(request.text)
 
 
@@ -205,14 +207,24 @@ async def query_hive(
     return service.query(hive_id, request.text, request.resolved_mode, request.resonance_scope)
 
 
+@router.post("/{hive_id}/lexical-candidates")
+async def lexical_candidates(hive_id: str, request: LexicalCandidatesRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.lexical_candidates(hive_id, request.text, request.use_global_memory)
+
+
 @router.post("/{hive_id}/resonance")
-async def create_resonance_probe(hive_id: str, request: ResonanceRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
-    return {"probe": service.resonance_create(hive_id, request.text, request.scope)}
+async def create_resonance_session(hive_id: str, request: ResonanceRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    session = service.resonance_create(
+        hive_id, request.input, temperature=request.temperature, max_ticks=request.max_ticks,
+        use_global_memory=request.use_global_memory, save_snapshots=request.save_snapshots,
+        config=request.config,
+    )
+    return {"session_id": session["id"], "status": session["status"], "session": session}
 
 
 @router.post("/{hive_id}/resonance/{probe_id}/step")
 async def step_resonance_probe(hive_id: str, probe_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
-    return {"probe": service.resonance_step(hive_id, probe_id)}
+    return service.resonance_step(hive_id, probe_id)
 
 
 @router.post("/{hive_id}/resonance/{probe_id}/run")
@@ -220,14 +232,29 @@ async def run_resonance_probe(hive_id: str, probe_id: str, service: HiveService 
     return service.resonance_run(hive_id, probe_id)
 
 
+@router.post("/{hive_id}/resonance/{probe_id}/stop")
+async def stop_resonance_session(hive_id: str, probe_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.resonance_stop(probe_id)
+
+
+@router.get("/{hive_id}/resonance/{probe_id}/snapshots")
+async def resonance_snapshots(hive_id: str, probe_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"snapshots": service.resonance_snapshots(probe_id)}
+
+
 @router.get("/{hive_id}/resonance/{probe_id}")
 async def get_resonance_probe(hive_id: str, probe_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
-    return {"probe": service.resonance_get(hive_id, probe_id)}
+    return service.resonance_get(hive_id, probe_id)
 
 
 @router.post("/{hive_id}/resonance/{probe_id}/import")
 async def import_resonance_match(hive_id: str, probe_id: str, request: ResonanceImportRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
     return service.resonance_import(hive_id, probe_id, request.match_id, request.include_scenes)
+
+
+@router.post("/{hive_id}/import-concept")
+async def import_resonance_concept(hive_id: str, request: ResonanceConceptImportRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.import_resonance_concept(request.session_id, request.concept_id)
 
 
 @router.get("/{hive_id}/resonance/{probe_id}/related-scenes")

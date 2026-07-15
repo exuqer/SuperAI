@@ -162,6 +162,23 @@ export interface HiveLocalResonanceV2 {
   matched_lexeme?: string | null;
 }
 
+export interface HiveResonanceSessionV2 {
+  id: string;
+  input: string;
+  status: string;
+  tick: number;
+  max_ticks: number;
+  temperature: number;
+  energy_budget: number;
+  stability: number;
+  completion_reason?: string | null;
+  lexical_candidates: Array<Record<string, unknown>>;
+  active_concepts: Array<Record<string, unknown>>;
+  suppressed_concepts: Array<Record<string, unknown>>;
+  dominant_configuration?: Record<string, unknown> | null;
+  snapshots: Array<Record<string, unknown>>;
+}
+
 export interface QueryWorkingHiveV2 {
   query_frame: Record<string, unknown>;
   query_scene: QuerySceneV2;

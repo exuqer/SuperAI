@@ -52,6 +52,14 @@ class ResonanceRunRequest(BaseModel):
     scope: str = "LOCAL_THEN_GLOBAL"
 
 
+class ResonanceSessionRequest(BaseModel):
+    input: str = Field(min_length=1)
+    temperature: float = Field(default=.25, ge=0, le=1)
+    max_ticks: int = Field(default=8, ge=1, le=64)
+    use_global_memory: bool = True
+    save_snapshots: bool = True
+
+
 class ResonanceImportRequest(BaseModel):
     match_id: str = Field(min_length=1)
     include_scenes: bool = False
@@ -60,6 +68,31 @@ class ResonanceImportRequest(BaseModel):
 @router.post("/resonance/classify")
 async def classify_resonance(request: TextRequest) -> dict[str, Any]:
     return service().classify_resonance(request.text)
+
+
+@router.get("/resonance/{session_id}")
+async def get_resonance_session(session_id: str) -> dict[str, Any]:
+    return service().facade.hive_resonance.get(session_id)
+
+
+@router.post("/resonance/{session_id}/tick")
+async def tick_resonance_session(session_id: str) -> dict[str, Any]:
+    return service().facade.hive_resonance.step(session_id)
+
+
+@router.post("/resonance/{session_id}/run")
+async def run_resonance_session(session_id: str) -> dict[str, Any]:
+    return service().facade.hive_resonance.run(session_id)
+
+
+@router.get("/resonance/{session_id}/snapshots")
+async def resonance_session_snapshots(session_id: str) -> dict[str, Any]:
+    return {"snapshots": service().resonance_snapshots(session_id)}
+
+
+@router.post("/resonance/{session_id}/stop")
+async def stop_resonance_session(session_id: str) -> dict[str, Any]:
+    return service().resonance_stop(session_id)
 
 
 @router.post("/hive/{hive_id}/resonance")

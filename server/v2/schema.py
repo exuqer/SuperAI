@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _needs_constraint_migration(conn: sqlite3.Connection, table: str, expected_value: str) -> bool:
@@ -460,12 +460,31 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             hive_id TEXT NOT NULL,
             turn_index INTEGER NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user', 'assistant')),
             text TEXT NOT NULL,
             parsed_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             FOREIGN KEY (hive_id) REFERENCES hives(id) ON DELETE CASCADE,
             UNIQUE(hive_id, turn_index)
         );
+
+        CREATE TABLE IF NOT EXISTS hive_dialogue_scenes (
+            id TEXT PRIMARY KEY,
+            hive_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            source_role TEXT NOT NULL CHECK(source_role IN ('user', 'assistant')),
+            source_text TEXT NOT NULL,
+            roles_json TEXT NOT NULL DEFAULT '{}',
+            activation REAL NOT NULL DEFAULT 1 CHECK(activation BETWEEN 0 AND 1),
+            retention REAL NOT NULL DEFAULT 1 CHECK(retention BETWEEN 0 AND 1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (hive_id) REFERENCES hives(id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id) REFERENCES hive_messages(id) ON DELETE CASCADE,
+            UNIQUE(hive_id, message_id)
+        );
+        CREATE INDEX IF NOT EXISTS hive_dialogue_scenes_hive_idx
+            ON hive_dialogue_scenes(hive_id, updated_at DESC);
 
         CREATE TABLE IF NOT EXISTS hive_query_decisions (
             id TEXT PRIMARY KEY,
@@ -527,6 +546,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     for column, declaration in hive_columns.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE hives ADD COLUMN {column} {declaration}")
+    message_columns = {row[1] for row in conn.execute("PRAGMA table_info(hive_messages)")}
+    if "role" not in message_columns:
+        conn.execute("ALTER TABLE hive_messages ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
     component_columns = {
         "role": "TEXT NOT NULL DEFAULT 'context'",
         "effective_strength": "REAL NOT NULL DEFAULT 0 CHECK (effective_strength BETWEEN 0 AND 1)",

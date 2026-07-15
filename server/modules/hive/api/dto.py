@@ -33,13 +33,27 @@ class HiveVibrationRequest(BaseModel):
 
 
 class ResonanceRequest(BaseModel):
+    input: str = Field(..., min_length=1)
+    temperature: float = Field(default=.25, ge=0, le=1)
+    max_ticks: int = Field(default=8, ge=1, le=64)
+    use_global_memory: bool = True
+    save_snapshots: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class LexicalCandidatesRequest(BaseModel):
     text: str = Field(..., min_length=1)
-    scope: str = Field(default="LOCAL_THEN_GLOBAL", pattern="^(LOCAL_ONLY|LOCAL_THEN_GLOBAL|GLOBAL_ONLY)$")
+    use_global_memory: bool = True
 
 
 class ResonanceImportRequest(BaseModel):
     match_id: str = Field(..., min_length=1)
     include_scenes: bool = False
+
+
+class ResonanceConceptImportRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    concept_id: str = Field(..., min_length=1)
 
 
 class HiveExpandRequest(BaseModel):

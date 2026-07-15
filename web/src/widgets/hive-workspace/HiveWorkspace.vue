@@ -30,6 +30,16 @@
       <strong>{{ hiveStore.queryAnswer?.surface_answer || 'Заполнение пустой роли…' }}</strong>
       <span>{{ hiveStore.queryCandidates.length }} кандидатов · шаг {{ hiveStore.vibrationHistory.length }}</span>
     </section>
+    <section v-if="hiveStore.queryFrame" class="query-summary dialogue-context">
+      <span class="tiny-label">ТЕКУЩИЙ ЗАПРОС</span>
+      <strong>{{ queryText }}</strong>
+      <template v-if="reconstructedQuery">
+        <span class="tiny-label">ВОССТАНОВЛЕННЫЙ СМЫСЛ</span>
+        <strong>{{ reconstructedQuery }}</strong>
+      </template>
+      <span class="tiny-label">КОНТЕКСТ ИЗ ПАМЯТИ</span>
+      <span>{{ contextTerms.length ? contextTerms.join(' · ') : '—' }}</span>
+    </section>
     <section v-if="hiveStore.dynamics" class="dynamics-summary">
       <div class="reasoning-head"><span class="tiny-label">ДИНАМИКА УЛЬЯ</span><span>{{ hiveStore.dynamics.status }}</span></div>
       <div class="dynamics-grid">
@@ -148,6 +158,12 @@ const reasoningStatus = computed(() =>
   hiveStore.reasoningLoading ? 'выполняется'
     : hiveStore.runResult?.stop_reason || 'готов'
 );
+const queryText = computed(() => String(hiveStore.queryFrame?.source_text || hiveStore.goalText || '—'));
+const reconstructedQuery = computed(() => String(hiveStore.queryFrame?.reconstructed_query || ''));
+const contextTerms = computed(() => {
+  const context = (hiveStore.queryFrame?.dialogue_context || {}) as Record<string, Record<string, unknown>>;
+  return ['agent', 'action', 'object'].map(role => String(context[role]?.surface || context[role]?.lemma || '')).filter(Boolean);
+});
 </script>
 
 <style scoped lang="scss">

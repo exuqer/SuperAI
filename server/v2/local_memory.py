@@ -112,7 +112,7 @@ class V2LocalMemoryService:
             if conversation_id:
                 existing = conn.execute("SELECT id FROM hives WHERE conversation_id = ? AND status = 'ACTIVE' LIMIT 1", (conversation_id,)).fetchone()
                 if existing:
-                    return self.get_hive(str(existing["id"]))
+                    return self.get_hive(str(existing["id"]), conn)
             global_space, _ = self.repository.get_or_create_space(conn, "global_field", seed=1337)
             random_seed = int(uuid.uuid4().hex[:8], 16)
             hive_space = self.repository.create_space(
@@ -462,7 +462,7 @@ class V2LocalMemoryService:
                 "components": [item.to_dict() for item in parsed["components"]],
             }
             conn.execute(
-                "INSERT INTO hive_messages(id, hive_id, turn_index, text, parsed_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO hive_messages(id, hive_id, turn_index, role, text, parsed_json, created_at) VALUES (?, ?, ?, 'user', ?, ?, ?)",
                 (message_id, hive_id, turn, text, encode(parsed_json), now),
             )
             for match in decision["matches"]:
@@ -559,7 +559,7 @@ class V2LocalMemoryService:
                     (cell["id"],),
                 )]
             messages = [dict(row) for row in connection.execute(
-                "SELECT id, turn_index, text, created_at FROM hive_messages WHERE hive_id = ? ORDER BY turn_index",
+                "SELECT id, turn_index, role, text, parsed_json, created_at FROM hive_messages WHERE hive_id = ? ORDER BY turn_index",
                 (hive_id,),
             )]
             return {"hive": dict(hive), "cells": cells, "messages": messages}

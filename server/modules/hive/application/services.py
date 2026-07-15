@@ -135,9 +135,12 @@ class HiveService:
     def classify_resonance(self, text: str) -> dict[str, str]:
         return self.facade.classify_resonance(text)
 
-    def resonance_create(self, hive_id: str, text: str, scope: str = "LOCAL_THEN_GLOBAL") -> dict[str, Any]:
+    def lexical_candidates(self, hive_id: str, text: str, use_global_memory: bool = True) -> dict[str, Any]:
+        return self.facade.lexical_candidates(hive_id, text, use_global_memory)
+
+    def resonance_create(self, hive_id: str, text: str, scope: str = "LOCAL_THEN_GLOBAL", **options: Any) -> dict[str, Any]:
         try:
-            return self.facade.resonance_create(hive_id, text, scope)
+            return self.facade.resonance_create(hive_id, text, scope, **options)
         except KeyError as error:
             raise NotFoundError("hive", hive_id) from error
 
@@ -155,6 +158,15 @@ class HiveService:
 
     def resonance_related_scenes(self, hive_id: str, probe_id: str, match_id: str = "") -> dict[str, Any]:
         return self.facade.resonance_related_scenes(hive_id, probe_id, match_id)
+
+    def resonance_stop(self, session_id: str) -> dict[str, Any]:
+        return self.facade.resonance_stop(session_id)
+
+    def resonance_snapshots(self, session_id: str) -> list[dict[str, Any]]:
+        return self.facade.resonance_snapshots(session_id)
+
+    def import_resonance_concept(self, session_id: str, concept_id: str) -> dict[str, Any]:
+        return self.facade.import_resonance_concept(session_id, concept_id)
 
     def activate_query(self, hive_id: str, text: str, resolved_mode: str = "NEW_QUERY") -> dict[str, Any]:
         try:

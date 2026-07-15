@@ -47,21 +47,74 @@
 
       <p v-if="error" class="error">{{ error }}</p>
       <p v-else-if="loading" class="loading">Загрузка истории запусков…</p>
-      <section v-else-if="!primary && liveSnapshot" class="panel current-only">
+      <section v-else-if="!primary && liveSnapshot" class="current-details">
         <div class="section-head">
           <div>
             <div class="kicker">ТЕКУЩИЙ ЗАПРОС</div>
-            <h2>{{ hasAnswerRole ? 'Кандидаты ответа без встряски' : 'Сцены текущего запроса' }}</h2>
+            <h2>Подробная статистика текущего запроса</h2>
           </div>
           <InfoTooltip label="Живой срез" text="Этот анализ строится сразу после обработки сообщения по текущей памяти улья. Вибрация для него не запускается." />
         </div>
-        <div v-if="!liveSnapshot.candidates.length" class="empty-inline">Для текущего запроса нет сцен-кандидатов.</div>
-        <div v-else class="candidate-list">
-          <button v-for="(candidate, index) in liveSnapshot.candidates" :key="candidate.placement_id" class="candidate-row" :class="{ best: index === 0 && candidate.eviction_status === 'ACTIVE' }" :disabled="!candidate.cell_id" @click="openCell(candidate.cell_id)">
-            <span class="rank">#{{ index + 1 }}</span>
-            <span class="candidate-main"><b>{{ candidate.answer || candidate.scene_label }}</b><small>{{ candidate.scene_label }}</small><small>{{ candidate.explanation }}</small></span>
-            <span class="candidate-score"><b>{{ formatPercent(candidate.candidate_score) }}</b><small>{{ statusLabel(candidate.eviction_status) }}</small></span>
-          </button>
+        <p class="current-details-note">История шагов появится после запуска встряски. Ниже — живые показатели и текущий ранг кандидатов.</p>
+
+        <div class="summary-grid current-summary" aria-label="Сводка текущего запроса">
+          <article class="summary-card">
+            <span>Компоненты запроса</span>
+            <strong>{{ liveQueryLabel }}</strong>
+            <small>{{ liveSnapshot.candidates.length }} кандидатов · шаг {{ liveSnapshot.step }}</small>
+          </article>
+          <article class="summary-card">
+            <span class="metric-label">Активация <InfoTooltip label="Активация" text="Насколько сильно узлы вовлечены в текущее состояние. Это активность, а не оценка правильности ответа." /></span>
+            <strong>{{ formatPercent(liveSnapshot.metrics.average_activation) }}</strong>
+            <small>{{ liveSnapshot.metrics.active_nodes }} активных · {{ liveSnapshot.metrics.weakening_nodes }} ослабевающих</small>
+          </article>
+          <article class="summary-card">
+            <span class="metric-label">Энергия <InfoTooltip label="Энергия" text="Локальный ресурс узлов. Поддержка запросом увеличивает его, а затухание физики уменьшает." /></span>
+            <strong>{{ formatNumber(liveSnapshot.metrics.total_energy) }}</strong>
+            <small>{{ liveSnapshot.nodes.length }} узлов · {{ liveSnapshot.metrics.evicted_nodes }} вытесненных</small>
+          </article>
+          <article class="summary-card">
+            <span class="metric-label">Удержание <InfoTooltip label="Удержание" text="Насколько прочно ячейка остаётся в рабочей памяти. Низкое удержание переводит узел к ослаблению и затем к вытеснению." /></span>
+            <strong>{{ formatPercent(liveSnapshot.metrics.average_retention) }}</strong>
+            <small>температура {{ formatNumber(liveSnapshot.temperature, 3) }}</small>
+          </article>
+        </div>
+
+        <div class="two-columns current-columns">
+          <article class="panel candidates-panel">
+            <div class="section-head">
+              <div>
+                <div class="kicker">ОБЪЯСНИМЫЙ РАНГ</div>
+                <h2>{{ hasAnswerRole ? 'Кандидаты ответа' : 'Кандидаты-сцены' }}</h2>
+              </div>
+              <span class="note">Это внутренний ранг, не вероятность.</span>
+            </div>
+            <div v-if="!liveSnapshot.candidates.length" class="empty-inline">Для текущего запроса нет сцен-кандидатов.</div>
+            <div v-else class="candidate-list">
+              <button v-for="(candidate, index) in liveSnapshot.candidates" :key="candidate.placement_id" class="candidate-row" :class="{ best: index === 0 && candidate.eviction_status === 'ACTIVE' }" :disabled="!candidate.cell_id" @click="openCell(candidate.cell_id)">
+                <span class="rank">#{{ index + 1 }}</span>
+                <span class="candidate-main"><b>{{ candidate.answer || candidate.scene_label }}</b><small>{{ candidate.scene_label }}</small><small>{{ candidate.explanation }}</small></span>
+                <span class="candidate-score"><b>{{ formatPercent(candidate.candidate_score) }}</b><small>{{ statusLabel(candidate.eviction_status) }}</small></span>
+              </button>
+            </div>
+          </article>
+
+          <article class="panel nodes-panel">
+            <div class="section-head">
+              <div>
+                <div class="kicker">УЗЛЫ ТЕКУЩЕГО ЗАПРОСА</div>
+                <h2>Текущая картина</h2>
+              </div>
+              <span class="note">Выберите узел для перехода к улью.</span>
+            </div>
+            <div v-if="!liveSnapshot.nodes.length" class="empty-inline">В текущем запросе нет активных узлов.</div>
+            <div v-else class="node-list">
+              <button v-for="node in liveSnapshot.nodes" :key="node.placement_id" class="node-row" :disabled="!node.cell_id" @click="openCell(node.cell_id)">
+                <span><b>{{ node.label }}</b><small>{{ node.node_type }} · {{ statusLabel(node.eviction_status) }}</small></span>
+                <span><small>акт. {{ formatPercent(node.local_activation) }}</small><small>удерж. {{ formatPercent(node.retention) }}</small></span>
+              </button>
+            </div>
+          </article>
         </div>
       </section>
       <section v-else-if="!primary" class="empty-state compact">
@@ -246,6 +299,10 @@ const hasAnswerRole = computed(() => {
   const components = isLiveView.value ? data.value?.current?.query_components : primary.value?.query_components;
   return components?.some(item => item.word_form_cloud_id === null) || false;
 });
+const liveQueryLabel = computed(() => data.value?.current?.query_components
+  .map(item => item.term)
+  .filter(Boolean)
+  .join(' ') || '—');
 
 const metrics = [
   { key: 'average_activation', label: 'Активация', info: 'Насколько сильно узлы вовлечены в текущее состояние. Это активность, а не оценка правильности ответа.', value: (snapshot: HiveAnalyticsSnapshotV2 | null) => formatPercent(snapshot?.metrics.average_activation || 0) },
@@ -392,7 +449,9 @@ select { min-width: 180px; border: 1px solid rgba(160,190,225,.22); border-radiu
 .empty-state h2 { color: #e7f0ff; }
 .empty-state p { margin: 10px 0 18px; line-height: 1.55; }
 .empty-state.compact { margin: 40px auto; }
-.current-only { max-width: 900px; margin: 34px auto; }
+.current-details { max-width: 1500px; margin: 34px auto 14px; }
+.current-details-note { margin: 10px 0 14px; color: #8496b5; font-size: 12px; }
+.current-summary, .current-columns { max-width: none; }
 .empty-inline { padding: 22px 0; color: #8496b5; text-align: center; }
 @media (max-width: 1100px) { .summary-grid, .charts, .comparison-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .trend:nth-child(3) { border-left: 0; padding-left: 0; } }
 @media (max-width: 760px) { .analytics-page { padding: 16px; } .topbar { align-items: flex-start; } h1 { font-size: 23px; } .summary-grid, .two-columns, .charts, .comparison-grid { grid-template-columns: 1fr; } .trend, .trend:nth-child(3), .comparison-grid > div { border-left: 0; padding-left: 0; } .section-head { align-items: flex-start; flex-direction: column; } .step-control select { width: 100%; } }

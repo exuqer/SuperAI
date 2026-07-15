@@ -44,6 +44,8 @@ ROLE_LABELS = {
 }
 REFERENTIALS = {"там": "location", "туда": "destination", "оттуда": "source"}
 CONTEXT_ROLES = ("location", "destination", "source")
+DIALOGUE_CONTEXT_ROLES = ("agent", "action", "modal", "object", *CONTEXT_ROLES, "time", "instrument")
+ENTITY_REFERENCE_LEMMAS = {"он", "она", "оно", "они"}
 AGENT_BLACKLIST = {"рынок", "рыба", "кухня", "сеть", "мяч", "птица"}
 ROLE_MATCH_ALIASES = {"location": {"location", "destination"}, "destination": {"location", "destination"}}
 
@@ -84,6 +86,7 @@ class QuerySceneService:
         for index, token in enumerate(tokens):
             morph = self.morphology.parse(token.normalized)
             normalized = token.normalized.casefold()
+            entity_referential = morph.pos_tag == "NPRO" and morph.lemma in ENTITY_REFERENCE_LEMMAS
             is_question = normalized in QUESTION_ROLES and not question_word and intent["intent"] not in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}
             if is_question:
                 question_word = normalized
@@ -95,6 +98,7 @@ class QuerySceneService:
                 "lemma": morph.lemma, "part_of_speech": morph.pos_tag,
                 "grammatical_features": morph.features,
                 "component_type": "question_operator" if is_question else "context_reference" if normalized in REFERENTIALS else "query_modal" if modal else "query_token",
+                "entity_referential": entity_referential,
                 "role": "modal" if modal else None,
                 "semantic_function": modal["semantic_function"] if modal else None,
                 "expected_role": QUESTION_ROLES.get(normalized) if is_question else None,
@@ -108,6 +112,12 @@ class QuerySceneService:
                 if row:
                     item.update({"lexeme": row["lemma"] or item["lemma"], "word_form_cloud_id": int(row["word_form_cloud_id"]), "lexeme_cloud_id": int(row["lexeme_cloud_id"]) if row["lexeme_cloud_id"] else None, "resolution_state": TokenResolutionState.EXACT_FORM_MATCH.value})
         requested_role = QUESTION_ROLES.get(question_word, "")
+        normalized_tokens = [item["normalized"] for item in items]
+        ellipsis_follow_up = (
+            question_word == "что"
+            and "ещё" in normalized_tokens
+            and set(normalized_tokens).issubset({"а", "ещё", "что"})
+        )
         if intent["intent"] in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}:
             requested_role = ""
         roles = self._roles(items, requested_role=QUESTION_ROLES.get(question_word, ""))
@@ -140,6 +150,13 @@ class QuerySceneService:
             "roles": roles,
             "tokens": items,
             "referential": referential,
+            "ellipsis_follow_up": ellipsis_follow_up,
+            "excluded_roles": {},
+            "reconstructed_query": None,
+            "entity_referentials": [
+                {"index": item["index"], "surface": item["surface"], "normalized": item["normalized"], "lemma": item["lemma"]}
+                for item in items if item.get("entity_referential")
+            ],
         }
         slots = []
         for role in SUPPORTED_ROLES:
@@ -175,18 +192,20 @@ class QuerySceneService:
             parsed = self._resolve_token_states(conn, parsed)
             mode = mode if mode in MESSAGE_MODES else "NEW_QUERY"
             context_resolution = parsed["query_frame"].get("context_resolution", {})
-            if parsed["query_frame"].get("referential") and context_resolution.get("source") != "query_explicit":
+            if (parsed["query_frame"].get("referential") and context_resolution.get("source") != "query_explicit") or parsed["query_frame"].get("ellipsis_follow_up"):
                 mode = "FOLLOW_UP"
-            dialogue_context = self._update_context(dialogue_context, parsed)
+            dialogue_context = self._update_context(dialogue_context, parsed, mode)
             self._clear_temporary_query_objects(conn, hive_id)
             if parsed["intent_classification"]["intent"] in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}:
                 return self._activate_conversational(conn, hive_id, text, mode, hive, message, parsed, dialogue_context)
+            if parsed["query_frame"].get("query_type") == "statement" and message:
+                self._store_dialogue_scene(conn, hive_id, str(message["id"]), "user", text, parsed["query_frame"])
             memory_scenes = self._memory_scenes(conn, hive_id)
             evaluated = [self._score_scene(parsed["query_frame"], scene, conn) for scene in memory_scenes]
             imported = []
             local_candidates = self._candidates(parsed["query_frame"], evaluated)
             local_semantic = max((float(item["scores"].get("semantic_total", 0.0)) for item in local_candidates), default=0.0)
-            if parsed["query_frame"].get("requested_role") and local_semantic < .65 and parsed["query_frame"].get("context_resolution", {}).get("status") != "UNRESOLVED_CONTEXT":
+            if parsed["query_frame"].get("requested_role") and (local_semantic < .65 or not local_candidates) and parsed["query_frame"].get("context_resolution", {}).get("status") != "UNRESOLVED_CONTEXT":
                 global_scenes = self._memory_scenes(conn, None)
                 local_ids = {scene["id"] for scene in memory_scenes}
                 global_evaluated = [self._score_scene(parsed["query_frame"], scene, conn) for scene in global_scenes if scene["id"] not in local_ids]
@@ -370,9 +389,13 @@ class QuerySceneService:
                 raise ValueError(f"unsupported resolved_mode: {resolved_mode}")
             return resolved_mode
         parsed = self.parse(text).get("query_frame", {})
+        if parsed.get("ellipsis_follow_up"):
+            return "FOLLOW_UP"
         referential = parsed.get("referential")
         explicit = (parsed.get("roles") or {}).get(REFERENTIALS.get(str(referential), ""), {})
         if referential and not (explicit.get("status") == "fixed" and explicit.get("normalized") != referential):
+            return "FOLLOW_UP"
+        if parsed.get("entity_referentials"):
             return "FOLLOW_UP"
         return "NEW_QUERY"
 
@@ -380,7 +403,7 @@ class QuerySceneService:
         row = conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
         metadata = decode(row["metadata_json"], {}) if row else {}
         context = metadata.get("dialogue_context") or {}
-        return {role: deepcopy(context.get(role)) for role in CONTEXT_ROLES if context.get(role)}
+        return {role: deepcopy(context.get(role)) for role in DIALOGUE_CONTEXT_ROLES if context.get(role)}
 
     @staticmethod
     def _context_value(value: Dict[str, Any], role: str, source: str = "explicit") -> Dict[str, Any]:
@@ -398,15 +421,18 @@ class QuerySceneService:
             "updated_at": utcnow(),
         }
 
-    def _update_context(self, context: Dict[str, Any], parsed: Dict[str, Any]) -> Dict[str, Any]:
-        updated = deepcopy(context)
-        roles = parsed.get("query_frame", {}).get("roles", {})
+    def _update_context(self, context: Dict[str, Any], parsed: Dict[str, Any], mode: str = "NEW_QUERY") -> Dict[str, Any]:
+        frame = parsed.get("query_frame", {})
+        has_reference = bool(frame.get("referential") or frame.get("entity_referentials") or frame.get("ellipsis_follow_up"))
+        updated = deepcopy(context) if mode in {"FOLLOW_UP", "CORRECTION"} or has_reference else {}
+        roles = frame.get("roles", {})
         explicit_spatial = []
-        for role in CONTEXT_ROLES:
+        for role in DIALOGUE_CONTEXT_ROLES:
             value = roles.get(role)
             if value and value.get("status") == "fixed" and value.get("lemma") and value.get("source") != "dialogue_context":
                 updated[role] = self._context_value(value, role)
-                explicit_spatial.append((int(value.get("index", -1)), role, value))
+                if role in CONTEXT_ROLES:
+                    explicit_spatial.append((int(value.get("index", -1)), role, value))
         if explicit_spatial:
             _, original_role, latest = max(explicit_spatial, key=lambda item: item[0])
             updated["location"] = {
@@ -418,29 +444,124 @@ class QuerySceneService:
     def _apply_context(self, parsed: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         frame = parsed["query_frame"]
         referential = frame.get("referential")
-        if not referential:
-            frame["dialogue_context"] = deepcopy(context)
-            frame["context_resolution"] = {"status": "NOT_APPLICABLE", "referential": None}
-            return parsed
-        role = REFERENTIALS[referential]
-        value = context.get(role)
-        if not value:
-            explicit = frame.get("roles", {}).get(role)
-            if explicit and explicit.get("status") == "fixed" and explicit.get("lemma"):
-                value = self._context_value(explicit, role, source="query_explicit")
-        if value:
-            resolution_source = str(value.get("source") or "dialogue_context")
-            reference_token = next((token for token in frame.get("tokens", []) if token.get("normalized") == referential), {})
-            resolved = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": referential, "source": resolution_source, "index": reference_token.get("index")}
-            frame["roles"][role] = resolved
-            for token in frame.get("tokens", []):
-                if token.get("normalized") == referential:
-                    token.update({"role": role, "component_type": "context_reference", "context_resolution": "RESOLVED", "resolution_state": TokenResolutionState.LEXEME_MATCH.value, "lemma": value.get("lemma"), "semantic_lemma": value.get("lemma")})
-            frame["context_resolution"] = {"status": "RESOLVED", "referential": referential, "role": role, "source": resolution_source, "value": deepcopy(value)}
+        resolutions: List[Dict[str, Any]] = []
+        unresolved: List[Dict[str, Any]] = []
+        if referential:
+            role = REFERENTIALS[referential]
+            value = context.get(role)
+            if not value:
+                explicit = frame.get("roles", {}).get(role)
+                if explicit and explicit.get("status") == "fixed" and explicit.get("lemma"):
+                    value = self._context_value(explicit, role, source="query_explicit")
+            if value:
+                resolution_source = str(value.get("source") or "dialogue_context")
+                reference_token = next((token for token in frame.get("tokens", []) if token.get("normalized") == referential), {})
+                resolved = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": referential, "source": resolution_source, "index": reference_token.get("index")}
+                frame["roles"][role] = resolved
+                reference_token.update({"role": role, "component_type": "context_reference", "context_resolution": "RESOLVED", "resolution_state": TokenResolutionState.LEXEME_MATCH.value, "lemma": value.get("lemma"), "semantic_lemma": value.get("lemma")})
+                resolutions.append({"referential": referential, "role": role, "context_role": role, "source": resolution_source, "value": deepcopy(value)})
+            else:
+                unresolved.append({"referential": referential, "role": role})
+        tokens = frame.get("tokens", [])
+        for reference in frame.get("entity_referentials", []):
+            index = int(reference.get("index", -1))
+            token = next((item for item in tokens if int(item.get("index", -2)) == index), {})
+            previous = tokens[index - 1].get("normalized") if 0 < index < len(tokens) else ""
+            existing_role = next((name for name, item in frame.get("roles", {}).items() if item.get("index") == index), None)
+            if previous == "у":
+                role, context_role, injected_role = "possessor", "agent", None
+            else:
+                role = existing_role or ("agent" if token.get("grammatical_features", {}).get("case") == "nomn" else "object")
+                context_role = role
+                injected_role = role
+            value = context.get(context_role)
+            if value:
+                resolution_source = str(value.get("source") or "dialogue_context")
+                resolved = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": reference.get("normalized"), "source": resolution_source, "index": index}
+                if injected_role:
+                    frame["roles"][injected_role] = resolved
+                token.update({"role": role, "component_type": "context_reference", "context_resolution": "RESOLVED", "resolution_state": TokenResolutionState.LEXEME_MATCH.value, "lemma": value.get("lemma"), "semantic_lemma": value.get("lemma")})
+                resolutions.append({"referential": reference.get("normalized"), "role": role, "context_role": context_role, "source": resolution_source, "value": deepcopy(value)})
+            else:
+                unresolved.append({"referential": reference.get("normalized"), "role": role, "context_role": context_role})
+        if frame.get("ellipsis_follow_up"):
+            reconstructed_roles: List[str] = []
+            for role in ("agent", "action"):
+                value = context.get(role)
+                if not value:
+                    unresolved.append({"referential": "ещё", "role": role, "context_role": role})
+                    continue
+                frame["roles"][role] = {**deepcopy(value), "status": "fixed", "component_type": "context_reference", "context_reference": "ещё", "source": str(value.get("source") or "dialogue_context"), "index": None}
+                reconstructed_roles.append(role)
+                resolutions.append({"referential": "ещё", "role": role, "context_role": role, "source": str(value.get("source") or "dialogue_context"), "value": deepcopy(value)})
+            previous_object = context.get("object")
+            if previous_object:
+                frame["excluded_roles"] = {"object": [deepcopy(previous_object)]}
+            if len(reconstructed_roles) == 2:
+                action = frame["roles"]["action"].get("surface") or frame["roles"]["action"].get("lemma")
+                agent = frame["roles"]["agent"].get("surface") or frame["roles"]["agent"].get("lemma")
+                excluded = previous_object.get("surface") or previous_object.get("lemma") if previous_object else ""
+                frame["reconstructed_query"] = f"Что ещё {action} {agent}" + (f", кроме {excluded}" if excluded else "") + "?"
+        if unresolved:
+            primary = unresolved[0]
+            frame["context_resolution"] = {"status": "UNRESOLVED_CONTEXT", **primary, "references": resolutions + unresolved}
+        elif resolutions:
+            primary = resolutions[0]
+            frame["context_resolution"] = {"status": "RESOLVED", **primary, "references": resolutions}
         else:
-            frame["context_resolution"] = {"status": "UNRESOLVED_CONTEXT", "referential": referential, "role": role}
+            frame["context_resolution"] = {"status": "NOT_APPLICABLE", "referential": None}
         frame["dialogue_context"] = deepcopy(context)
         return parsed
+
+    def _store_dialogue_scene(
+        self, conn: Any, hive_id: str, message_id: str, source_role: str, source_text: str, frame: Dict[str, Any],
+    ) -> None:
+        roles = {
+            role: deepcopy(value)
+            for role, value in frame.get("roles", {}).items()
+            if value.get("status") == "fixed" and value.get("lemma")
+        }
+        if not roles:
+            return
+        now = utcnow()
+        conn.execute(
+            "UPDATE hive_dialogue_scenes SET activation=MAX(.05, activation * .9), retention=MAX(.1, retention * .98), updated_at=? WHERE hive_id=?",
+            (now, hive_id),
+        )
+        conn.execute(
+            """INSERT INTO hive_dialogue_scenes
+            (id,hive_id,message_id,source_role,source_text,roles_json,activation,retention,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,1,1,?,?)
+            ON CONFLICT(hive_id,message_id) DO UPDATE SET source_text=excluded.source_text,
+            roles_json=excluded.roles_json, activation=1, retention=1, updated_at=excluded.updated_at""",
+            (f"dialogue-scene-{uuid.uuid4().hex[:12]}", hive_id, message_id, source_role, source_text, encode(roles), now, now),
+        )
+
+    def persist_assistant_answer(self, hive_id: str) -> Optional[Dict[str, Any]]:
+        state = self.get(hive_id)
+        answer = state.get("answer") or {}
+        query_session = state.get("query_session") or {}
+        text = str(answer.get("full_surface_answer") or answer.get("surface_answer") or "").strip()
+        if answer.get("status") != "RESOLVED" or not text or not query_session.get("id"):
+            return None
+        parsed = self.parse(text)
+        with self.repository.transaction() as conn:
+            existing = conn.execute(
+                "SELECT id FROM hive_messages WHERE hive_id=? AND role='assistant' AND parsed_json LIKE ? LIMIT 1",
+                (hive_id, f'%\"query_session_id\":\"{query_session["id"]}\"%'),
+            ).fetchone()
+            if existing:
+                return dict(existing)
+            turn = int(conn.execute("SELECT COALESCE(MAX(turn_index), 0) FROM hive_messages WHERE hive_id=?", (hive_id,)).fetchone()[0]) + 1
+            message_id = f"message-{uuid.uuid4().hex[:12]}"
+            now = utcnow()
+            conn.execute(
+                "INSERT INTO hive_messages(id,hive_id,turn_index,role,text,parsed_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                (message_id, hive_id, turn, "assistant", text, encode({"query_session_id": query_session["id"], "source": "resolved_answer"}), now),
+            )
+            if parsed.get("query_frame", {}).get("query_type") == "statement":
+                self._store_dialogue_scene(conn, hive_id, message_id, "assistant", text, parsed["query_frame"])
+            return {"id": message_id, "turn_index": turn, "role": "assistant", "text": text, "created_at": now}
 
     def _import_scene(self, conn: Any, hive_id: str, scene: Dict[str, Any], text: str, parsed: Dict[str, Any], hive: Any, message: Any) -> None:
         from .unknown_search import UnknownTokenSearchService
@@ -662,6 +783,8 @@ class QuerySceneService:
             if item["part_of_speech"] not in {"NOUN", "NPRO", "NUMR"}:
                 continue
             previous = tokens[item["index"] - 1]["normalized"] if item["index"] else ""
+            if item.get("entity_referential") and previous == "у":
+                continue
             case = item["grammatical_features"].get("case")
             role = ""
             if previous in {"в", "во", "на"} and case in {"loct", None}:
@@ -730,6 +853,20 @@ class QuerySceneService:
                 "retrieval_scope": "LOCAL" if hive_id else "GLOBAL",
                 "provenance": {"source": "hive_cells" if hive_id else "global_field"},
             })
+        if hive_id:
+            dialogue_rows = conn.execute(
+                "SELECT * FROM hive_dialogue_scenes WHERE hive_id=? ORDER BY activation DESC, updated_at DESC",
+                (hive_id,),
+            ).fetchall()
+            for row in dialogue_rows:
+                roles = decode(row["roles_json"], {})
+                result.append({
+                    "id": str(row["id"]), "cloud_id": None, "type": "dialogue_memory_scene",
+                    "source_text": str(row["source_text"]), "roles": roles, "negation": False,
+                    "retrieval_scope": "DIALOGUE", "activation": float(row["activation"]),
+                    "retention": float(row["retention"]),
+                    "provenance": {"source": "dialogue_memory", "message_id": str(row["message_id"]), "role": str(row["source_role"])},
+                })
         return result
 
     def _action_match(self, query: str, memory: str) -> float:
@@ -806,7 +943,7 @@ class QuerySceneService:
         structural_match = clamp(anchor_match * .65 + requested_role_match * .35)
         semantic_match = clamp(anchor_match * .75 + max(role_matches.values(), default=0.0) * .25)
         role_coverage = sum(score >= .5 for score in role_matches.values()) / max(1, len(fixed_roles))
-        source_quality = .9 if scene.get("retrieval_scope") == "LOCAL" else .75 if scene.get("retrieval_scope") in {"IMPORTED", "GLOBAL"} else .8
+        source_quality = .95 if scene.get("retrieval_scope") == "DIALOGUE" else .9 if scene.get("retrieval_scope") == "LOCAL" else .75 if scene.get("retrieval_scope") in {"IMPORTED", "GLOBAL"} else .8
         context_conflict = any(
             role in CONTEXT_ROLES and query_value.get("lemma")
             and any(memory_roles.get(alias) for alias in ROLE_MATCH_ALIASES.get(role, {role}))
@@ -856,6 +993,9 @@ class QuerySceneService:
             value = scene["roles"].get(requested)
             explanation = requested == "source" and not value and scene["scores"].get("explanation_match", 0.0) >= .85
             if not value and not explanation:
+                continue
+            excluded_values = frame.get("excluded_roles", {}).get(requested, [])
+            if not explanation and any(self._value_match(value, excluded) >= .9 for excluded in excluded_values):
                 continue
             if requested == "agent" and (value.get("part_of_speech") not in {"NOUN", "NPRO"} or value.get("lemma") in AGENT_BLACKLIST):
                 continue
@@ -976,6 +1116,9 @@ class QuerySceneService:
             if slot["role"] == role and slot["status"] == "empty":
                 slot.update({"status": "RESOLVED", "lemma": winner["lemma"], "surface": winner["surface"], "value": {"lemma": winner["lemma"], "surface": winner["surface"], "concept_id": winner["concept_id"], "preposition": winner.get("preposition", "")}, "confidence": winner["scores"].get("answer_confidence", winner["scores"]["total"]), "resolved_at_step": step})
         scene["status"] = "RESOLVED"
+        dialogue_context = deepcopy(state.get("dialogue_context", {}))
+        dialogue_context[role] = self._context_value(winner, role, source="resolved_answer")
+        state["dialogue_context"] = dialogue_context
         for role_search in state.get("role_searches", []):
             if role_search.get("target_role") == role:
                 role_search["selected_role_candidate"] = deepcopy(winner)
@@ -1290,8 +1433,9 @@ class QuerySceneService:
         )]
         for item in cells:
             item["metadata"] = decode(item.get("metadata_json"), {})
-        active = [item for item in cells if item.get("component_class") in {"semantic_bridge", "role_candidate", "reasoning_support"}]
+        active = [item for item in cells if item.get("component_class") != "memory_source"]
         memory_sources = [item for item in cells if item.get("component_class") == "memory_source"]
+        dialogue_scene_count = int(conn.execute("SELECT COUNT(*) FROM hive_dialogue_scenes WHERE hive_id=?", (hive_id,)).fetchone()[0])
         raw_sum = sum(float(item.get("energy") or item.get("local_activation") or 0) for item in cells)
         reasoning_sum = sum(float(item.get("energy") or item.get("local_activation") or 0) for item in active)
         energy = {
@@ -1301,7 +1445,7 @@ class QuerySceneService:
             "active_reasoning_cells": len(active), "active_memory_sources": len(memory_sources), "calculation_version": 1,
         }
         capacity = int((hive_row["capacity"] or hive_row["max_cells"]) if hive_row else 24)
-        state["hive"] = {**state.get("hive", {}), "id": hive_id, "space_id": int(hive_row["space_id"]) if hive_row and hive_row["space_id"] is not None else None, "status": hive_row["status"] if hive_row else "ACTIVE", "query_text": hive_row["query_text"] if hive_row else state.get("created_for_surface", ""), "intent": (state.get("intent_classification") or {}).get("intent", state.get("query_frame", {}).get("intent")), "capacity": {"max_working_cells": capacity, "working_cells": len(active), "memory_sources": len(memory_sources), "inspection_projections": len(state.get("inspection_projections", [])), "search_hits": len(state.get("search_hits", [])), "total_physical_nodes": len((state.get("dynamics") or {}).get("nodes", [])), "total_placements": len(cells)}, "reasoning_step": int(hive_row["reasoning_step"] or 0) if hive_row else 0, "energy": energy, "pipeline": state.get("pipeline", {})}
+        state["hive"] = {**state.get("hive", {}), "id": hive_id, "space_id": int(hive_row["space_id"]) if hive_row and hive_row["space_id"] is not None else None, "status": hive_row["status"] if hive_row else "ACTIVE", "query_text": hive_row["query_text"] if hive_row else state.get("created_for_surface", ""), "intent": (state.get("intent_classification") or {}).get("intent", state.get("query_frame", {}).get("intent")), "capacity": {"max_working_cells": capacity, "working_cells": len(active) + dialogue_scene_count, "memory_sources": len(memory_sources), "dialogue_scenes": dialogue_scene_count, "inspection_projections": len(state.get("inspection_projections", [])), "search_hits": len(state.get("search_hits", [])), "total_physical_nodes": len((state.get("dynamics") or {}).get("nodes", [])), "total_placements": len(cells)}, "reasoning_step": int(hive_row["reasoning_step"] or 0) if hive_row else 0, "energy": energy, "pipeline": state.get("pipeline", {})}
         state["hive"]["query"] = {"original_text": state.get("created_for_surface", state.get("query_frame", {}).get("source_text", "")), "query_frame_id": state.get("query_frame", {}).get("id"), "query_scene_id": (state.get("query_scene") or {}).get("id")}
         state["hive"].update({
             "active_query_session_id": state.get("active_query_session_id"),
@@ -1336,7 +1480,7 @@ class QuerySceneService:
         state["hive"]["display_status"] = state["display_status"]
         state["active_query"]["status"] = state["display_status"]
         state["hive_structure"] = {
-            "placements": {"working_cells": len(active), "memory_sources": len(memory_sources), "total": len(cells)},
+            "placements": {"working_cells": len(active) + dialogue_scene_count, "memory_sources": len(memory_sources), "dialogue_scenes": dialogue_scene_count, "total": len(cells)},
             "working_items": [
                 {"type": item.get("component_class"), "label": (f"{item.get('metadata', {}).get('bridge', {}).get('unknown_token', {}).get('surface', '')} → {item.get('metadata', {}).get('bridge', {}).get('global_candidate', {}).get('lexeme', '')}" if item.get("component_class") == "semantic_bridge" else item.get("lemma", ""))}
                 for item in active
@@ -1344,5 +1488,6 @@ class QuerySceneService:
             "sources": [{"type": "memory_scene", "label": item.get("source_text", "")} for item in state.get("memory_sources", [])],
             "selected_structure_target": state.get("selected_structure_target"),
         }
-        state["stats"] = {"nodes": len(active), "cells": len(active), "components": len(active), "working_cells": len(active), "memory_sources": len(memory_sources), "inspection_projections": len(state.get("inspection_projections", [])), "total_placements": len(cells), "energy": energy}
+        state["stats"] = {"nodes": len(active) + dialogue_scene_count, "cells": len(active) + dialogue_scene_count, "components": len(active), "working_cells": len(active) + dialogue_scene_count, "memory_sources": len(memory_sources), "dialogue_scenes": dialogue_scene_count, "inspection_projections": len(state.get("inspection_projections", [])), "total_placements": len(cells), "energy": energy}
+        state["messages"] = [dict(row) for row in conn.execute("SELECT id, hive_id, turn_index, role, text, parsed_json, created_at FROM hive_messages WHERE hive_id=? ORDER BY turn_index", (hive_id,))]
         return state
