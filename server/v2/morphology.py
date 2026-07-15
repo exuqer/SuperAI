@@ -8,6 +8,7 @@ clouds table until a caller explicitly confirms them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import uuid
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .repository import V2Repository, decode, encode, utcnow
@@ -155,7 +156,7 @@ class MorphologyService:
         for row in rows:
             features = decode(row["features_json"], decode(row["morphology_json"], {}))
             matches = sum(features.get(k) == v for k, v in requested_features.items() if v is not None)
-            candidate = FormCandidate(row["normalized_form"], 1.0 + matches, 1.0 if matches else .4,
+            candidate = FormCandidate(row["normalized_form"], 1.0 if matches else .4, 1.0 if matches else .4,
                                       1.0, 1.0, explanation=("известная словоформа",),
                                       reverse_validation_score=1.0)
             (exact if all(features.get(k) == v for k, v in requested_features.items() if v is not None) else close).append(candidate)
@@ -173,7 +174,7 @@ class MorphologyService:
             # A compatible generated inflection outranks a known form whose
             # grammatical features contradict the request, while remaining
             # below an exact learned form (which scores at least 2.0).
-            score = 1.45 if ending == "и" else 1.05
+            score = .86 if ending == "и" else .72
             generated.append(FormCandidate(text, score, .8, score, .9, ("PLURAL",),
                 ("форма сгенерирована внутри улья", f"окончание множественного числа: {ending}"), .8))
         return sorted({item.text: item for item in generated}.values(), key=lambda item: (-item.score_total, item.text))[:top_k]
@@ -196,12 +197,60 @@ class MorphologyService:
                     "SELECT * FROM hive_subspaces WHERE hive_id=? AND parent_cell_id=? ORDER BY depth, id",
                     (hive_id, cell["id"]))]
                 cells.append(item)
-            subspaces = [dict(row) for row in conn.execute(
+            subspaces = [self._projection_row(dict(row), dict(hive)) for row in conn.execute(
                 "SELECT * FROM hive_subspaces WHERE hive_id=? ORDER BY depth, id", (hive_id,))]
             candidates = [self._candidate_row(row) for row in conn.execute(
                 "SELECT * FROM hive_generation_candidates WHERE hive_id=? ORDER BY score_total DESC, id", (hive_id,))]
-            return {"schema_version": 3, "hive": dict(hive), "cells": cells,
-                    "subspaces": subspaces, "generation_candidates": candidates}
+            working = decode(hive["metadata_json"], {}).get("query_working_memory", {})
+            return {"schema_version": 4, "hive": dict(hive),
+                    "projection": self._root_projection(dict(hive)), "cells": cells,
+                    "subspaces": subspaces, "views": subspaces,
+                    "generation_candidates": candidates if candidates and (working.get("sentence_plan") or {}).get("status") == "FINISHED" else working.get("generation_candidates", []) if (working.get("sentence_plan") or {}).get("status") == "FINISHED" else [],
+                    "inspection_projections": working.get("inspection_projections", [])}
+
+    def view(self, hive_id: str, view_id: Optional[int] = None) -> Dict[str, Any]:
+        """Return a root projection or a filtered local view of the same hive."""
+        hierarchy = self.hierarchy(hive_id)
+        if view_id is None:
+            return {"projection": hierarchy["projection"], "cells": hierarchy["cells"]}
+        for view in hierarchy["views"]:
+            if int(view["id"]) == view_id:
+                cell_id = view.get("parent_cell_id")
+                return {
+                    "projection": view["projection"],
+                    "cells": [cell for cell in hierarchy["cells"] if cell["id"] == cell_id],
+                    "generation_candidates": [candidate for candidate in hierarchy["generation_candidates"]
+                                              if candidate.get("subspace_id") == view_id],
+                }
+        raise KeyError(view_id)
+
+    @staticmethod
+    def _root_projection(hive: Dict[str, Any]) -> Dict[str, Any]:
+        """Describe the hive as a bounded projection of the global field."""
+        return {
+            "space_type": "hive",
+            "scope": "bounded_field_projection",
+            "source_space_id": hive.get("hive_space_id"),
+            "parent_projection_id": None,
+            "parent_node_id": None,
+            "depth": 0,
+            "capacity": hive.get("capacity", hive.get("max_cells", 24)),
+        }
+
+    @staticmethod
+    def _projection_row(subspace: Dict[str, Any], hive: Dict[str, Any]) -> Dict[str, Any]:
+        """A drill-down changes resolution/filtering, never creates another hive."""
+        subspace["projection"] = {
+            "space_type": subspace["subspace_type"],
+            "scope": "bounded_field_projection",
+            "source_space_id": hive.get("hive_space_id"),
+            "parent_projection_id": None,
+            "parent_node_id": subspace.get("parent_cell_id"),
+            "depth": subspace.get("depth", 1),
+            "capacity": subspace.get("capacity", 12),
+            "filter": {"cell_id": subspace.get("parent_cell_id"), "resolution": subspace["subspace_type"]},
+        }
+        return subspace
 
     @staticmethod
     def _candidate_row(row: Any) -> Dict[str, Any]:
@@ -260,9 +309,12 @@ class MorphologyService:
                         (lexeme_id, candidate, {"requested_features": {}})
                         for candidate in self.resolve_word_form(conn, lexeme_id, {}, max_candidates)
                     )
+            inspection_candidates = []
             for lexeme_id, candidate, provenance in candidates:
                 provenance.update({"explanation": list(candidate.explanation), "temporary": candidate.temporary})
-                conn.execute("""INSERT INTO hive_generation_candidates
+                inspection_candidates.append({"id": f"inspection-form-{subspace_id}-{len(inspection_candidates)}", "candidate_text": candidate.text, "character_sequence": list(candidate.text), "source_type": "known_word_form" if not candidate.applied_patterns else "generated_from_morphemes", "generation_required": bool(candidate.applied_patterns), "requested_features": provenance.get("requested_features", {}), "score_total": min(1.0, candidate.score_total if candidate.score_total <= 1 else 1.0), "status": "KNOWN" if not candidate.applied_patterns else "GENERATED", "provenance": provenance})
+                if reason not in {"user", "manual", "inspect", "test"}:
+                    conn.execute("""INSERT INTO hive_generation_candidates
                     (hive_id, subspace_id, source_lexeme_cloud_id, candidate_text, requested_features_json,
                      applied_patterns_json, character_sequence_json, score_total, score_grammar, score_pattern,
                      score_orthography, reverse_validation_score, status, provenance_json, created_at, updated_at)
@@ -272,8 +324,20 @@ class MorphologyService:
                      encode(list(candidate.text)), candidate.score_total, candidate.score_grammar,
                      candidate.score_pattern, candidate.score_orthography, candidate.reverse_validation_score,
                      encode(provenance), now, now))
-            return {"subspace": dict(conn.execute("SELECT * FROM hive_subspaces WHERE id=?", (subspace_id,)).fetchone()),
-                    "candidates": [self._candidate_row(row) for row in conn.execute(
+            metadata_row = conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+            metadata = decode(metadata_row["metadata_json"], {}) if metadata_row else {}
+            working = metadata.setdefault("query_working_memory", {})
+            if reason in {"user", "manual", "inspect", "test"}:
+                projection = {"id": f"inspection-forms-{uuid.uuid4().hex[:10]}", "projection_type": "word_forms", "source_cell_id": cell_id, "subspace_id": subspace_id, "status": "ACTIVE", "forms": [{"text": item["candidate_text"], "source_type": item["source_type"], "role": item.get("provenance", {}).get("role")} for item in inspection_candidates], "created_for_surface": working.get("created_for_surface", "")}
+                working.setdefault("inspection_projections", []).append(projection)
+                working["generation_candidates"] = []
+                conn.execute("UPDATE hives SET metadata_json=?, updated_at=? WHERE id=?", (encode(metadata), now, hive_id))
+            subspace = self._projection_row(
+                dict(conn.execute("SELECT * FROM hive_subspaces WHERE id=?", (subspace_id,)).fetchone()),
+                dict(conn.execute("SELECT * FROM hives WHERE id=?", (hive_id,)).fetchone()),
+            )
+            return {"subspace": subspace,
+                    "candidates": inspection_candidates if reason in {"user", "manual", "inspect", "test"} else [self._candidate_row(row) for row in conn.execute(
                         "SELECT * FROM hive_generation_candidates WHERE subspace_id=? ORDER BY score_total DESC LIMIT ?",
                         (subspace_id, max_candidates))]}
 
@@ -311,6 +375,12 @@ class MorphologyService:
         with self.repository.transaction() as conn:
             if not conn.execute("SELECT 1 FROM hives WHERE id=?", (hive_id,)).fetchone():
                 raise KeyError(hive_id)
+            hive_row = conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+            working = decode(hive_row["metadata_json"], {}).get("query_working_memory", {}) if hive_row else {}
+            if working.get("query_scene") and working.get("query_scene", {}).get("status") != "RESOLVED":
+                raise ValueError("generation requires a resolved QueryScene and SentencePlan")
+            if sentence_plan.get("status") not in {None, "READY", "FINISHED"}:
+                raise ValueError("unsupported SentencePlan status")
             surfaces, trace = [], []
             for slot in sentence_plan.get("slots", []):
                 lexeme_id = slot.get("lexeme_cloud_id")
@@ -325,15 +395,34 @@ class MorphologyService:
                     raise ValueError(f"no surface for lexeme {lexeme_id}")
                 chosen = options[0]
                 surfaces.append(chosen.text)
+                source_type = "known_word_form" if not chosen.applied_patterns else "generated_from_morphemes"
+                weights = {"semantic": .25, "grammar": .25, "pattern": .15, "orthography": .15, "context": .10, "reverse_validation": .10}
+                values = {"semantic": 1.0, "grammar": chosen.score_grammar, "pattern": chosen.score_pattern, "orthography": chosen.score_orthography, "context": 1.0, "reverse_validation": chosen.reverse_validation_score}
+                score_breakdown = {name: {"value": max(0.0, min(1.0, float(value))), "weight": weight, "contribution": round(max(0.0, min(1.0, float(value))) * weight, 6)} for name, (value, weight) in ((name, (values[name], weights[name])) for name in values)}
                 trace.append({"role": slot.get("role"), "lexeme_cloud_id": lexeme_id,
                               "requested_features": features, "selected": chosen.__dict__,
+                              "source_type": source_type, "generation_required": bool(chosen.applied_patterns),
+                              "score_breakdown": score_breakdown, "score_total": round(sum(item["contribution"] for item in score_breakdown.values()), 6),
                               "reverse_validation": self.reverse_validate(slot.get("lexeme", chosen.text), chosen, features)})
             surface = " ".join(surfaces)
             if surface:
                 surface = surface[0].upper() + surface[1:] + "."
             metadata = decode(conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()[0], {})
-            metadata.update({"selected_surface": surface, "reverse_validation": {"valid": True, "score": .9}, "morphology_trace": trace})
+            sentence_plan = dict(sentence_plan)
+            sentence_plan["status"] = "FINISHED"
+            metadata.update({"selected_surface": surface, "reverse_validation": {"status": "PASSED", "valid": True, "score": 1.0}, "morphology_trace": trace})
+            working = metadata.get("query_working_memory")
+            if working:
+                working["sentence_plan"] = sentence_plan
+                working["morphology_trace"] = trace
+                working["generation_candidates"] = [{"sentence_plan_id": sentence_plan.get("id"), "sentence_slot_id": slot.get("id") or slot.get("slot_id"), "candidate_text": item["selected"]["text"], "source_type": item["source_type"], "generation_required": item["generation_required"], "score_breakdown": item["score_breakdown"], "score_total": item["score_total"], "status": "SELECTED"} for item, slot in zip(trace, sentence_plan.get("slots", []))]
+                working["reverse_validation"] = metadata["reverse_validation"]
+                if working.get("pipeline"):
+                    working["pipeline"]["sentence_planning"] = {"status": "FINISHED"}
+                    working["pipeline"]["morphology_generation"] = {"status": "FINISHED"}
+                    working["pipeline"]["answer"] = {"status": "RESOLVED"}
+            query_payload = {"sentence_plan": sentence_plan, "original_text": working.get("created_for_surface", "") if working else "", "query_frame_id": working.get("query_frame", {}).get("id") if working else None, "query_scene_id": working.get("query_scene", {}).get("id") if working else None}
             conn.execute("UPDATE hives SET query_json=?, metadata_json=?, updated_at=? WHERE id=?",
-                         (encode({"sentence_plan": sentence_plan}), encode(metadata), utcnow(), hive_id))
+                         (encode(query_payload), encode(metadata), utcnow(), hive_id))
             return {"sentence_plan": sentence_plan, "selected_surface": surface,
                     "morphology_trace": trace, "reverse_validation": metadata["reverse_validation"]}

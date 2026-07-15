@@ -11,6 +11,13 @@ import type {
   HiveQueryDecisionV2,
   HiveResonanceEventV2,
   HiveSubspaceV2,
+  HiveProjectionV2,
+  QuerySceneCandidateV2,
+  QuerySceneV2,
+  HiveInspectionProjectionV2,
+  HiveLocalResonanceV2,
+  QueryMessageMode,
+  DynamicsStateV2,
 } from '@/entities/hive/types';
 
 interface HiveStateResponse {
@@ -26,6 +33,24 @@ interface HiveQueryResponse extends HiveStateResponse {
   external_search?: ExternalSearch;
   merge_results?: Array<Record<string, unknown>>;
   resonance_events?: HiveResonanceEventV2[];
+  query_frame?: Record<string, unknown>;
+  query_scene?: QuerySceneV2;
+  memory_scenes?: Array<Record<string, unknown>>;
+  candidates?: QuerySceneCandidateV2[];
+  answer?: { answer_mode: string; surface_answer: string; full_surface_answer?: string; confidence: number; status?: string };
+  memory_sources?: Array<Record<string, unknown>>;
+  sentence_plan?: Record<string, unknown> | null;
+  full_sentence_plan?: Record<string, unknown> | null;
+  morphology_trace?: Array<Record<string, unknown>>;
+  reverse_validation?: Record<string, unknown> | null;
+  unknown_token_searches?: Array<Record<string, unknown>>;
+  role_searches?: Array<Record<string, unknown>>;
+  resolved_mode?: QueryMessageMode;
+  local_resonance?: HiveLocalResonanceV2 | null;
+  resonance_probes?: Array<Record<string, unknown>>;
+  active_query?: Record<string, unknown>;
+  dynamics?: DynamicsStateV2;
+  reasoning_trace?: Record<string, any>;
 }
 
 interface ReasoningResponse {
@@ -45,6 +70,16 @@ interface ExternalSearch {
 interface HiveExpandResponse {
   subspace: HiveSubspaceV2;
   candidates: Array<Record<string, unknown>>;
+}
+
+interface HiveHierarchyResponse {
+  schema_version: number;
+  hive: Record<string, unknown>;
+  projection: HiveProjectionV2;
+  cells: HiveCellV2[];
+  subspaces: HiveSubspaceV2[];
+  generation_candidates: Array<Record<string, unknown>>;
+  inspection_projections?: HiveInspectionProjectionV2[];
 }
 
 export const useHiveStore = defineStore('hive', () => {
@@ -70,6 +105,29 @@ export const useHiveStore = defineStore('hive', () => {
   const jsonStep = ref(0);
   const jsonValue = ref<unknown>(null);
   const generationCandidates = ref<Array<Record<string, unknown>>>([]);
+  const hierarchyData = ref<HiveHierarchyResponse | null>(null);
+  const queryFrame = ref<Record<string, unknown> | null>(null);
+  const queryScene = ref<QuerySceneV2 | null>(null);
+  const memoryScenes = ref<Array<Record<string, unknown>>>([]);
+  const queryCandidates = ref<QuerySceneCandidateV2[]>([]);
+  const queryAnswer = ref<{ answer_mode: string; surface_answer: string | null; full_surface_answer?: string | null; confidence: number; status?: string; short?: Record<string, unknown>; full?: Record<string, unknown> } | null>(null);
+  const queryPipeline = ref<Record<string, any> | null>(null);
+  const vibrationHistory = ref<Array<Record<string, unknown>>>([]);
+  const inspectionProjections = ref<HiveInspectionProjectionV2[]>([]);
+  const memorySources = ref<Array<Record<string, unknown>>>([]);
+  const sentencePlan = ref<Record<string, unknown> | null>(null);
+  const fullSentencePlan = ref<Record<string, unknown> | null>(null);
+  const morphologyTrace = ref<Array<Record<string, unknown>>>([]);
+  const reverseValidation = ref<Record<string, unknown> | null>(null);
+  const unknownTokenSearches = ref<Array<Record<string, unknown>>>([]);
+  const roleSearches = ref<Array<Record<string, unknown>>>([]);
+  const localResonance = ref<HiveLocalResonanceV2 | null>(null);
+  const resonanceProbes = ref<Array<Record<string, unknown>>>([]);
+  const activeQuery = ref<Record<string, unknown> | null>(null);
+  const resolvedMode = ref<QueryMessageMode | null>(null);
+  const hiveStructure = ref<Record<string, unknown> | null>(null);
+  const dynamics = ref<DynamicsStateV2 | null>(null);
+  const reasoningTrace = ref<Record<string, any> | null>(null);
 
   // Computed
   const averageActivation = computed(() =>
@@ -81,6 +139,8 @@ export const useHiveStore = defineStore('hive', () => {
   const activeCellIds = computed(() => {
     return new Set(decision.value?.matches?.map(match => match.cell_id) || []);
   });
+  const workingCellCount = computed(() => cells.value.filter(cell => ['semantic_bridge', 'role_candidate', 'reasoning_support'].includes(cell.component_class)).length);
+  const memorySourceCount = computed(() => cells.value.filter(cell => cell.component_class === 'memory_source').length);
 
   async function run<T>(operation: () => Promise<T>): Promise<T> {
     loading.value = true;
@@ -116,9 +176,42 @@ export const useHiveStore = defineStore('hive', () => {
     return run(async () => {
       const state = await api.get<HiveStateResponse>(`/api/v2/hives/${hiveId}`);
       applyState(state, false);
+      await loadQueryState();
       cacheState();
       return state;
     });
+  }
+
+  async function loadQueryState() {
+    if (!hive.value) return null;
+    try {
+      const state = await api.get<any>(`/api/v2/hives/${hive.value.id}/query-state`);
+      if (!state?.query_scene) return null;
+      queryFrame.value = state.query_frame;
+      queryScene.value = state.query_scene;
+      memoryScenes.value = state.memory_scenes || [];
+      queryCandidates.value = state.candidates || [];
+      queryAnswer.value = state.answer || null;
+      queryPipeline.value = state.pipeline || state.hive?.pipeline || null;
+      vibrationHistory.value = state.vibration?.history || [];
+      dynamics.value = state.dynamics || null;
+      reasoningTrace.value = state.reasoning_trace || null;
+      inspectionProjections.value = state.inspection_projections || [];
+      memorySources.value = state.memory_sources || [];
+      sentencePlan.value = state.sentence_plan || null;
+      fullSentencePlan.value = state.full_sentence_plan || null;
+      morphologyTrace.value = state.morphology_trace || [];
+      reverseValidation.value = state.reverse_validation || null;
+      unknownTokenSearches.value = state.unknown_token_searches || [];
+      roleSearches.value = state.role_searches || [];
+      localResonance.value = state.local_resonance || null;
+      resonanceProbes.value = state.resonance_probes || [];
+      activeQuery.value = state.active_query || null;
+      hiveStructure.value = state.hive_structure || null;
+      return state;
+    } catch {
+      return null;
+    }
   }
 
   async function preview(text: string) {
@@ -134,12 +227,14 @@ export const useHiveStore = defineStore('hive', () => {
   async function hierarchy() {
     if (!hive.value) return null;
     return run(async () => {
-      const result = await api.get<{ cells: HiveCellV2[]; generation_candidates: Array<Record<string, unknown>> }>(
+      const result = await api.get<HiveHierarchyResponse>(
         `/api/v2/hives/${hive.value!.id}/hierarchy`
       );
       const subspacesByCell = new Map(result.cells.map(cell => [cell.id, cell.subspaces || []]));
       cells.value = cells.value.map(cell => ({ ...cell, subspaces: subspacesByCell.get(cell.id) || [] }));
       generationCandidates.value = result.generation_candidates || [];
+      inspectionProjections.value = result.inspection_projections || [];
+      hierarchyData.value = result;
       if (selectedCell.value) {
         selectedCell.value = cells.value.find(cell => cell.id === selectedCell.value?.id) || null;
       }
@@ -156,7 +251,8 @@ export const useHiveStore = defineStore('hive', () => {
       cells.value = cells.value.map(cell => cell.id === cellId
         ? { ...cell, subspaces: [...(cell.subspaces || []), result.subspace] }
         : cell);
-      generationCandidates.value = result.candidates;
+      generationCandidates.value = [];
+      await hierarchy();
       if (selectedCell.value?.id === cellId) {
         selectedCell.value = cells.value.find(cell => cell.id === cellId) || null;
       }
@@ -165,7 +261,11 @@ export const useHiveStore = defineStore('hive', () => {
     });
   }
 
-  async function query(text: string) {
+  async function query(
+    text: string,
+    mode?: QueryMessageMode,
+    resonanceScope: 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL' = 'LOCAL_THEN_GLOBAL',
+  ) {
     if (!hive.value || loading.value) return;
     loading.value = true;
     error.value = '';
@@ -184,7 +284,7 @@ export const useHiveStore = defineStore('hive', () => {
     try {
       const result = await api.post<HiveQueryResponse>(
         `/api/v2/hives/${hive.value.id}/query`,
-        { text }
+        { text, ...(mode ? { resolved_mode: mode } : {}), resonance_scope: resonanceScope }
       );
       applyState(result);
       decision.value = result.decision;
@@ -192,13 +292,42 @@ export const useHiveStore = defineStore('hive', () => {
       externalSearch.value = result.external_search || null;
       mergeResults.value = result.merge_results || [];
       resonanceEvents.value = result.resonance_events || [];
+      queryFrame.value = result.query_frame || null;
+      queryScene.value = result.query_scene || null;
+      memoryScenes.value = result.memory_scenes || [];
+      queryCandidates.value = result.candidates || [];
+      queryAnswer.value = result.answer || null;
+      queryPipeline.value = (result as any).pipeline || (result as any).hive?.pipeline || null;
+      memorySources.value = result.memory_sources || [];
+      sentencePlan.value = result.sentence_plan || null;
+      fullSentencePlan.value = result.full_sentence_plan || null;
+      morphologyTrace.value = result.morphology_trace || [];
+      reverseValidation.value = result.reverse_validation || null;
+      unknownTokenSearches.value = result.unknown_token_searches || [];
+      roleSearches.value = result.role_searches || [];
+      localResonance.value = result.local_resonance || null;
+      resonanceProbes.value = result.resonance_probes || [];
+      activeQuery.value = result.active_query || null;
+      dynamics.value = (result as any).dynamics || null;
+      reasoningTrace.value = result.reasoning_trace || null;
+      hiveStructure.value = (result as any).hive_structure || null;
+      resolvedMode.value = result.resolved_mode || null;
+      vibrationHistory.value = [];
+      await hierarchy();
+      if (result.resolved_mode !== 'LOCAL_RESONANCE' && queryScene.value && queryAnswer.value?.status !== 'RESOLVED') {
+        await runReasoning();
+      }
       messages.value.push({
         id: `assistant-${result.message_id}`,
         hive_id: hive.value.id,
         turn_index: messages.value.length + 1,
-        text: result.decision.external_search_required
-          ? `Улей активировал известные компоненты и выполнил ${result.decision.decision === 'PARTIAL_HIT' ? 'частичный' : 'целевой'} внешний поиск.`
-          : 'Контекст найден в локальной памяти: внешний поиск не запускался.',
+        text: result.resolved_mode === 'LOCAL_RESONANCE'
+          ? localResonance.value?.status === 'COMPLETED_NO_MATCH'
+            ? `Локальный резонанс: «${text}» не найден в памяти улья. Во вкладке «Локальный резонанс» можно включить глобальную память.`
+            : `Локальный резонанс: форма «${text}» найдена; лемма «${localResonance.value?.matched_lexeme || '—'}».`
+          : queryAnswer.value?.full_surface_answer
+            || queryAnswer.value?.surface_answer
+            || 'Подходящий ответ в доступной памяти не найден.',
         parsed_json: {},
         created_at: new Date().toISOString(),
         role: 'assistant',
@@ -216,6 +345,30 @@ export const useHiveStore = defineStore('hive', () => {
     if (!hive.value || reasoningLoading.value) return;
     reasoningLoading.value = true;
     try {
+      if (queryScene.value) {
+        const result = await api.post<{ hive: any }>(`/api/v2/hives/${hive.value.id}/vibrate/run`, { steps: reasoningSteps.value, config: {} });
+        queryFrame.value = result.hive.query_frame;
+        queryScene.value = result.hive.query_scene;
+        memoryScenes.value = result.hive.memory_scenes;
+        queryCandidates.value = result.hive.candidates;
+        queryAnswer.value = result.hive.answer;
+        queryPipeline.value = result.hive.pipeline || result.hive.hive?.pipeline || null;
+        memorySources.value = result.hive.memory_sources || [];
+        sentencePlan.value = result.hive.sentence_plan || null;
+        fullSentencePlan.value = result.hive.full_sentence_plan || null;
+        morphologyTrace.value = result.hive.morphology_trace || [];
+        reverseValidation.value = result.hive.reverse_validation || null;
+        unknownTokenSearches.value = result.hive.unknown_token_searches || [];
+        roleSearches.value = result.hive.role_searches || [];
+        localResonance.value = result.hive.local_resonance || null;
+        resonanceProbes.value = result.hive.resonance_probes || [];
+        activeQuery.value = result.hive.active_query || null;
+        vibrationHistory.value = result.hive.vibration.history;
+        dynamics.value = result.hive.dynamics || null;
+        reasoningTrace.value = result.hive.reasoning_trace || null;
+        await hierarchy();
+        return;
+      }
       runResult.value = await api.post<ReasoningResponse>(`/api/v2/hives/${hive.value.id}/reasoning`, {
         text: goalText.value,
         config: { reasoning_steps: reasoningSteps.value },
@@ -229,6 +382,53 @@ export const useHiveStore = defineStore('hive', () => {
   async function runReasoningStep() {
     reasoningSteps.value = 1;
     await runReasoning();
+  }
+
+  async function rerunLocalResonance(scope: 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL') {
+    if (!hive.value || !localResonance.value?.probe_text || loading.value) return;
+    return run(async () => {
+      const result = await api.post<HiveQueryResponse>(`/api/v2/hives/${hive.value!.id}/query`, {
+        text: localResonance.value!.probe_text,
+        resolved_mode: 'LOCAL_RESONANCE',
+        resonance_scope: scope,
+      });
+      applyState(result);
+      queryFrame.value = result.query_frame || queryFrame.value;
+      queryScene.value = result.query_scene || queryScene.value;
+      queryAnswer.value = result.answer || queryAnswer.value;
+      queryPipeline.value = (result as any).pipeline || (result as any).hive?.pipeline || queryPipeline.value;
+      localResonance.value = result.local_resonance || null;
+      resonanceProbes.value = result.resonance_probes || [];
+      activeQuery.value = result.active_query || activeQuery.value;
+      resolvedMode.value = result.resolved_mode || null;
+      await hierarchy();
+      cacheState();
+      return result;
+    });
+  }
+
+  async function importResonanceMatch(matchId: string, includeScenes = false) {
+    const probe = resonanceProbes.value.at(-1) as any;
+    if (!hive.value || !probe?.id) return null;
+    return run(async () => {
+      const result = await api.post<any>(`/api/v2/hives/${hive.value!.id}/resonance/${probe.id}/import`, {
+        match_id: matchId,
+        include_scenes: includeScenes,
+      });
+      const state = await api.get<any>(`/api/v2/hives/${hive.value!.id}/query-state`);
+      applyState(state);
+      localResonance.value = state.local_resonance || localResonance.value;
+      resonanceProbes.value = state.resonance_probes || resonanceProbes.value;
+      hiveStructure.value = state.hive_structure || hiveStructure.value;
+      cacheState();
+      return result;
+    });
+  }
+
+  async function stopReasoning() {
+    if (!hive.value || !queryScene.value) return;
+    const result = await api.post<{ vibration: { history: Array<Record<string, unknown>> } }>(`/api/v2/hives/${hive.value.id}/vibrate/stop`);
+    vibrationHistory.value = result.vibration.history;
   }
 
   async function loadJson() {
@@ -292,6 +492,28 @@ export const useHiveStore = defineStore('hive', () => {
     externalSearch.value = null;
     mergeResults.value = [];
     resonanceEvents.value = [];
+    queryFrame.value = null;
+    queryScene.value = null;
+    memoryScenes.value = [];
+    queryCandidates.value = [];
+    queryAnswer.value = null;
+    queryPipeline.value = null;
+      vibrationHistory.value = [];
+      dynamics.value = null;
+      reasoningTrace.value = null;
+    inspectionProjections.value = [];
+    memorySources.value = [];
+    sentencePlan.value = null;
+    fullSentencePlan.value = null;
+    morphologyTrace.value = [];
+    reverseValidation.value = null;
+    unknownTokenSearches.value = [];
+    roleSearches.value = [];
+    localResonance.value = null;
+    resonanceProbes.value = [];
+    activeQuery.value = null;
+    resolvedMode.value = null;
+    hiveStructure.value = null;
     selectedCell.value = null;
     goalText.value = '';
     runResult.value = null;
@@ -343,6 +565,7 @@ export const useHiveStore = defineStore('hive', () => {
     try {
       const state = await api.get<HiveStateResponse>(`/api/v2/hives/${id}`);
       applyState(state, messages.value.length > 0);
+      await loadQueryState();
       if (!messages.value.length && state.messages?.length) applyState(state, false);
     } catch {
       storage.removeActiveHive();
@@ -366,6 +589,28 @@ export const useHiveStore = defineStore('hive', () => {
     reasoningSteps,
     reasoningLoading,
     runResult,
+    queryFrame,
+    queryScene,
+    memoryScenes,
+    queryCandidates,
+    queryAnswer,
+    queryPipeline,
+    vibrationHistory,
+    inspectionProjections,
+    memorySources,
+    sentencePlan,
+    fullSentencePlan,
+    morphologyTrace,
+    reverseValidation,
+    unknownTokenSearches,
+    roleSearches,
+    localResonance,
+    resonanceProbes,
+    activeQuery,
+    resolvedMode,
+    hiveStructure,
+    dynamics,
+    reasoningTrace,
     copyStatus,
     jsonOpen,
     jsonMode,
@@ -373,17 +618,24 @@ export const useHiveStore = defineStore('hive', () => {
     jsonStep,
     jsonValue,
     generationCandidates,
+    hierarchyData,
     averageActivation,
     averageRetention,
+    workingCellCount,
+    memorySourceCount,
     activeCellIds,
     createHive,
     getHive,
     preview,
+    loadQueryState,
     hierarchy,
     expandCell,
     query,
+    rerunLocalResonance,
+    importResonanceMatch,
     runReasoning,
     runReasoningStep,
+    stopReasoning,
     loadJson,
     openJson,
     copyJson,

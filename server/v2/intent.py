@@ -1,0 +1,75 @@
+"""Communicative-intent classification performed before scene parsing."""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, Optional
+
+
+GREETING_WORDS = {"привет", "здравствуй", "здравствуйте", "добрый день", "доброе утро", "добрый вечер"}
+SMALL_TALK_PATTERNS = {
+    "как дела": "status_query",
+    "как ты": "status_query",
+    "как поживаешь": "status_query",
+    "что нового": "news_query",
+}
+QUESTION_WORDS = {"кто", "кого", "кому", "что", "где", "куда", "откуда", "когда", "как", "почему", "зачем", "чем", "сколько"}
+
+
+class IntentClassifier:
+    """Small deterministic classifier for the supported Russian dialogue intents."""
+
+    def classify(self, text: str) -> Dict[str, Any]:
+        source = str(text or "").strip()
+        normalized = re.sub(r"\s+", " ", source.casefold()).strip(" .!?,;:")
+        greeting = next((item for item in GREETING_WORDS if re.search(rf"(?:^|\s){re.escape(item)}(?:$|\s|[!?,.])", source.casefold())), None)
+        small_talk_surface: Optional[str] = None
+        small_talk_type: Optional[str] = None
+        for pattern, kind in SMALL_TALK_PATTERNS.items():
+            match = re.search(rf"(?:^|\s)({re.escape(pattern)})(?:$|\s|[!?.,])", normalized)
+            if match:
+                small_talk_surface = source[match.start(1):match.end(1)]
+                small_talk_type = kind
+                break
+        location = self._location(source)
+        words = re.findall(r"[\w-]+", normalized, flags=re.UNICODE)
+        has_scene_question = any(word in QUESTION_WORDS for word in words)
+        if greeting and small_talk_type:
+            intent = "GREETING_WITH_SMALL_TALK"
+        elif small_talk_type:
+            intent = "SMALL_TALK"
+        elif has_scene_question:
+            intent = "SCENE_QUESTION"
+        elif greeting:
+            intent = "GREETING"
+        else:
+            if len(words) == 1:
+                intent = "STRUCTURAL_PROBE" if len(words[0]) <= 3 else "LEXICAL_PROBE"
+            elif any(word in {"сделай", "покажи", "найди", "добавь", "удали", "запусти"} for word in words):
+                intent = "COMMAND"
+            elif words:
+                intent = "SCENE_STATEMENT"
+            else:
+                intent = "UNKNOWN"
+        result: Dict[str, Any] = {"intent": intent, "source_text": source}
+        if greeting:
+            result["greeting"] = {"surface": greeting.capitalize() if greeting == "привет" else greeting}
+        if small_talk_type:
+            result["small_talk"] = {"type": small_talk_type, "surface": small_talk_surface or source}
+        if location:
+            result["context"] = {"location": location}
+        return result
+
+    @staticmethod
+    def _location(text: str) -> Optional[Dict[str, str]]:
+        match = re.search(r"\b(на|в|во)\s+([А-Яа-яЁё\w-]+)", text, flags=re.IGNORECASE)
+        if not match:
+            return None
+        surface = match.group(2)
+        lemma = surface.casefold()
+        endings = (("ке", "ок"), ("ке", "ка"), ("е", ""), ("у", ""), ("е", ""))
+        for ending, replacement in endings:
+            if lemma.endswith(ending) and len(lemma) > len(ending) + 2:
+                lemma = lemma[:-len(ending)] + replacement
+                break
+        return {"surface": surface, "lemma": lemma, "preposition": match.group(1).casefold()}

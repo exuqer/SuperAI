@@ -23,6 +23,23 @@ class HiveCreateResponse(BaseModel):
 class HiveQueryRequest(BaseModel):
     """Hive query request."""
     text: str = Field(..., min_length=1)
+    resolved_mode: str | None = Field(default=None, pattern="^(NEW_QUERY|LOCAL_RESONANCE|FOLLOW_UP|CORRECTION)$")
+    resonance_scope: str = Field(default="LOCAL_THEN_GLOBAL", pattern="^(LOCAL_ONLY|LOCAL_THEN_GLOBAL|GLOBAL_ONLY)$")
+
+
+class HiveVibrationRequest(BaseModel):
+    steps: int = Field(default=3, ge=1, le=32)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResonanceRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    scope: str = Field(default="LOCAL_THEN_GLOBAL", pattern="^(LOCAL_ONLY|LOCAL_THEN_GLOBAL|GLOBAL_ONLY)$")
+
+
+class ResonanceImportRequest(BaseModel):
+    match_id: str = Field(..., min_length=1)
+    include_scenes: bool = False
 
 
 class HiveExpandRequest(BaseModel):

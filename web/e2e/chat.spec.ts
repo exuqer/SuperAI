@@ -56,6 +56,17 @@ test.describe('Hive chat', () => {
     await page.route('**/api/v2/hives/hive-e2e/reasoning/export**', route => route.fulfill({
       json: { schema_version: 2, hive: { id: 'hive-e2e' } },
     }));
+    await page.route('**/api/v2/hives/hive-e2e/hierarchy', route => route.fulfill({
+      json: {
+        schema_version: 2,
+        hive,
+        projection: { space_type: 'hive', scope: 'bounded_field_projection', source_space_id: 2, parent_projection_id: null, parent_node_id: null, depth: 0, capacity: 24 },
+        cells: [],
+        subspaces: [],
+        generation_candidates: [],
+        inspection_projections: [],
+      },
+    }));
     await page.route('**/api/v2/hives/hive-e2e/analytics**', route => route.fulfill({
       json: { ...analytics, primary: analyticsRun(analytics.runs[0], 'рыбак'), comparison: analyticsRun(analytics.runs[1], 'кот') },
     }));
@@ -67,7 +78,31 @@ test.describe('Hive chat', () => {
     await page.getByRole('button', { name: 'Отправить' }).click();
 
     await expect(page.locator('.message.user .bubble')).toHaveText('Кот ест рыбу');
-    await expect(page.getByText(/Улей активировал известные компоненты/)).toBeVisible();
+    await expect(page.getByText('Подходящий ответ в доступной памяти не найден.')).toBeVisible();
+  });
+
+  test('puts the full resolved answer into chat', async ({ page }) => {
+    await page.route('**/api/v2/hives/hive-e2e/query', route => route.fulfill({
+      json: {
+        ...state,
+        message_id: 'message-full-answer',
+        resolved_mode: 'NEW_QUERY',
+        decision: { decision: 'ROLE_HIT', external_search_required: false, reasons: [], matches: [] },
+        resonance_events: [],
+        external_search: { sources: [], bees: [], iterations: 0, anchors: [] },
+        merge_results: [],
+        metrics: {},
+        answer: {
+          status: 'RESOLVED', answer_mode: 'exact', confidence: .99,
+          surface_answer: 'Рыбу.', full_surface_answer: 'Продают рыбу на рынке.',
+        },
+      },
+    }));
+
+    await page.locator('textarea').fill('Что там на рынке?');
+    await page.getByRole('button', { name: 'Отправить' }).click();
+
+    await expect(page.locator('.message.assistant .bubble')).toHaveText('Продают рыбу на рынке.');
   });
 
   test('opens the JSON export dialog', async ({ page }) => {

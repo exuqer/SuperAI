@@ -538,6 +538,24 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE hive_cell_components ADD COLUMN {column} {declaration}")
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS structural_signatures (
+            cloud_id INTEGER PRIMARY KEY,
+            text TEXT NOT NULL,
+            signature_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(cloud_id) REFERENCES clouds(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS structural_index (
+            index_type TEXT NOT NULL,
+            fragment TEXT NOT NULL,
+            cloud_id INTEGER NOT NULL,
+            PRIMARY KEY(index_type, fragment, cloud_id),
+            FOREIGN KEY(cloud_id) REFERENCES clouds(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS structural_index_lookup_idx
+            ON structural_index(index_type, fragment);
+
         CREATE INDEX IF NOT EXISTS hive_conversation_idx ON hives(conversation_id);
         CREATE UNIQUE INDEX IF NOT EXISTS active_hive_conversation_idx
             ON hives(conversation_id) WHERE status = 'ACTIVE' AND conversation_id <> '';

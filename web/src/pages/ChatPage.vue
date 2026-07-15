@@ -18,7 +18,7 @@
     </header>
     <main class="workspace">
       <ChatPanel />
-      <RoutingField />
+      <HiveSpaceViewport />
       <HiveWorkspace />
     </main>
     <JsonExportDialog />
@@ -29,7 +29,7 @@
 import { computed, nextTick, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import ChatPanel from '@/widgets/chat-panel/ChatPanel.vue';
-import RoutingField from '@/widgets/routing-field/RoutingField.vue';
+import HiveSpaceViewport from '@/widgets/hive-space/HiveSpaceViewport.vue';
 import HiveWorkspace from '@/widgets/hive-workspace/HiveWorkspace.vue';
 import JsonExportDialog from '@/features/hive-export/ui/JsonExportDialog.vue';
 import { useHiveStore } from '@/entities/hive/store';

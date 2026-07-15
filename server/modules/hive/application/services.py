@@ -36,9 +36,15 @@ class HiveService:
         except KeyError as error:
             raise NotFoundError("hive", hive_id) from error
 
-    def query(self, hive_id: str, text: str) -> dict[str, Any]:
+    def query(
+        self,
+        hive_id: str,
+        text: str,
+        resolved_mode: str | None = None,
+        resonance_scope: str = "LOCAL_ONLY",
+    ) -> dict[str, Any]:
         try:
-            return self.facade.query(hive_id, text)
+            return self.facade.query(hive_id, text, resolved_mode, resonance_scope)
         except KeyError as error:
             raise NotFoundError("hive", hive_id) from error
 
@@ -122,6 +128,132 @@ class HiveService:
             return self.morphology.hierarchy(hive_id)
         except KeyError as error:
             raise NotFoundError("hive", hive_id) from error
+
+    def parse_query(self, text: str) -> dict[str, Any]:
+        return self.facade.parse_query(text)
+
+    def classify_resonance(self, text: str) -> dict[str, str]:
+        return self.facade.classify_resonance(text)
+
+    def resonance_create(self, hive_id: str, text: str, scope: str = "LOCAL_THEN_GLOBAL") -> dict[str, Any]:
+        try:
+            return self.facade.resonance_create(hive_id, text, scope)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def resonance_step(self, hive_id: str, probe_id: str) -> dict[str, Any]:
+        return self.facade.resonance_step(hive_id, probe_id)
+
+    def resonance_run(self, hive_id: str, probe_id: str) -> dict[str, Any]:
+        return self.facade.resonance_run(hive_id, probe_id)
+
+    def resonance_get(self, hive_id: str, probe_id: str) -> dict[str, Any]:
+        return self.facade.resonance_get(hive_id, probe_id)
+
+    def resonance_import(self, hive_id: str, probe_id: str, match_id: str, include_scenes: bool = False) -> dict[str, Any]:
+        return self.facade.resonance_import(hive_id, probe_id, match_id, include_scenes)
+
+    def resonance_related_scenes(self, hive_id: str, probe_id: str, match_id: str = "") -> dict[str, Any]:
+        return self.facade.resonance_related_scenes(hive_id, probe_id, match_id)
+
+    def activate_query(self, hive_id: str, text: str, resolved_mode: str = "NEW_QUERY") -> dict[str, Any]:
+        try:
+            return self.facade.activate_query(hive_id, text, resolved_mode)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def vibration_step(self, hive_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return self.facade.vibration_step(hive_id, config)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def vibration_run(self, hive_id: str, steps: int = 3, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return self.facade.vibration_run(hive_id, steps, config)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def vibration_stop(self, hive_id: str) -> dict[str, Any]:
+        try:
+            return self.facade.vibration_stop(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def dynamics_state(self, hive_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return self.facade.dynamics_state(hive_id, config)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def dynamics_step(self, hive_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return self.facade.dynamics_step(hive_id, config)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def dynamics_history(self, hive_id: str) -> list[dict[str, Any]]:
+        try:
+            return self.facade.dynamics_history(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def dynamics_reset(self, hive_id: str) -> dict[str, Any]:
+        try:
+            return self.facade.dynamics_reset(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def dynamics_node(self, hive_id: str, cell_id: str) -> dict[str, Any]:
+        try:
+            return self.facade.dynamics_node(hive_id, cell_id)
+        except KeyError as error:
+            raise NotFoundError("dynamics node", cell_id) from error
+
+    def dynamics_evictions(self, hive_id: str) -> list[dict[str, Any]]:
+        try:
+            return self.facade.dynamics_evictions(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def query_working_state(self, hive_id: str) -> dict[str, Any]:
+        try:
+            return self.facade.query_working_state(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def unknown_search_start(self, hive_id: str, surface: str, token_index: int, query_role: str = "", query_scene_id: str = "") -> dict[str, Any]:
+        try:
+            return self.facade.unknown_search_start(hive_id, surface, token_index, query_role, query_scene_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def unknown_search_step(self, hive_id: str, search_id: str) -> dict[str, Any]:
+        return self.facade.unknown_search_step(hive_id, search_id)
+
+    def unknown_search_run(self, hive_id: str, search_id: str) -> dict[str, Any]:
+        return self.facade.unknown_search_run(hive_id, search_id)
+
+    def unknown_search_vibrate(self, hive_id: str, search_id: str) -> dict[str, Any]:
+        return self.facade.unknown_search_vibrate(hive_id, search_id)
+
+    def unknown_search_get(self, hive_id: str, search_id: str) -> dict[str, Any]:
+        return self.facade.unknown_search_get(hive_id, search_id)
+
+    def unknown_search_evidence(self, hive_id: str, search_id: str) -> list[dict[str, Any]]:
+        return self.facade.unknown_search_evidence(hive_id, search_id)
+
+    def unknown_search_routes(self, hive_id: str, search_id: str) -> list[dict[str, Any]]:
+        return self.facade.unknown_search_routes(hive_id, search_id)
+
+    def unknown_search_confirm(self, hive_id: str, search_id: str) -> dict[str, Any]:
+        return self.facade.unknown_search_confirm(hive_id, search_id)
+
+    def view(self, hive_id: str, view_id: int | None = None) -> dict[str, Any]:
+        try:
+            return self.morphology.view(hive_id, view_id)
+        except KeyError as error:
+            raise NotFoundError("hive projection", str(error)) from error
 
     def expand(self, hive_id: str, cell_id: str, target_level: str, reason: str, max_candidates: int) -> dict[str, Any]:
         try:

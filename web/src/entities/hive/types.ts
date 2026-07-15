@@ -8,6 +8,8 @@ export interface HiveV2 {
   max_cells: number;
   created_at: string;
   updated_at: string;
+  capacity?: number | Record<string, number>;
+  energy?: Record<string, number>;
 }
 
 export interface HiveCellV2 {
@@ -45,6 +47,19 @@ export interface HiveSubspaceV2 {
   capacity: number;
   status: string;
   expansion_reason: string;
+  projection?: HiveProjectionV2;
+}
+
+/** A filtered, bounded view into the single hive projection of the global field. */
+export interface HiveProjectionV2 {
+  space_type: 'hive' | 'scene' | 'lexeme' | 'morphology' | 'word_form' | 'characters' | string;
+  scope: 'bounded_field_projection';
+  source_space_id: number | null;
+  parent_projection_id: number | null;
+  parent_node_id: string | null;
+  depth: number;
+  capacity: number;
+  filter?: { cell_id: string | null; resolution: string };
 }
 
 export interface HiveCellComponentV2 {
@@ -83,6 +98,103 @@ export interface HiveQueryDecisionV2 {
   unresolved_components?: Array<Record<string, unknown>>;
   local_anchors?: Array<Record<string, unknown>>;
   external_request?: Record<string, unknown> | null;
+}
+
+export interface HiveInspectionProjectionV2 {
+  id: string;
+  projection_type: string;
+  source_cell_id: string | null;
+  subspace_id: number | null;
+  status: string;
+  forms: Array<Record<string, unknown>>;
+}
+
+export interface QuerySceneCandidateV2 {
+  id: string;
+  lemma: string;
+  surface: string;
+  target_role: string;
+  status: string;
+  sources: string[];
+  primary_source_id?: string;
+  grammatical_features?: Record<string, string>;
+  form_provenance?: {
+    source_type: string;
+    scene_id?: string;
+    scene_text?: string;
+    observed_surface?: string;
+    generated: boolean;
+  };
+  scores: Record<string, number>;
+}
+
+export interface QuerySceneV2 {
+  id: string;
+  type: 'query_scene';
+  status: string;
+  requested_role: string | null;
+  slots: Array<Record<string, unknown>>;
+}
+
+export type QueryMessageMode = 'NEW_QUERY' | 'LOCAL_RESONANCE' | 'FOLLOW_UP' | 'CORRECTION';
+
+export interface HiveLocalResonanceV2 {
+  latest_probe_id: string;
+  latest_surface: string;
+  status: string;
+  probe_text?: string;
+  matched_form?: string | null;
+  matched_lexeme?: string | null;
+}
+
+export interface QueryWorkingHiveV2 {
+  query_frame: Record<string, unknown>;
+  query_scene: QuerySceneV2;
+  memory_scenes: Array<Record<string, unknown>>;
+  candidates: QuerySceneCandidateV2[];
+  vibration: { current_step: number; status: string; history: Array<Record<string, unknown>> };
+  answer: { answer_mode: string; surface_answer: string; confidence: number };
+}
+
+export interface DynamicsNodeStateV2 {
+  cell_id: string;
+  label?: string;
+  node_type: string;
+  role?: string | null;
+  position: { x: number; y: number };
+  previous_position?: { x: number; y: number };
+  velocity: { x: number; y: number };
+  acceleration: { x: number; y: number };
+  mass: { global: number; local: number };
+  activation: number;
+  retention: number;
+  resonance: number;
+  gravity: number;
+  local_gravity?: number;
+  energy: number;
+  net_force: { x: number; y: number; magnitude: number };
+  distance_to_core: number;
+  distance_to_target: number;
+  eviction_score: number;
+  eviction_status: string;
+  zone: string;
+  force_breakdown: Array<Record<string, unknown>>;
+  trajectory: Array<{ step: number; x: number; y: number }>;
+}
+
+export interface DynamicsStateV2 {
+  version: number;
+  step: number;
+  status: string;
+  temperature: { status?: string; initial: number | null; current: number | null; minimum: number; maximum: number; cooling_rate: number; state?: string; history: Array<{ step: number; value: number }> };
+  capacity_pressure: number;
+  center_of_mass: { x: number; y: number };
+  zones: Record<string, number>;
+  anchors: Array<Record<string, unknown>>;
+  nodes: DynamicsNodeStateV2[];
+  history: Array<Record<string, unknown>>;
+  eviction_history: Array<Record<string, unknown>>;
+  random_seed: number;
 }
 
 export interface HiveResonanceEventV2 {

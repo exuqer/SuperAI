@@ -19,6 +19,7 @@
         <RouterLink :to="{ name: 'chat' }">Чат с ульем</RouterLink>
         <RouterLink :to="{ name: 'chat' }">Улей</RouterLink>
         <span>Аналитика</span>
+        <span v-if="projectionLabel">Проекция: {{ projectionLabel }}</span>
         <span v-if="primary">Запуск {{ compactId(primary.run.id) }}</span>
         <span v-if="selectedSnapshot">Шаг {{ selectedSnapshot.step }}</span>
       </nav>
@@ -217,13 +218,17 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { useHiveAnalytics } from '@/features/hive-analytics';
 import InfoTooltip from '@/components/InfoTooltip.vue';
 import type { HiveAnalyticsRunResultV2, HiveAnalyticsSnapshotV2, HiveAnalyticsRunV2 } from '@/entities/hive/types';
 import { formatNumber, formatPercent } from '@/shared/utils/formatters';
 
 const router = useRouter();
+const route = useRoute();
+const projectionLabel = computed(() => typeof route.query.label === 'string' && route.query.label
+  ? route.query.label
+  : typeof route.query.level === 'string' ? route.query.level : '');
 const { data, loading, error, primaryRunId, comparisonRunId, hasHive, load } = useHiveAnalytics();
 const selectedStep = ref(0);
 const viewMode = ref<'current' | 'history'>('current');

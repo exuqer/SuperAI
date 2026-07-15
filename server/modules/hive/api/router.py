@@ -17,6 +17,9 @@ from server.modules.hive.api.dto import (
     HiveExpandRequest,
     HiveGenerateRequest,
     HiveValidateSurfaceRequest,
+    HiveVibrationRequest,
+    ResonanceRequest,
+    ResonanceImportRequest,
 )
 
 router = APIRouter(prefix="/api/v2/hives", tags=["hives"])
@@ -25,6 +28,16 @@ router = APIRouter(prefix="/api/v2/hives", tags=["hives"])
 def get_hive_service() -> HiveService:
     """Dependency for HiveService."""
     return HiveService(HiveRepository())
+
+
+@router.post("/resonance/classify")
+async def classify_resonance(request: ResonanceRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.classify_resonance(request.text)
+
+
+@router.post("/query/parse")
+async def parse_query_scene(request: HiveQueryRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.parse_query(request.text)
 
 
 @router.post("")
@@ -45,9 +58,89 @@ async def get_hive(
     return service.get_hive(hive_id)
 
 
+@router.post("/{hive_id}/query/activate")
+async def activate_query_scene(hive_id: str, request: HiveQueryRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.activate_query(hive_id, request.text, request.resolved_mode or "NEW_QUERY")
+
+
+@router.post("/{hive_id}/vibrate/step")
+async def vibrate_query_scene_step(hive_id: str, request: HiveVibrationRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.vibration_step(hive_id, request.config)
+
+
+@router.post("/{hive_id}/vibrate/run")
+async def vibrate_query_scene_run(hive_id: str, request: HiveVibrationRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.vibration_run(hive_id, request.steps, request.config)
+
+
+@router.post("/{hive_id}/vibrate/stop")
+async def stop_query_scene_vibration(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.vibration_stop(hive_id)
+
+
+@router.get("/{hive_id}/dynamics")
+async def hive_dynamics(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"dynamics": service.dynamics_state(hive_id)}
+
+
+@router.get("/{hive_id}/dynamics/history")
+async def hive_dynamics_history(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"history": service.dynamics_history(hive_id)}
+
+
+@router.post("/{hive_id}/dynamics/step")
+async def hive_dynamics_step(hive_id: str, request: HiveVibrationRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"dynamics": service.dynamics_step(hive_id, request.config)}
+
+
+@router.post("/{hive_id}/dynamics/reset")
+async def hive_dynamics_reset(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"dynamics": service.dynamics_reset(hive_id)}
+
+
+@router.post("/{hive_id}/dynamics/replay")
+async def hive_dynamics_replay(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"snapshots": service.dynamics_history(hive_id)}
+
+
+@router.get("/{hive_id}/dynamics/node/{cell_id}")
+async def hive_dynamics_node(hive_id: str, cell_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"node": service.dynamics_node(hive_id, cell_id)}
+
+
+@router.get("/{hive_id}/dynamics/evictions")
+async def hive_dynamics_evictions(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"evictions": service.dynamics_evictions(hive_id)}
+
+
+@router.get("/{hive_id}/query-state")
+async def query_scene_state(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.query_working_state(hive_id)
+
+
+@router.get("/{hive_id}/json")
+async def query_scene_json(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"hive": service.query_working_state(hive_id)}
+
+
+@router.get("/{hive_id}/history")
+async def query_scene_history(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"history": service.query_working_state(hive_id)["vibration"]["history"]}
+
+
 @router.get("/{hive_id}/hierarchy")
 async def hive_hierarchy(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
     return service.hierarchy(hive_id)
+
+
+@router.get("/{hive_id}/views/root")
+async def root_hive_view(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.view(hive_id)
+
+
+@router.get("/{hive_id}/views/{view_id}")
+async def hive_view(hive_id: str, view_id: int, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.view(hive_id, view_id)
 
 
 @router.post("/{hive_id}/cells/{cell_id}/expand")
@@ -109,7 +202,37 @@ async def query_hive(
     service: HiveService = Depends(get_hive_service),
 ) -> dict[str, Any]:
     """Process a query against the hive."""
-    return service.query(hive_id, request.text)
+    return service.query(hive_id, request.text, request.resolved_mode, request.resonance_scope)
+
+
+@router.post("/{hive_id}/resonance")
+async def create_resonance_probe(hive_id: str, request: ResonanceRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"probe": service.resonance_create(hive_id, request.text, request.scope)}
+
+
+@router.post("/{hive_id}/resonance/{probe_id}/step")
+async def step_resonance_probe(hive_id: str, probe_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"probe": service.resonance_step(hive_id, probe_id)}
+
+
+@router.post("/{hive_id}/resonance/{probe_id}/run")
+async def run_resonance_probe(hive_id: str, probe_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.resonance_run(hive_id, probe_id)
+
+
+@router.get("/{hive_id}/resonance/{probe_id}")
+async def get_resonance_probe(hive_id: str, probe_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return {"probe": service.resonance_get(hive_id, probe_id)}
+
+
+@router.post("/{hive_id}/resonance/{probe_id}/import")
+async def import_resonance_match(hive_id: str, probe_id: str, request: ResonanceImportRequest, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.resonance_import(hive_id, probe_id, request.match_id, request.include_scenes)
+
+
+@router.get("/{hive_id}/resonance/{probe_id}/related-scenes")
+async def resonance_related_scenes(hive_id: str, probe_id: str, match_id: str = "", service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
+    return service.resonance_related_scenes(hive_id, probe_id, match_id)
 
 
 @router.get("/{hive_id}/resonance-events")

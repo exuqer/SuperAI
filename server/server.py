@@ -12,6 +12,8 @@ from server.core.exceptions import register_exception_handlers
 from server.modules.model.api.router import router as model_router
 from server.modules.training.api.router import router as training_router
 from server.modules.hive.api.router import router as hive_router
+from server.modules.hive.api.query_router import router as query_scene_router
+from server.modules.hive.api.dynamics_router import router as dynamics_router
 
 
 def create_app() -> FastAPI:
@@ -38,6 +40,8 @@ def create_app() -> FastAPI:
     app.include_router(model_router)
     app.include_router(training_router)
     app.include_router(hive_router)
+    app.include_router(query_scene_router)
+    app.include_router(dynamics_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

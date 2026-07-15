@@ -241,6 +241,7 @@ class HiveAnalyticsService:
 
     def _analysis(self, conn: Any, hive_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
         clouds, scene_components, cells = self._catalog(conn, hive_id)
+        working = decode(conn.execute("SELECT metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()[0], {}).get("query_working_memory", {})
         query_components = self._query_components(conn, run.get("query") or {})
         snapshot_rows = [
             self._json_row(row)
@@ -258,6 +259,22 @@ class HiveAnalyticsService:
                 created_at=str(snapshot["created_at"]), temperature=float(state.get("temperature", 0.0)),
                 delta=snapshot.get("delta", {}), events=snapshot.get("events", []),
             ))
+            if working.get("candidates") and not snapshots[-1].get("candidates"):
+                snapshots[-1]["candidates"] = [{
+                    "placement_id": node.get("placement_id"), "cell_id": node.get("cell_id"), "scene_cloud_id": 0,
+                    "scene_label": ", ".join(candidate.get("sources") or []), "answer": candidate.get("surface") or candidate.get("lemma"),
+                    "matched_components": [], "answer_components": [], "semantic_score": float(candidate.get("scores", {}).get("object_compatibility", 0.0)),
+                    "dynamic_score": float(node.get("local_activation", 0.0)), "viability": 1.0,
+                    "candidate_score": float(node.get("local_activation", 0.0)), "eviction_status": node.get("eviction_status", "ACTIVE"),
+                    "explanation": "кандидат роли из сцены памяти",
+                } for node, candidate in zip(snapshots[-1].get("nodes", []), sorted(working["candidates"], key=lambda item: -float(item.get("scores", {}).get("total", 0.0))))]
+            if working.get("candidates") and snapshots[-1].get("candidates"):
+                ranked = sorted(working["candidates"], key=lambda item: -float(item.get("scores", {}).get("total", 0.0)))
+                for index, card in enumerate(snapshots[-1]["candidates"]):
+                    if card.get("answer") is None and index < len(ranked):
+                        card["answer"] = ranked[index].get("surface") or ranked[index].get("lemma")
+                    if index < len(ranked) and card.get("answer") == (ranked[index].get("surface") or ranked[index].get("lemma")):
+                        card["semantic_score"] = max(float(card.get("semantic_score", 0.0)), float(ranked[index].get("scores", {}).get("object_compatibility", 0.0)))
         events = [
             self._json_row(row)
             for row in conn.execute(
@@ -292,7 +309,7 @@ class HiveAnalyticsService:
             nodes = [
                 dict(row)
                 for row in conn.execute(
-                    """SELECT hc.hive_placement_id AS placement_id, hc.dominant_cloud_id AS cloud_id,
+                    """SELECT hc.hive_placement_id AS placement_id, hc.dominant_cloud_id AS cloud_id, hc.component_class,
                               c.cloud_type AS node_type, p.x, p.y, p.z, 0 AS velocity_x, 0 AS velocity_y,
                               0 AS velocity_z, hc.local_activation, p.local_gravity, hc.stored_strength,
                               hc.retention AS local_stability, hc.retention,
@@ -305,17 +322,138 @@ class HiveAnalyticsService:
                     (hive_id,),
                 )
             ]
+            if hive.get("metadata", {}).get("query_working_memory", {}).get("candidates"):
+                nodes = [node for node in nodes if node.get("component_class") in {"role_candidate", "semantic_bridge"}]
         snapshot = self._snapshot_payload(
             nodes, clouds, scene_components, cells, query_components,
             step=int(hive.get("reasoning_step") or 0), phase="CURRENT",
             created_at=str(hive.get("updated_at") or ""),
             temperature=float(hive.get("current_temperature") or 0.0),
         )
+        working = (hive.get("metadata") or {}).get("query_working_memory") or {}
+        if working.get("candidates") and not snapshot.get("candidates"):
+            snapshot["candidates"] = [{
+                "placement_id": node.get("placement_id"), "cell_id": node.get("cell_id"), "scene_cloud_id": 0,
+                "scene_label": ", ".join(candidate.get("sources") or []), "answer": candidate.get("surface") or candidate.get("lemma"),
+                "matched_components": [], "answer_components": [], "semantic_score": float(candidate.get("scores", {}).get("object_compatibility", 0.0)),
+                "dynamic_score": float(candidate.get("scores", {}).get("total", 0.0)), "viability": 1.0,
+                "candidate_score": float(candidate.get("scores", {}).get("total", 0.0)), "eviction_status": "ACTIVE",
+                "explanation": "кандидат роли из сцены памяти",
+            } for node, candidate in zip(nodes, sorted(working["candidates"], key=lambda item: -float(item.get("scores", {}).get("total", 0.0))))]
         return {
             "query_components": query_components,
             "snapshot": snapshot,
             "updated_at": hive.get("updated_at"),
         }
+
+    def _query_vibration_analysis(self, conn: Any, hive: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Expose query-scene vibration as a first-class analytics timeline.
+
+        Query-scene vibration deliberately does not invoke the global physics
+        engine, so it has no ``hive_reasoning_runs`` rows.  Its persisted
+        working-memory history is nevertheless a real sequence of candidate
+        state changes and must remain visible in the laboratory.
+        """
+        working = (hive.get("metadata") or {}).get("query_working_memory") or {}
+        vibration = working.get("vibration") or {}
+        history = vibration.get("history") or []
+        candidates = working.get("candidates") or []
+        if not history or not candidates:
+            return None
+
+        hive_id = str(hive["id"])
+        run_id = f"query-vibration-{hive_id}"
+        query_frame = working.get("query_frame") or {}
+        query_components = []
+        for token in query_frame.get("tokens") or []:
+            role = next((name for name, value in (query_frame.get("roles") or {}).items() if value.get("index") == token.get("index")), "unknown")
+            row = conn.execute("SELECT cloud_id FROM word_forms WHERE normalized_form=? LIMIT 1", (str(token.get("normalized") or "").casefold(),)).fetchone()
+            query_components.append({"term": str(token.get("normalized") or "").casefold(), "role": role, "word_form_cloud_id": int(row["cloud_id"]) if row else None})
+
+        cell_rows = [dict(row) for row in conn.execute(
+            """SELECT hc.id AS cell_id, hc.hive_placement_id, hc.dominant_cloud_id,
+                      c.canonical_name FROM hive_cells hc JOIN clouds c ON c.id=hc.dominant_cloud_id
+               WHERE hc.hive_id=?""", (hive_id,)
+        )]
+        cells_by_cloud = {int(row["dominant_cloud_id"]): row for row in cell_rows}
+        lexeme_ids = {
+            str(row["lemma"]): int(row["cloud_id"])
+            for row in conn.execute("SELECT lemma, cloud_id FROM lexemes")
+        }
+        first_changes = history[0].get("candidate_changes") or []
+        scores = {str(item.get("candidate_id")): float(item.get("before", 0.0)) for item in first_changes}
+        for candidate in candidates:
+            scores.setdefault(str(candidate.get("id")), float((candidate.get("scores") or {}).get("total", 0.0)))
+
+        def nodes_for(values: Dict[str, float]) -> List[Dict[str, Any]]:
+            nodes: List[Dict[str, Any]] = []
+            for index, candidate in enumerate(candidates):
+                candidate_id = str(candidate.get("id"))
+                lemma = str(candidate.get("lemma") or candidate.get("surface") or f"candidate-{index}")
+                cloud_id = lexeme_ids.get(lemma, 0)
+                cell = cells_by_cloud.get(cloud_id, {})
+                score = clamp(values.get(candidate_id, float((candidate.get("scores") or {}).get("total", 0.0))))
+                status = str(candidate.get("status") or "new")
+                nodes.append({
+                    "placement_id": int(cell.get("hive_placement_id") or -(index + 1)),
+                    "cloud_id": cloud_id or -(index + 1), "node_type": "role_candidate",
+                    "x": 0.0, "y": 0.0, "local_activation": score,
+                    "local_gravity": score, "stored_strength": score,
+                    "local_stability": score, "retention": score, "energy": score,
+                    "eviction_status": "EVICTED" if status == "evicted" else "ACTIVE",
+                    "label": lemma, "cell_id": cell.get("cell_id"), "candidate": candidate,
+                })
+            return nodes
+
+        def snapshot(step: int, phase: str, values: Dict[str, float], event_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+            nodes = nodes_for(values)
+            count = max(1, len(nodes))
+            cards = []
+            for node in nodes:
+                candidate = node.pop("candidate")
+                cards.append({
+                    "placement_id": node["placement_id"], "cell_id": node["cell_id"], "scene_cloud_id": 0,
+                    "scene_label": ", ".join(candidate.get("sources") or []) or "сцена запроса",
+                    "answer": candidate.get("surface") or candidate.get("lemma"),
+                    "matched_components": [], "answer_components": [],
+                    "semantic_score": round(float((candidate.get("scores") or {}).get("object_compatibility", 0.0)), 6),
+                    "dynamic_score": round(float(node["local_activation"]), 6), "viability": 1.0,
+                    "candidate_score": round(float(node["local_activation"]), 6),
+                    "eviction_status": node["eviction_status"],
+                    "explanation": "; ".join((candidate.get("sources") or [])[:2]) or "кандидат роли из сцены памяти",
+                })
+            cards.sort(key=lambda item: -item["candidate_score"])
+            return {
+                "step": step, "phase": phase, "created_at": str(hive.get("updated_at") or ""),
+                "temperature": 1.0 / max(1, step + 1),
+                "metrics": {
+                    "average_activation": sum(node["local_activation"] for node in nodes) / count,
+                    "average_retention": sum(node["retention"] for node in nodes) / count,
+                    "total_energy": sum(node["energy"] for node in nodes),
+                    "active_nodes": sum(node["eviction_status"] == "ACTIVE" for node in nodes),
+                    "weakening_nodes": 0, "evicted_nodes": sum(node["eviction_status"] == "EVICTED" for node in nodes),
+                },
+                "nodes": nodes, "candidates": cards, "delta": {}, "events": event_items,
+            }
+
+        snapshots = [snapshot(0, "INITIAL", dict(scores), [])]
+        events = []
+        for event in history:
+            step = int(event.get("step") or len(snapshots))
+            changes = event.get("candidate_changes") or []
+            for change in changes:
+                scores[str(change.get("candidate_id"))] = float(change.get("after", 0.0))
+            event_items = [{"id": f"query-vibration-{step}-{index}", "step": step, "event_type": "QUERY_VIBRATION", "payload": change} for index, change in enumerate(changes)]
+            events.extend(event_items)
+            snapshots.append(snapshot(step, "AFTER_SETTLE", dict(scores), event_items))
+        run = {
+            "id": run_id, "hive_id": hive_id, "status": "COMPLETED",
+            "reasoning_steps": int(vibration.get("max_steps") or len(history)), "completed_steps": len(history),
+            "stop_reason": "COMPLETED" if vibration.get("status") == "finished" else "IN_PROGRESS",
+            "random_seed": 0, "created_at": str(hive.get("updated_at") or ""),
+            "completed_at": str(hive.get("updated_at") or ""), "query": {"terms": [item["term"] for item in query_components], "roles": [item["role"] for item in query_components]}, "config": {"engine": "query_scene_vibration"},
+        }
+        return {"run": self._run_summary(run), "query_components": query_components, "snapshots": snapshots, "events": events, "clusters": []}
 
     def get(
         self, hive_id: str, run_id: Optional[str] = None, compare_run_id: Optional[str] = None
@@ -331,19 +469,29 @@ class HiveAnalyticsService:
                     "SELECT * FROM hive_reasoning_runs WHERE hive_id = ? ORDER BY created_at DESC", (hive_id,)
                 )
             ]
+            query_vibration = self._query_vibration_analysis(conn, hive)
+            query_run = query_vibration["run"] if query_vibration else None
+            displayed_runs = ([query_run] if query_run else []) + [self._run_summary(run) for run in runs]
             by_id = {str(run["id"]): run for run in runs}
-            primary_id = run_id or (str(runs[0]["id"]) if runs else None)
+            primary_id = run_id or (str(query_run["id"]) if query_run else (str(runs[0]["id"]) if runs else None))
+            if query_run and primary_id == str(query_run["id"]):
+                primary = query_vibration
+            else:
+                primary = self._analysis(conn, hive_id, by_id[primary_id]) if primary_id else None
             if primary_id and primary_id not in by_id:
-                raise KeyError(primary_id)
+                if not query_run or primary_id != str(query_run["id"]):
+                    raise KeyError(primary_id)
             comparison_id = compare_run_id
             if comparison_id is None and primary_id:
-                comparison_id = next((str(run["id"]) for run in runs if str(run["id"]) != primary_id), None)
+                comparison_id = next((str(run["id"]) for run in displayed_runs if str(run["id"]) != primary_id), None)
             if comparison_id and comparison_id not in by_id:
-                raise KeyError(comparison_id)
+                if not query_run or comparison_id != str(query_run["id"]):
+                    raise KeyError(comparison_id)
+            comparison = query_vibration if query_run and comparison_id == str(query_run["id"]) else (self._analysis(conn, hive_id, by_id[comparison_id]) if comparison_id else None)
             return {
                 "hive_id": hive_id,
                 "current": self._current(conn, hive),
-                "runs": [self._run_summary(run) for run in runs],
-                "primary": self._analysis(conn, hive_id, by_id[primary_id]) if primary_id else None,
-                "comparison": self._analysis(conn, hive_id, by_id[comparison_id]) if comparison_id else None,
+                "runs": displayed_runs,
+                "primary": primary,
+                "comparison": comparison,
             }

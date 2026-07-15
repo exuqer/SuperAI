@@ -10,11 +10,21 @@ from .repository import V2Repository
 from .vibration import HiveVibrationEngine, QueryActivation, VibrationConfig
 from .export import HiveExportService
 from .analytics import HiveAnalyticsService
+from .query_scene import QuerySceneService
+from .unknown_search import UnknownTokenSearchService
+from .morphology import MorphologyService
+from .dynamics import HiveDynamicsService
+from .resonance import InputIntentClassifier, ResonanceProbeService, PROBE_INTENTS
 
 
 class V2HiveService:
     def __init__(self, repository: Optional[V2Repository] = None, config: Optional[HiveLocalMemoryConfig] = None) -> None:
         self.service = V2LocalMemoryService(repository, config)
+        self.query_scenes = QuerySceneService(self.service.repository)
+        self.unknown_searches = UnknownTokenSearchService(self.service.repository)
+        self.dynamics = HiveDynamicsService(self.service.repository)
+        self.intent_classifier = InputIntentClassifier(self.service.repository)
+        self.resonance = ResonanceProbeService(self.service.repository)
 
     def create(self, max_cells: int = 24, conversation_id: str = "") -> Dict[str, Any]:
         return self.service.create_hive(max_cells, conversation_id)
@@ -22,8 +32,202 @@ class V2HiveService:
     def preview(self, hive_id: str, text: str) -> Dict[str, Any]:
         return self.service.preview(hive_id, text)
 
-    def query(self, hive_id: str, text: str) -> Dict[str, Any]:
-        return self.service.query(hive_id, text)
+    def query(
+        self,
+        hive_id: str,
+        text: str,
+        resolved_mode: Optional[str] = None,
+        resonance_scope: str = "LOCAL_THEN_GLOBAL",
+    ) -> Dict[str, Any]:
+        intent = self.intent_classifier.classify(text)
+        if intent in PROBE_INTENTS:
+            scope = resonance_scope if resonance_scope in {"LOCAL_ONLY", "LOCAL_THEN_GLOBAL", "GLOBAL_ONLY"} else "LOCAL_THEN_GLOBAL"
+            probe = self.resonance.create(hive_id, text, scope)
+            self.resonance.run(hive_id, probe["id"])
+            state = self.resonance.state(hive_id)
+            return {
+                "message_id": probe["message_id"], "intent": intent, "resolved_mode": intent,
+                "decision": {"decision": "LEXICAL_RESONANCE_PROBE", "external_search_required": False, "reasons": ["input classified before scene parsing"], "matches": []},
+                "metrics": {"external_search": False, "local_resonance": True, "working_cells": state["stats"]["working_cells"]},
+                "external_search": {"sources": [], "bees": [], "iterations": 0, "anchors": []}, "merge_results": [], "resonance_events": [],
+                **state,
+            }
+        mode = self.query_scenes.resolve_mode(hive_id, text, resolved_mode)
+        if mode == "LOCAL_RESONANCE":
+            allow_global = resonance_scope == "LOCAL_THEN_GLOBAL"
+            working_hive = self.query_scenes.local_resonance(hive_id, text, allow_global=allow_global)
+            working_hive["dynamics"] = self.dynamics.get(hive_id)
+            return {
+                "message_id": working_hive.get("query_session", {}).get("message_id", ""),
+                "resolved_mode": mode,
+                "decision": {"decision": "LOCAL_RESONANCE", "external_search_required": False, "reasons": ["single-token probe routed to active hive"], "matches": []},
+                "metrics": {"external_search": False, "local_resonance": True},
+                "external_search": {"sources": [], "bees": [], "iterations": 0, "anchors": []},
+                "merge_results": [], "resonance_events": [], "cells": working_hive.get("cells", []),
+                "hive": working_hive.get("hive", {}), "local_resonance": working_hive.get("local_resonance"),
+                "resonance_probes": working_hive.get("resonance_probes", []),
+                "resonance_scope": "LOCAL_THEN_GLOBAL" if allow_global else "LOCAL_ONLY",
+                **{key: working_hive.get(key) for key in ("query_frame", "query_scene", "memory_scenes", "candidates", "answer", "pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure")},
+            }
+        result = self.service.query(hive_id, text)
+        parsed = self.query_scenes.parse(text)
+        self.query_scenes.activate(hive_id, text, mode)
+        working_hive = self.query_scenes.get(hive_id)
+        result.update({
+            "query_frame": working_hive["query_frame"],
+            "query_scene": working_hive["query_scene"],
+            "memory_scenes": working_hive["memory_scenes"],
+            "candidates": working_hive["candidates"],
+            "answer": working_hive["answer"],
+        })
+        if parsed["query_frame"].get("requested_role"):
+            searches = self.unknown_searches.resolve_query_unknowns(hive_id)
+            if searches:
+                result.update(self.service.get_hive(hive_id))
+                working_hive = self.query_scenes.get(hive_id)
+                result.update({
+                    "query_frame": working_hive["query_frame"],
+                    "query_scene": working_hive["query_scene"],
+                    "memory_scenes": working_hive["memory_scenes"],
+                    "candidates": working_hive["candidates"],
+                    "answer": working_hive["answer"],
+                    "pipeline": working_hive.get("pipeline", {}),
+                    "unknown_token_searches": searches,
+                })
+            else:
+                working_hive = self.query_scenes.get(hive_id)
+        result["cells"] = working_hive.get("cells", result.get("cells", []))
+        result.update({key: working_hive.get(key) for key in ("pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "resonance_probes", "local_resonance") if key in working_hive})
+        result["dynamics"] = self.dynamics.get(hive_id)
+        working_hive = self.query_scenes.get(hive_id)
+        result["resolved_mode"] = mode
+        result["hive"] = {**result.get("hive", {}), "intent": working_hive.get("hive", {}).get("intent"), "pipeline": working_hive.get("pipeline", {}), "capacity": working_hive.get("hive", {}).get("capacity", result.get("hive", {}).get("capacity")), "energy": working_hive.get("hive", {}).get("energy", result.get("hive", {}).get("energy")), "max_cells": result.get("hive", {}).get("max_cells", 24)}
+        result["hive"].pop("total_energy", None)
+        return result
+
+    def unknown_search_start(self, hive_id: str, surface: str, token_index: int, query_role: str = "", query_scene_id: str = "") -> Dict[str, Any]:
+        return self.unknown_searches.start(hive_id, surface, token_index, query_role, query_scene_id)
+
+    def unknown_search_step(self, hive_id: str, search_id: str) -> Dict[str, Any]:
+        return self.unknown_searches.step(hive_id, search_id)
+
+    def unknown_search_run(self, hive_id: str, search_id: str) -> Dict[str, Any]:
+        return self.unknown_searches.run(hive_id, search_id)
+
+    def unknown_search_vibrate(self, hive_id: str, search_id: str) -> Dict[str, Any]:
+        return self.unknown_searches.vibrate(hive_id, search_id)
+
+    def unknown_search_get(self, hive_id: str, search_id: str) -> Dict[str, Any]:
+        return self.unknown_searches.get(hive_id, search_id)
+
+    def unknown_search_evidence(self, hive_id: str, search_id: str) -> List[Dict[str, Any]]:
+        return self.unknown_searches.evidence(hive_id, search_id)
+
+    def unknown_search_routes(self, hive_id: str, search_id: str) -> List[Dict[str, Any]]:
+        return self.unknown_searches.routes(hive_id, search_id)
+
+    def unknown_search_confirm(self, hive_id: str, search_id: str) -> Dict[str, Any]:
+        return self.unknown_searches.confirm(hive_id, search_id)
+
+    def parse_query(self, text: str) -> Dict[str, Any]:
+        return self.query_scenes.parse(text)
+
+    def classify_resonance(self, text: str) -> Dict[str, str]:
+        return self.resonance.classify(text)
+
+    def resonance_create(self, hive_id: str, text: str, scope: str = "LOCAL_THEN_GLOBAL") -> Dict[str, Any]:
+        return self.resonance.create(hive_id, text, scope)
+
+    def resonance_step(self, hive_id: str, probe_id: str) -> Dict[str, Any]:
+        return self.resonance.step(hive_id, probe_id)
+
+    def resonance_run(self, hive_id: str, probe_id: str) -> Dict[str, Any]:
+        return self.resonance.run(hive_id, probe_id)
+
+    def resonance_get(self, hive_id: str, probe_id: str) -> Dict[str, Any]:
+        return self.resonance.get(hive_id, probe_id)
+
+    def resonance_import(self, hive_id: str, probe_id: str, match_id: str, include_scenes: bool = False) -> Dict[str, Any]:
+        return self.resonance.import_match(hive_id, probe_id, match_id, include_scenes)
+
+    def resonance_related_scenes(self, hive_id: str, probe_id: str, match_id: str = "") -> Dict[str, Any]:
+        return self.resonance.related_scenes(hive_id, probe_id, match_id)
+
+    def activate_query(self, hive_id: str, text: str, resolved_mode: str = "NEW_QUERY") -> Dict[str, Any]:
+        result = self.query_scenes.activate(hive_id, text, resolved_mode)
+        result["dynamics"] = self.dynamics.get(hive_id)
+        return result
+
+    def vibration_step(self, hive_id: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        try:
+            state = self.resonance.state(hive_id)
+            if not state["vibration"]["enabled"]:
+                raise ValueError("Для запуска вибрации сначала перенесите хотя бы один результат резонанса в улей")
+            dynamics = self.dynamics.step(hive_id, config)
+            state["dynamics"] = dynamics
+            return {"step": int(dynamics.get("step", 0)), "candidates": [], "history_event": None, "hive": state}
+        except KeyError:
+            pass
+        result = self.query_scenes.step(hive_id, config)
+        result["dynamics"] = self.dynamics.step(hive_id, config)
+        result["hive"] = self.query_scenes.get(hive_id)
+        result["hive"]["dynamics"] = result["dynamics"]
+        return result
+
+    def vibration_run(self, hive_id: str, steps: int = 3, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        try:
+            state = self.resonance.state(hive_id)
+            if not state["vibration"]["enabled"]:
+                raise ValueError("Для запуска вибрации сначала перенесите хотя бы один результат резонанса в улей")
+            for _ in range(max(1, int(steps))):
+                self.dynamics.step(hive_id, config)
+            state = self.resonance.state(hive_id)
+            state["dynamics"] = self.dynamics.get(hive_id)
+            return {"status": "FINISHED", "steps_completed": max(1, int(steps)), "winner": None, "answer": None, "hive": state}
+        except KeyError:
+            pass
+        result = self.query_scenes.run(hive_id, steps, config)
+        for _ in range(int(result.get("steps_completed", 0))):
+            self.dynamics.step(hive_id, config)
+        result["dynamics"] = self.dynamics.get(hive_id)
+        result["hive"] = self.query_scenes.get(hive_id)
+        result["hive"]["dynamics"] = result["dynamics"]
+        return result
+
+    def dynamics_state(self, hive_id: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self.dynamics.get(hive_id, config)
+
+    def dynamics_step(self, hive_id: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self.dynamics.step(hive_id, config)
+
+    def dynamics_history(self, hive_id: str) -> List[Dict[str, Any]]:
+        return self.dynamics.history(hive_id)
+
+    def dynamics_reset(self, hive_id: str) -> Dict[str, Any]:
+        return self.dynamics.reset(hive_id)
+
+    def dynamics_node(self, hive_id: str, cell_id: str) -> Dict[str, Any]:
+        return self.dynamics.node(hive_id, cell_id)
+
+    def dynamics_evictions(self, hive_id: str) -> List[Dict[str, Any]]:
+        return self.dynamics.evictions(hive_id)
+
+    def vibration_stop(self, hive_id: str) -> Dict[str, Any]:
+        return self.query_scenes.stop(hive_id)
+
+    def query_working_state(self, hive_id: str) -> Dict[str, Any]:
+        try:
+            state = self.resonance.state(hive_id)
+            state["dynamics"] = self.dynamics.get(hive_id)
+            return state
+        except KeyError:
+            pass
+        state = self.query_scenes.get(hive_id)
+        state["dynamics"] = self.dynamics.get(hive_id)
+        return state
+
+    def generate(self, hive_id: str, sentence_plan: Dict[str, Any]) -> Dict[str, Any]:
+        return MorphologyService(self.service.repository).generate_sentence(hive_id, sentence_plan)
 
     def forage(self, query: str, max_cells: int = 24) -> Dict[str, Any]:
         """Compatibility helper: create a hive and process its first query."""
@@ -35,10 +239,14 @@ class V2HiveService:
 
     def reason(self, hive_id: str, text: str = "", config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self.service.repository.transaction() as conn:
-            hive = conn.execute("SELECT query_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+            hive = conn.execute("SELECT query_json, metadata_json FROM hives WHERE id=?", (hive_id,)).fetchone()
             if not hive:
                 raise KeyError(hive_id)
             parsed = self.service.parser.parse(text, conn) if text else json.loads(hive["query_json"] or "{}")
+            if not parsed.get("components"):
+                working = json.loads(hive["metadata_json"] or "{}").get("query_working_memory", {})
+                frame = working.get("query_frame", {})
+                parsed["components"] = [{"normalized_form": token.get("normalized", ""), "word_form_cloud_id": token.get("word_form_cloud_id"), "expected_role": next((role for role, value in frame.get("roles", {}).items() if value.get("index") == token.get("index")), ""), "resolution_state": token.get("resolution_state", "") } for token in frame.get("tokens", [])]
         components = [
             item.to_dict() if hasattr(item, "to_dict") else item
             for item in parsed.get("components", [])
