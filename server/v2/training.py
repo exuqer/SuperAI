@@ -94,7 +94,17 @@ class RoleResolver:
                     role, dependency, confidence = "complement", "prepositional", 0.82
                 else:
                     role, dependency, confidence = "instrument", "prepositional", 0.88
-            elif definition_index is not None and index > definition_index and morph.pos_tag in self.NOUNS:
+            elif (
+                definition_index is not None
+                and index < definition_index
+                and morph.pos_tag in self.NOUNS | self.VERBS
+            ):
+                role, dependency, confidence = "subject", "defined", 0.88
+            elif (
+                definition_index is not None
+                and index > definition_index
+                and morph.pos_tag in self.NOUNS | self.VERBS
+            ):
                 role, dependency, confidence = "definition", "defines", 0.84
             elif morph.pos_tag in self.VERBS:
                 role, dependency, confidence = "predicate", "root", 0.92
@@ -221,7 +231,7 @@ class WordFormStructureService:
 
 
 class TrainingPipelineV2:
-    parser_version = "ru-rule-v3"
+    parser_version = "ru-rule-v4"
 
     def __init__(self, repository: Optional[V2Repository] = None) -> None:
         self.repository = repository or V2Repository()

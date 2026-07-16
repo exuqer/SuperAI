@@ -14,7 +14,7 @@ from .repository import V2Repository, encode, utcnow
 
 
 class SemanticFogService:
-    EXTRACTOR_VERSION = 4
+    EXTRACTOR_VERSION = 5
     DEFINITION_WEIGHT = .90
     CATEGORY_WEIGHT = .70
     CONTEXT_WEIGHT = .65
@@ -97,6 +97,20 @@ class SemanticFogService:
         if definition_mark:
             left = next((item for item in words if item["token_index"] < definition_mark["token_index"] and item["grammatical_role"] == "subject"), None)
             right = next((item for item in words if item["token_index"] > definition_mark["token_index"] and item["grammatical_role"] == "definition"), None)
+            if not left or not right:
+                left_predicates = [
+                    item for item in words
+                    if item["token_index"] < definition_mark["token_index"]
+                    and item["grammatical_role"] == "predicate"
+                ]
+                right_predicates = [
+                    item for item in words
+                    if item["token_index"] > definition_mark["token_index"]
+                    and item["grammatical_role"] == "predicate"
+                ]
+                if left_predicates and right_predicates:
+                    left = max(left_predicates, key=lambda item: item["token_index"])
+                    right = min(right_predicates, key=lambda item: item["token_index"])
             if left and right:
                 defined_id = int(left["lexeme_cloud_id"])
                 definition_id = int(right["lexeme_cloud_id"])

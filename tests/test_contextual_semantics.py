@@ -3,6 +3,7 @@
 from server.v2.hive import V2HiveService
 from server.v2.query_scene import QuerySceneService
 from server.v2.repository import V2Repository, decode, encode
+from server.v2.semantic_fog import SemanticFogService
 from server.v2.training import TrainingPipelineV2
 
 
@@ -75,6 +76,74 @@ def test_definition_evidence_materializes_idempotent_local_concept_fog():
         )]
         assert global_after == global_before
         assert conn.execute("SELECT COUNT(*) FROM concept_fog_registry").fetchone()[0] == fog_count
+
+
+def test_verbal_definition_connects_query_predicate_to_memory_predicate():
+    pipeline = TrainingPipelineV2()
+    trained = pipeline.train("Кот ест рыбу. Кушать — это есть.")
+    repository = V2Repository()
+    definition_scene_id = trained["scenes"][1]["scene_cloud_id"]
+
+    with repository.transaction() as conn:
+        roles = [
+            tuple(row)
+            for row in conn.execute(
+                """SELECT l.lemma, sc.grammatical_role
+                FROM scene_components sc
+                JOIN lexemes l ON l.cloud_id=sc.lexeme_cloud_id
+                WHERE sc.scene_cloud_id=? AND sc.grammatical_role <> 'service'
+                ORDER BY sc.token_index""",
+                (definition_scene_id,),
+            )
+        ]
+        evidence = conn.execute(
+            """SELECT evidence_type FROM semantic_evidence
+            WHERE source_scene_cloud_id=?""",
+            (definition_scene_id,),
+        ).fetchone()
+
+    assert roles == [("кушать", "subject"), ("есть", "definition")]
+    assert evidence["evidence_type"] == "definition"
+
+    with repository.transaction() as conn:
+        conn.execute(
+            """UPDATE scene_components SET grammatical_role='predicate'
+            WHERE scene_cloud_id=? AND grammatical_role <> 'service'""",
+            (definition_scene_id,),
+        )
+        conn.execute(
+            "DELETE FROM semantic_evidence WHERE source_scene_cloud_id=?",
+            (definition_scene_id,),
+        )
+        conn.execute(
+            """UPDATE semantic_backfill_state SET semantic_extractor_version=4
+            WHERE source_scene_cloud_id=?""",
+            (definition_scene_id,),
+        )
+        SemanticFogService(repository)._evidence_for_scene(conn, definition_scene_id)
+        legacy_evidence = conn.execute(
+            """SELECT evidence_type FROM semantic_evidence
+            WHERE source_scene_cloud_id=?""",
+            (definition_scene_id,),
+        ).fetchone()
+
+    assert legacy_evidence["evidence_type"] == "definition"
+
+    service = V2HiveService(repository)
+    result = service.query(service.create()["hive"]["id"], "А кто кушает рыбу?")
+    assert result["candidates"][0]["lemma"] == "кот"
+    action_match = next(
+        scene["role_match_details"]["action"]
+        for scene in result["memory_scenes"]
+        if scene["source_text"].startswith("Кот ест рыбу")
+    )
+    assert action_match["match_type"] == "stable_concept"
+    assert action_match["role_match_score"] == .85
+
+    polar = service.query(service.create()["hive"]["id"], "Кот кушает рыбу?")
+    assert polar["answer"]["status"] == "RESOLVED"
+    assert polar["answer"]["resolved_value"] is True
+    assert polar["answer"]["evidence_status"] == "SUPPORTED"
 
 
 def test_distributional_evidence_compares_equal_roles_not_cooccurring_words():

@@ -370,7 +370,7 @@ export const useHiveStore = defineStore('hive', () => {
       await hierarchy(false);
       await loadSnapshot();
       await loadMultilevelViews();
-      if (result.resolved_mode !== 'LOCAL_RESONANCE' && queryScene.value && queryAnswer.value?.status !== 'RESOLVED') {
+      if (result.resolved_mode !== 'LOCAL_RESONANCE' && queryScene.value && !queryAnswer.value?.surface_answer) {
         await runReasoning();
       }
     } catch (cause) {
@@ -611,7 +611,7 @@ export const useHiveStore = defineStore('hive', () => {
 
   function ensureAssistantAnswer(messageId: string | undefined, answer: typeof queryAnswer.value) {
     const text = String(answer?.full_surface_answer || answer?.surface_answer || '').trim();
-    if (answer?.status !== 'RESOLVED' || !text) return;
+    if (!text) return;
     const lastMessage = messages.value.at(-1);
     if (lastMessage?.role === 'assistant' && lastMessage.text === text) return;
     messages.value.push({

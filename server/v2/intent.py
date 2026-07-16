@@ -34,11 +34,12 @@ class IntentClassifier:
         location = self._location(source)
         words = re.findall(r"[\w-]+", normalized, flags=re.UNICODE)
         has_scene_question = any(word in QUESTION_WORDS for word in words)
+        has_question_mark = source.rstrip().endswith("?")
         if greeting and small_talk_type:
             intent = "GREETING_WITH_SMALL_TALK"
         elif small_talk_type:
             intent = "SMALL_TALK"
-        elif has_scene_question:
+        elif has_scene_question or has_question_mark:
             intent = "SCENE_QUESTION"
         elif greeting:
             intent = "GREETING"
@@ -52,6 +53,8 @@ class IntentClassifier:
             else:
                 intent = "UNKNOWN"
         result: Dict[str, Any] = {"intent": intent, "source_text": source}
+        if intent == "SCENE_QUESTION":
+            result["question_kind"] = "role" if has_scene_question else "polar"
         if greeting:
             result["greeting"] = {"surface": greeting.capitalize() if greeting == "привет" else greeting}
         if small_talk_type:

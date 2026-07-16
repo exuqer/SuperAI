@@ -1,6 +1,8 @@
 import pytest
 
 from server.v2.dynamics import DynamicsConfig, DynamicsEngine, DynamicsNodeState, DynamicsState
+from server.v2.hive import V2HiveService
+from server.v2.training import TrainingPipelineV2
 
 
 def make_state(seed=7):
@@ -80,3 +82,40 @@ def test_grace_period_prevents_first_step_eviction():
     DynamicsEngine().step(state)
     assert node.eviction_status != "EVICTED"
     assert state.history and state.history[0]["nodes"]
+
+
+def test_memory_source_only_hive_vibrates_for_requested_steps():
+    TrainingPipelineV2().train("Лисичка ест ягоду. Лисичка ест грушу.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    service.query(hive_id, "Лисичка ест ягоду.")
+    service.query(hive_id, "А ещё что?")
+    service.vibration_run(hive_id, 3)
+    repeated = service.query(hive_id, "А ещё что?")
+
+    assert repeated["candidates"] == []
+    assert any(cell["component_class"] == "memory_source" for cell in repeated["cells"])
+
+    result = service.vibration_run(hive_id, 3)
+    dynamics = result["hive"]["dynamics"]
+
+    assert result["steps_completed"] == 3
+    assert len(result["hive"]["vibration"]["history"]) == 3
+    assert dynamics["step"] == 3
+    assert dynamics["status"] in {"STABLE", "STABILIZING"}
+    assert dynamics["nodes"]
+    assert dynamics["temperature"]["current"] < dynamics["temperature"]["initial"]
+    assert len(dynamics["nodes"][0]["trajectory"]) == 4
+
+
+def test_query_uses_the_trained_role_of_an_instrumental_object():
+    TrainingPipelineV2().train("Рыбак питается овощами. Питаться — это есть.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    result = service.query(hive_id, "Что ест рыбак?")
+
+    source = next(scene for scene in result["memory_scenes"] if scene["source_text"] == "Рыбак питается овощами.")
+    assert source["roles"]["object"]["lemma"] == "овощ"
+    assert [candidate["lemma"] for candidate in result["candidates"]] == ["овощ"]

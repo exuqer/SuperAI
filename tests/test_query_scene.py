@@ -3,6 +3,7 @@ import uuid
 from server.v2.hive import V2HiveService
 from server.v2.analytics import HiveAnalyticsService
 from server.v2.query_scene import QuerySceneService
+from server.v2.repository import V2Repository
 from server.v2.training import TrainingPipelineV2
 
 
@@ -96,6 +97,84 @@ def test_question_roles_object_location_and_instrument():
     instrument_answer = service.vibration_run(hive_id, 3)["answer"]
     assert instrument_answer["surface_answer"] == "Сетью."
     assert instrument_answer["full_surface_answer"] == "Рыбак ловит рыбу сетью."
+
+
+def test_how_question_resolves_to_observed_instrument():
+    service, hive_id, result = _ask(
+        "Рыбак ловит рыбу удочкой.",
+        "Как рыбу ловит рыбак?",
+    )
+
+    assert result["query_frame"]["requested_role"] == "instrument"
+    assert result["candidates"][0]["lemma"] == "удочка"
+
+    answer = service.vibration_run(hive_id, 3)["answer"]
+    assert answer["surface_answer"] == "Удочкой."
+    assert answer["full_surface_answer"] == "Рыбак ловит рыбу удочкой."
+
+
+def test_polar_question_returns_supported_contradicted_or_unknown_answer():
+    TrainingPipelineV2().train("Кот ест рыбу.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    supported = service.query(hive_id, "Кот ест рыбу?")
+    assert supported["query_frame"]["intent"] == "SCENE_QUESTION"
+    assert supported["query_frame"]["query_type"] == "polar_question"
+    assert supported["answer"]["status"] == "RESOLVED"
+    assert supported["answer"]["resolved_value"] is True
+    assert supported["answer"]["full_surface_answer"] == "Да. Кот ест рыбу."
+    assert supported["answer"]["evidence_status"] == "SUPPORTED"
+    assert service.query_working_state(hive_id)["vibration"]["status"] == "FINISHED"
+
+    contradicted = service.query(hive_id, "Кот не ест рыбу?")
+    assert contradicted["answer"]["status"] == "RESOLVED"
+    assert contradicted["answer"]["resolved_value"] is False
+    assert contradicted["answer"]["full_surface_answer"] == "Нет. Кот ест рыбу."
+    assert contradicted["answer"]["evidence_status"] == "CONTRADICTED"
+
+    unknown = service.query(hive_id, "Рыбак ест?")
+    assert unknown["answer"]["status"] == "UNRESOLVED"
+    assert unknown["answer"]["resolved_value"] is None
+    assert unknown["answer"]["surface_answer"] == "В доступной памяти недостаточно данных."
+    assert unknown["answer"]["evidence_status"] == "INSUFFICIENT_EVIDENCE"
+
+    with V2Repository().transaction() as conn:
+        stored_questions = conn.execute(
+            """SELECT COUNT(*) FROM hive_dialogue_scenes
+            WHERE hive_id=? AND RTRIM(source_text) LIKE '%?'""",
+            (hive_id,),
+        ).fetchone()[0]
+    assert stored_questions == 0
+
+
+def test_need_question_requests_purpose_then_uses_it_to_find_instrument():
+    TrainingPipelineV2().train(
+        "Рыбак ловит рыбу удочкой. Рыбак питается овощами."
+    )
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    need = service.query(hive_id, "Что нужно рыбаку?")
+    assert need["query_frame"]["query_type"] == "need_question"
+    assert need["query_frame"]["requested_role"] == "instrument"
+    assert need["query_frame"]["roles"]["agent"]["lemma"] == "рыбак"
+    assert need["candidates"] == []
+    assert need["answer"]["evidence_status"] == "NEEDS_CLARIFICATION"
+    assert need["answer"]["surface_answer"] == "Уточните, для какого действия это нужно."
+
+    purpose = service.query(hive_id, "Чтобы ловить рыбу?")
+    assert purpose["resolved_mode"] == "FOLLOW_UP"
+    assert purpose["query_frame"]["query_type"] == "continuation_role_question"
+    assert purpose["query_frame"]["requested_role"] == "instrument"
+    assert purpose["query_frame"]["roles"]["agent"]["lemma"] == "рыбак"
+    assert purpose["query_frame"]["roles"]["action"]["lemma"] == "ловить"
+    assert purpose["query_frame"]["roles"]["object"]["lemma"] == "рыба"
+    assert [candidate["lemma"] for candidate in purpose["candidates"]] == ["удочка"]
+
+    answer = service.vibration_run(hive_id, 3)["answer"]
+    assert answer["surface_answer"] == "Удочкой."
+    assert answer["full_surface_answer"] == "Рыбак ловит рыбу удочкой."
 
 
 def test_unmatched_explicit_anchor_stays_visible_but_is_not_answer_candidate():

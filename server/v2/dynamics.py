@@ -460,7 +460,7 @@ class DynamicsEngine:
         cfg = self.config
         active = [node for node in state.nodes if node.eviction_status != "EVICTED"]
         reasoning = [node for node in active if node.node_type in REASONING_CLASSES]
-        if not reasoning:
+        if not active:
             state.status = "IDLE"
             return state
         state.step += 1
@@ -625,11 +625,11 @@ class HiveDynamicsService:
 
     def _initial(self, conn: Any, hive_id: str, state: Dict[str, Any], config: DynamicsConfig) -> DynamicsState:
         existing = DynamicsState.from_dict(state.get("dynamics"))
-        has_reasoning_input = bool(state.get("query_scene") and state.get("candidates"))
+        query_scene = state.get("query_scene") or {}
+        has_reasoning_input = bool(query_scene)
         if state.get("dynamics") and not (has_reasoning_input and (existing.status == "IDLE" or not existing.nodes)):
             return existing
-        query_scene = state.get("query_scene") or {}
-        if not query_scene or not state.get("candidates"):
+        if not query_scene:
             return DynamicsState(status="IDLE", initial_temperature=config.temperature.default, current_temperature=config.temperature.default, minimum_temperature=config.temperature.minimum, maximum_temperature=config.temperature.maximum, cooling_rate=config.temperature.cooling_rate, temperature_state="NOT_STARTED", zones=asdict(config.zones), random_seed=config.random_seed)
         slots = query_scene.get("slots") or []
         roles = [str(slot.get("role")) for slot in slots if slot.get("role")]
@@ -686,6 +686,8 @@ class HiveDynamicsService:
             nodes[-1].local_mass = DynamicsEngine(config).local_mass(nodes[-1])
             nodes[-1].local_gravity = DynamicsEngine(config).gravity(nodes[-1])
             nodes[-1].trajectory = [{"step": 0, "x": position_x, "y": position_y}]
+        if not nodes:
+            return DynamicsState(status="IDLE", initial_temperature=config.temperature.default, current_temperature=config.temperature.default, minimum_temperature=config.temperature.minimum, maximum_temperature=config.temperature.maximum, cooling_rate=config.temperature.cooling_rate, temperature_state="NOT_STARTED", zones=asdict(config.zones), random_seed=config.random_seed)
         return DynamicsState(initial_temperature=config.temperature.default, current_temperature=config.temperature.default, minimum_temperature=config.temperature.minimum, maximum_temperature=config.temperature.maximum, cooling_rate=config.temperature.cooling_rate, temperature_state=DynamicsEngine.temperature_state(config.temperature.default), temperature_history=[{"step": 0, "value": config.temperature.default}], zones=asdict(config.zones), anchors=anchors, nodes=nodes, random_seed=config.random_seed)
 
     def _sync_candidates(self, state: Dict[str, Any], dynamics: DynamicsState) -> None:

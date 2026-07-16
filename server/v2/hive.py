@@ -94,7 +94,7 @@ class V2HiveService:
             "candidates": working_hive["candidates"],
                     "answer": working_hive["answer"],
                 })
-        if parsed["query_frame"].get("requested_role"):
+        if parsed["query_frame"].get("requested_role") and not parsed["query_frame"].get("requires_clarification"):
             searches = self.unknown_searches.resolve_query_unknowns(hive_id)
             if searches:
                 result.update(self.service.get_hive(hive_id))
