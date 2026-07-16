@@ -1355,6 +1355,9 @@ class QuerySceneService:
         step = int(state.get("vibration", {}).get("current_step", 0)) + 1
         if (step <= 1 and first_score >= .65 and gap >= .08) or (step >= 2 and first_score >= .55 and first.get("stable_steps", 0) >= 1 and gap >= .02):
             return first
+        if step >= int(config["max_steps"]) and first_score >= .55:
+            first["selection_reason"] = "лучший устойчивый кандидат выбран после ограниченной вибрации"
+            return first
         return None
 
     def _resolve(self, state: Dict[str, Any], winner: Dict[str, Any], step: int) -> None:
@@ -1491,6 +1494,26 @@ class QuerySceneService:
                 for part in (slot.get("preposition", ""), slot.get("surface", ""))
                 if part
             ).capitalize() + "."
+            contextual_roles = {
+                name: value
+                for name, value in roles.items()
+                if isinstance(value, dict) and value.get("status") == "fixed"
+            }
+            is_contextual_scene_answer = (
+                role == "object"
+                and source_scene is not None
+                and not any(name in contextual_roles for name in ("agent", "action", "object"))
+                and any(name in contextual_roles for name in ("location", "destination", "source", "time"))
+                and str(state.get("query_frame", {}).get("source_text") or "").casefold().strip().startswith("что на ")
+            )
+            if is_contextual_scene_answer:
+                contextual_surface = str(source_scene.get("source_text") or "").strip()
+                if contextual_surface:
+                    contextual_surface = contextual_surface if contextual_surface.endswith((".", "!", "?")) else contextual_surface + "."
+                    short = contextual_surface
+                    full = contextual_surface
+                    full_plan["answer_style"] = "contextual_scene"
+                    full_plan["semantic_resolution"] = "location_anchored_scene"
             if winner.get("answer_mode") == "explanation" and source_scene:
                 explanatory_text = str(source_scene.get("source_text", "")).strip()
                 explanatory_text = explanatory_text if explanatory_text.endswith((".", "!", "?")) else explanatory_text + "."
@@ -1516,7 +1539,7 @@ class QuerySceneService:
             answer = state["answer"]
             confidence = float(winner["scores"].get("semantic_total", winner["scores"].get("answer_confidence", winner["scores"]["total"])))
             validation = self.reverse_validate(state, full, answer_roles)
-            answer.update({"status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED", "answer_mode": answer.get("answer_mode") if answer.get("answer_mode") not in {"pending", "unknown"} else "probable", "surface_answer": short, "full_surface_answer": full, "confidence": confidence, "short": {"surface": short, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}, "full": {"surface": full, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}})
+            answer.update({"status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED", "answer_mode": "contextual_scene" if is_contextual_scene_answer else answer.get("answer_mode") if answer.get("answer_mode") not in {"pending", "unknown"} else "probable", "source_scene_id": (source_scene or {}).get("id"), "surface_answer": short, "full_surface_answer": full, "confidence": confidence, "short": {"surface": short, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}, "full": {"surface": full, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}})
             score_breakdown = self._score_breakdown()
             row = conn.execute("SELECT cloud_id FROM lexemes WHERE lemma=? LIMIT 1", (winner["lemma"],)).fetchone()
             candidate = {
@@ -1563,11 +1586,37 @@ class QuerySceneService:
 
     @staticmethod
     def _supporting_scene(state: Dict[str, Any], winner: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        source_ids = [winner.get("primary_source_id"), *winner.get("sources", [])]
-        return next(
-            (scene for source_id in source_ids for scene in state.get("memory_scenes", []) if scene.get("id") == source_id),
-            None,
-        )
+        source_ids = {str(source_id) for source_id in [winner.get("primary_source_id"), *winner.get("sources", [])] if source_id}
+        answer_scene_id = str(winner.get("answer_scene_id") or "")
+        if answer_scene_id:
+            explained_scene = next((scene for scene in state.get("memory_scenes", []) if str(scene.get("id")) == answer_scene_id), None)
+            if explained_scene:
+                return explained_scene
+        requested_role = str(winner.get("target_role") or "")
+        candidate_lemma = str(winner.get("lemma") or "").casefold()
+        candidate_surface = str(winner.get("surface") or "").casefold()
+        candidates = [scene for scene in state.get("memory_scenes", []) if str(scene.get("id")) in source_ids]
+        if not candidates:
+            return None
+
+        def score(scene: Dict[str, Any]) -> tuple[float, float, float, float, str]:
+            value = (scene.get("roles") or {}).get(requested_role, {})
+            exact_value = float(
+                str(value.get("surface") or "").casefold() == candidate_surface
+                or str(value.get("lemma") or "").casefold() == candidate_lemma
+            )
+            details = (scene.get("role_match_details") or {}).values()
+            exact_anchors = sum(float(item.get("score") or 0.0) for item in details if isinstance(item, dict))
+            scores = scene.get("scores") or {}
+            return (
+                exact_value,
+                exact_anchors,
+                float(scores.get("anchor_match", scores.get("anchor_score", 0.0))),
+                float(scores.get("total_score", scores.get("semantic_total", 0.0))),
+                str(scene.get("id") or ""),
+            )
+
+        return max(candidates, key=score)
 
     @staticmethod
     def reverse_validate(

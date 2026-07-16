@@ -6,7 +6,9 @@
 
     <div class="mode-status"><span>{{ isProbe ? 'ЛЕКСИЧЕСКИЙ СИГНАЛ' : 'АКТИВНЫЙ ЗАПРОС' }}</span><b>{{ isProbe ? resonanceProbe?.input : (visualization.scene.activeQuery || '—') }}</b><em>{{ stateLabel }}</em></div>
 
-    <div v-if="mode === 'scene'" class="scene-view">
+    <HiveWholeHive v-if="mode === 'whole'" />
+
+    <div v-else-if="mode === 'scene'" class="scene-view">
       <div class="scene-flow">
         <template v-for="(slot, index) in sceneSlots" :key="slot.id || slot.role">
           <article class="scene-slot" :class="slotClass(slot)" @click="inspect(slot)">
@@ -107,10 +109,11 @@ import { computed, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useHiveStore } from '@/entities/hive/store';
 import { mapVisualization, type HiveMode } from '@/features/reasoning/model/visualizationMapper';
+import HiveWholeHive from './HiveWholeHive.vue';
 
 const hiveStore = useHiveStore();
 const router = useRouter();
-const mode = ref<HiveMode>('scene');
+const mode = ref<HiveMode>('whole');
 const answerTab = ref<'short' | 'full'>('short');
 const structureScale = ref<'all' | 'words' | 'morphemes' | 'letters'>('all');
 const bridgeOpen = ref(false);
@@ -119,7 +122,7 @@ const showForces = ref(true);
 const showTrajectories = ref(true);
 const selectedDynamicsNode = ref<any>(null);
 const selected = ref<unknown>(null);
-const tabs = computed(() => isProbe.value ? [{ id: 'resonance' as HiveMode, label: 'Лексическое сопоставление' }, { id: 'structure' as HiveMode, label: 'Структура' }, { id: 'dynamics' as HiveMode, label: 'Импорт в улей' }] : [{ id: 'scene' as HiveMode, label: 'Сцена' }, { id: 'resonance' as HiveMode, label: 'Резонанс улья' }, { id: 'structure' as HiveMode, label: 'Устройство улья' }, { id: 'dynamics' as HiveMode, label: 'Динамика' }, { id: 'search' as HiveMode, label: 'Поиск пчёл' }, { id: 'answer' as HiveMode, label: 'Сборка ответа' }]);
+const tabs = computed(() => isProbe.value ? [{ id: 'whole' as HiveMode, label: 'Весь улей' }, { id: 'resonance' as HiveMode, label: 'Лексическое сопоставление' }, { id: 'structure' as HiveMode, label: 'Структура' }, { id: 'dynamics' as HiveMode, label: 'Импорт в улей' }] : [{ id: 'whole' as HiveMode, label: 'Весь улей' }, { id: 'scene' as HiveMode, label: 'Запрос' }, { id: 'search' as HiveMode, label: 'Сцены' }, { id: 'structure' as HiveMode, label: 'Сравнение' }, { id: 'resonance' as HiveMode, label: 'Резонанс' }, { id: 'answer' as HiveMode, label: 'Ответ' }]);
 const visualization = computed(() => mapVisualization({ queryScene: hiveStore.queryScene, queryFrame: hiveStore.queryFrame, activeQuery: hiveStore.activeQuery, queryCandidates: hiveStore.queryCandidates, memoryScenes: hiveStore.memoryScenes, memorySources: hiveStore.memorySources, unknownTokenSearches: hiveStore.unknownTokenSearches, localResonance: hiveStore.localResonance, resonanceProbes: hiveStore.resonanceProbes, hiveStructure: (hiveStore as any).hiveStructure, vibrationHistory: hiveStore.vibrationHistory, sentencePlan: hiveStore.sentencePlan, fullSentencePlan: hiveStore.fullSentencePlan, generationCandidates: hiveStore.generationCandidates, morphologyTrace: hiveStore.morphologyTrace, reverseValidation: hiveStore.reverseValidation, queryAnswer: hiveStore.queryAnswer }));
 const resonanceProbe = computed<any>(() => visualization.value.resonance.probe);
 const isProbe = computed(() => Boolean(resonanceProbe.value));

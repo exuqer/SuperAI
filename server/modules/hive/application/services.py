@@ -91,6 +91,12 @@ class HiveService:
         except ValueError as error:
             raise ValidationError(str(error)) from error
 
+    def snapshot(self, hive_id: str, **options: Any) -> dict[str, Any]:
+        try:
+            return self.facade.snapshot(hive_id, **options)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
     def diff(self, run_id: str, from_step: int, to_step: int) -> dict[str, Any]:
         try:
             return self.facade.diff(run_id, from_step, to_step)

@@ -125,6 +125,31 @@ async def query_scene_json(hive_id: str, service: HiveService = Depends(get_hive
     return {"hive": service.query_working_state(hive_id)}
 
 
+@router.get("/{hive_id}/snapshot")
+async def hive_snapshot(
+    hive_id: str,
+    include_scenes: bool = Query(default=True),
+    include_words: bool = Query(default=True),
+    include_query: bool = Query(default=True),
+    include_resonance: bool = Query(default=True),
+    include_history: bool = Query(default=True),
+    aggregation: str = Query(default="lexeme"),
+    resonance_step: str = Query(default="current"),
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    step: str | int = int(resonance_step) if resonance_step.isdigit() else resonance_step
+    return service.snapshot(
+        hive_id,
+        include_scenes=include_scenes,
+        include_words=include_words,
+        include_query=include_query,
+        include_resonance=include_resonance,
+        include_history=include_history,
+        aggregation=aggregation,
+        resonance_step=step,
+    )
+
+
 @router.get("/{hive_id}/history")
 async def query_scene_history(hive_id: str, service: HiveService = Depends(get_hive_service)) -> dict[str, Any]:
     return {"history": service.query_working_state(hive_id)["vibration"]["history"]}

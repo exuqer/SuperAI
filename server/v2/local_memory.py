@@ -30,6 +30,30 @@ ROLE_ALIASES = {
     "source": {"location", "source"},
 }
 
+QUESTION_ANSWER_ROLES = {
+    "кто": "agent",
+    "кого": "agent_or_object",
+    "кому": "recipient",
+    "что": "object",
+    "где": "location",
+    "куда": "destination",
+    "откуда": "source",
+    "когда": "time",
+    "как": "manner",
+    "почему": "cause",
+    "зачем": "purpose",
+    "чем": "instrument",
+    "сколько": "quantity",
+}
+
+ANSWER_ROLE_ALIASES = {
+    "agent": {"agent", "subject"},
+    "agent_or_object": {"agent", "subject", "object"},
+    "location": {"location", "destination"},
+    "destination": {"location", "destination"},
+    "source": {"location", "source"},
+}
+
 
 def clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
@@ -142,6 +166,72 @@ class V2LocalMemoryService:
             result.setdefault(int(row["cloud_id"]), []).append(dict(row))
         return result
 
+    def _missing_answer_role(
+        self,
+        hive_id: str,
+        parsed: Dict[str, Any],
+        conn: Any,
+    ) -> Optional[Dict[str, Any]]:
+        question = next(
+            (
+                item.normalized_form.casefold()
+                for item in parsed["components"]
+                if item.normalized_form.casefold() in QUESTION_ANSWER_ROLES
+            ),
+            None,
+        )
+        if not question:
+            return None
+        role = QUESTION_ANSWER_ROLES[question]
+        role_aliases = ANSWER_ROLE_ALIASES.get(role, {role})
+        anchor_ids = sorted({
+            int(item.lexeme_cloud_id)
+            for item in parsed["components"]
+            if item.lexeme_cloud_id
+            and item.normalized_form.casefold() not in SEARCH_STOP_WORDS
+            and item.expected_role not in {"preposition", "conjunction", "particle", "question"}
+        })
+        role_marks = ",".join("?" for _ in role_aliases)
+        params: List[Any] = [hive_id, *sorted(role_aliases)]
+        anchor_clause = ""
+        if anchor_ids:
+            anchor_marks = ",".join("?" for _ in anchor_ids)
+            anchor_clause = f"""
+                AND (
+                    SELECT COUNT(DISTINCT anchor_sc.lexeme_cloud_id)
+                    FROM scene_components anchor_sc
+                    WHERE anchor_sc.scene_cloud_id=hc.source_scene_cloud_id
+                      AND anchor_sc.lexeme_cloud_id IN ({anchor_marks})
+                ) = ?
+            """
+            params.extend(anchor_ids)
+            params.append(len(anchor_ids))
+        local_answer = conn.execute(
+            f"""SELECT 1
+                FROM hive_cells hc
+                JOIN scene_components answer_sc
+                  ON answer_sc.scene_cloud_id=hc.source_scene_cloud_id
+                WHERE hc.hive_id=?
+                  AND answer_sc.grammatical_role IN ({role_marks})
+                  {anchor_clause}
+                LIMIT 1""",
+            tuple(params),
+        ).fetchone()
+        if local_answer:
+            return None
+        return {
+            "id": f"answer-role-{role}",
+            "surface_form": question,
+            "normalized_form": question,
+            "lexeme": question,
+            "word_form_cloud_id": None,
+            "lexeme_cloud_id": None,
+            "expected_role": role,
+            "token_index": -1,
+            "resolution_state": "MISS",
+            "component_type": "answer_role_slot",
+        }
+
     def _route(self, hive_id: str, parsed: Dict[str, Any], conn: Any) -> Dict[str, Any]:
         component_index = self._cell_components(conn, hive_id)
         matches: List[Dict[str, Any]] = []
@@ -178,6 +268,10 @@ class V2LocalMemoryService:
                 component.resolution_state = "MISS"
                 unresolved.append(component.to_dict())
 
+        missing_answer_role = self._missing_answer_role(hive_id, parsed, conn)
+        if missing_answer_role:
+            unresolved.append(missing_answer_role)
+
         conflict = False
         if parsed["negation"] and matches:
             matched_cells = {item["cell_id"] for item in matches}
@@ -204,6 +298,7 @@ class V2LocalMemoryService:
             "external_request": {
                 "unresolved_components": unresolved,
                 "local_anchors": anchors,
+                "required_answer_roles": [missing_answer_role["expected_role"]] if missing_answer_role else [],
                 "excluded_known_components": [
                     item.normalized_form for item in parsed["components"] if item.resolution_state == "LOCAL_HIT"
                 ],
@@ -230,6 +325,11 @@ class V2LocalMemoryService:
         ]
         ranked: List[Tuple[float, Dict[str, Any]]] = []
         lexeme_ids = sorted({int(item["lexeme_cloud_id"]) for item in query_components})
+        required_answer_roles = {
+            alias
+            for role in request.get("required_answer_roles", [])
+            for alias in ANSWER_ROLE_ALIASES.get(role, {role})
+        }
         scene_rows = []
         if lexeme_ids:
             marks = ",".join("?" for _ in lexeme_ids)
@@ -249,6 +349,11 @@ class V2LocalMemoryService:
                    FROM scene_components WHERE scene_cloud_id = ?""",
                 (row["cloud_id"],),
             ).fetchall()
+            if required_answer_roles and not any(
+                str(component["grammatical_role"]) in required_answer_roles
+                for component in components
+            ):
+                continue
             matched = 0.0
             for query in query_components:
                 aliases = ROLE_ALIASES.get(str(query.get("expected_role") or ""), {str(query.get("expected_role") or "")})

@@ -2,6 +2,7 @@ import uuid
 
 from server.v2.hive import V2HiveService
 from server.v2.analytics import HiveAnalyticsService
+from server.v2.query_scene import QuerySceneService
 from server.v2.training import TrainingPipelineV2
 
 
@@ -37,6 +38,45 @@ def test_observed_noun_is_not_rejected_as_agent_by_builtin_vocabulary():
     service, hive_id, result = _ask("Рыба ест траву.", "Кто ест траву?")
     assert [item["lemma"] for item in result["candidates"]] == ["рыба"]
     assert service.vibration_run(hive_id, 3)["answer"]["resolved_value"] == "рыба"
+
+
+def test_strong_candidates_produce_a_deterministic_answer_after_bounded_vibration():
+    service, hive_id, result = _ask("Кот ест рыбу. Кошечка ест рыбу.", "Кто ест рыбу?")
+
+    assert len(result["candidates"]) == 2
+    final = service.vibration_run(hive_id, 3)
+
+    assert final["answer"]["status"] == "RESOLVED"
+    assert final["answer"]["full_surface_answer"] == "Кот ест рыбу."
+    assert [message["role"] for message in final["hive"]["messages"]] == ["user", "assistant"]
+
+
+def test_bounded_vibration_selects_best_admitted_candidate_with_a_narrow_gap():
+    service = QuerySceneService()
+    candidates = [
+        {
+            "lemma": "кот",
+            "status": "stable",
+            "hard_forbidden": False,
+            "stable_steps": 2,
+            "scores": {"decision_score": .70, "total": .70},
+        },
+        {
+            "lemma": "кошка",
+            "status": "stable",
+            "hard_forbidden": False,
+            "stable_steps": 2,
+            "scores": {"decision_score": .69, "total": .69},
+        },
+    ]
+
+    winner = service._winner(
+        {"candidates": candidates, "vibration": {"current_step": 2}},
+        {**service._defaults(), "max_steps": 3},
+    )
+
+    assert winner is candidates[0]
+    assert winner["selection_reason"] == "лучший устойчивый кандидат выбран после ограниченной вибрации"
 
 
 def test_question_roles_object_location_and_instrument():

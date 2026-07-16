@@ -44,3 +44,22 @@ def test_hive_uses_local_placements_and_chat_does_not_change_global_mass():
             assert cell["source_space_id"] is not None
     assert after == before
     assert ModelInvariantValidator().validate()["valid"]
+
+
+def test_each_question_fetches_a_missing_answer_role_from_global_field():
+    TrainingPipelineV2().train("Кот ест рыбу. Рыба живет в пруду.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+    service.query(hive_id, "Кот ест рыбу")
+
+    result = service.query(hive_id, "Где рыба?")
+
+    role_slot = next(
+        item
+        for item in result["decision"]["unresolved_components"]
+        if item.get("component_type") == "answer_role_slot"
+    )
+    assert role_slot["expected_role"] == "location"
+    assert result["decision"]["external_request"]["required_answer_roles"] == ["location"]
+    assert result["metrics"]["bees"] > 0
+    assert result["metrics"]["created_cells"] > 0

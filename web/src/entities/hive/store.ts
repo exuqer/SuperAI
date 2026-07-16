@@ -19,6 +19,7 @@ import type {
   HiveResonanceSessionV2,
   QueryMessageMode,
   DynamicsStateV2,
+  HiveSnapshotV2,
 } from '@/entities/hive/types';
 
 interface HiveStateResponse {
@@ -132,6 +133,8 @@ export const useHiveStore = defineStore('hive', () => {
   const hiveStructure = ref<Record<string, unknown> | null>(null);
   const dynamics = ref<DynamicsStateV2 | null>(null);
   const reasoningTrace = ref<Record<string, any> | null>(null);
+  const hiveSnapshot = ref<HiveSnapshotV2 | null>(null);
+  const snapshotLoading = ref(false);
 
   // Computed
   const averageActivation = computed(() =>
@@ -214,9 +217,23 @@ export const useHiveStore = defineStore('hive', () => {
       resonanceProbes.value = state.resonance_probes || [];
       activeQuery.value = state.active_query || null;
       hiveStructure.value = state.hive_structure || null;
+      await loadSnapshot();
       return state;
     } catch {
       return null;
+    }
+  }
+
+  async function loadSnapshot(aggregation: 'lexeme' | 'word_form' = 'lexeme') {
+    if (!hive.value) return null;
+    snapshotLoading.value = true;
+    try {
+      hiveSnapshot.value = await api.get<HiveSnapshotV2>(`/api/v2/hives/${hive.value.id}/snapshot`, { aggregation });
+      return hiveSnapshot.value;
+    } catch {
+      return null;
+    } finally {
+      snapshotLoading.value = false;
     }
   }
 
@@ -305,6 +322,7 @@ export const useHiveStore = defineStore('hive', () => {
       memoryScenes.value = result.memory_scenes || [];
       queryCandidates.value = result.candidates || [];
       queryAnswer.value = result.answer || null;
+      ensureAssistantAnswer(result.message_id, queryAnswer.value);
       queryPipeline.value = (result as any).pipeline || (result as any).hive?.pipeline || null;
       memorySources.value = result.memory_sources || [];
       sentencePlan.value = result.sentence_plan || null;
@@ -323,6 +341,7 @@ export const useHiveStore = defineStore('hive', () => {
       resolvedMode.value = result.resolved_mode || null;
       vibrationHistory.value = [];
       await hierarchy(false);
+      await loadSnapshot();
       if (result.resolved_mode !== 'LOCAL_RESONANCE' && queryScene.value && queryAnswer.value?.status !== 'RESOLVED') {
         await runReasoning();
       }
@@ -349,6 +368,7 @@ export const useHiveStore = defineStore('hive', () => {
           memoryScenes.value = result.hive.memory_scenes;
           queryCandidates.value = result.hive.candidates;
           queryAnswer.value = result.hive.answer;
+          ensureAssistantAnswer(undefined, queryAnswer.value);
           queryPipeline.value = result.hive.pipeline || result.hive.hive?.pipeline || null;
           memorySources.value = result.hive.memory_sources || [];
           sentencePlan.value = result.hive.sentence_plan || null;
@@ -364,6 +384,7 @@ export const useHiveStore = defineStore('hive', () => {
           dynamics.value = result.hive.dynamics || null;
           reasoningTrace.value = result.hive.reasoning_trace || null;
           await hierarchy(false);
+          await loadSnapshot();
           return;
         }
         runResult.value = await api.post<ReasoningResponse>(`/api/v2/hives/${hive.value!.id}/reasoning`, {
@@ -402,6 +423,7 @@ export const useHiveStore = defineStore('hive', () => {
       activeQuery.value = result.active_query || activeQuery.value;
       resolvedMode.value = result.resolved_mode || null;
       await hierarchy(false);
+      await loadSnapshot();
       cacheState();
       return result;
     });
@@ -514,7 +536,8 @@ export const useHiveStore = defineStore('hive', () => {
     queryPipeline.value = null;
       vibrationHistory.value = [];
       dynamics.value = null;
-      reasoningTrace.value = null;
+    reasoningTrace.value = null;
+    hiveSnapshot.value = null;
     inspectionProjections.value = [];
     memorySources.value = [];
     sentencePlan.value = null;
@@ -546,7 +569,27 @@ export const useHiveStore = defineStore('hive', () => {
   }
 
   function syncMessages(items: HiveMessageV2[]) {
-    messages.value = items.map(message => ({ ...message, role: message.role || 'user' }));
+    const synced = items.map(message => ({ ...message, role: message.role || 'user' }));
+    const optimistic = messages.value.filter(message =>
+      message.id.startsWith('user-') && !synced.some(item => item.role === 'user' && item.text === message.text)
+    );
+    messages.value = [...synced, ...optimistic].sort((left, right) => left.created_at.localeCompare(right.created_at));
+  }
+
+  function ensureAssistantAnswer(messageId: string | undefined, answer: typeof queryAnswer.value) {
+    const text = String(answer?.full_surface_answer || answer?.surface_answer || '').trim();
+    if (answer?.status !== 'RESOLVED' || !text) return;
+    const lastMessage = messages.value.at(-1);
+    if (lastMessage?.role === 'assistant' && lastMessage.text === text) return;
+    messages.value.push({
+      id: `assistant-${messageId || Date.now()}`,
+      hive_id: hive.value?.id || '',
+      turn_index: messages.value.length + 1,
+      role: 'assistant',
+      text,
+      parsed_json: {},
+      created_at: new Date().toISOString(),
+    });
   }
 
   function cacheState() {
@@ -629,6 +672,8 @@ export const useHiveStore = defineStore('hive', () => {
     hiveStructure,
     dynamics,
     reasoningTrace,
+    hiveSnapshot,
+    snapshotLoading,
     copyStatus,
     jsonOpen,
     jsonMode,
@@ -646,6 +691,7 @@ export const useHiveStore = defineStore('hive', () => {
     getHive,
     preview,
     loadQueryState,
+    loadSnapshot,
     hierarchy,
     expandCell,
     query,

@@ -396,3 +396,45 @@ export interface HiveAnalyticsResponse {
   primary: HiveAnalyticsRunResultV2 | null;
   comparison: HiveAnalyticsRunResultV2 | null;
 }
+
+export interface HiveSnapshotWordV2 {
+  id: string;
+  node_type: 'word' | 'concept' | string;
+  lemma_cloud_id: number | null;
+  word_form_cloud_id?: number | null;
+  lemma: string;
+  surface_forms: Array<{ surface: string; word_form_cloud_id: number; count: number }>;
+  global: { mass: number; density: number; stability: number; observation_count: number };
+  local: { activation: number; gravity: number; stored_strength: number; retention: number; energy: number };
+  position: { base_x: number; base_y: number; render_x: number; render_y: number };
+  roles: string[];
+  scene_support_count: number;
+  contributions: Array<{ scene_id: string; role: string; surface: string; scene_activation: number; scene_gravity: number; stored_strength: number }>;
+  resonance: { active: boolean; displacement: [number, number]; velocity: [number, number]; emitted_energy: number; received_energy: number; support: number; suppression: number; temperature_noise: number };
+}
+
+export interface HiveSnapshotSceneV2 {
+  id: string;
+  cloud_id: number;
+  text: string;
+  source: string;
+  cell_id: string;
+  position: { x: number; y: number };
+  physics: { mass: number; local_activation: number; local_gravity: number; stored_strength: number; retention: number; energy: number };
+  status: Record<string, string>;
+  roles: Record<string, { lemma: string; surface: string }>;
+  match: { total_score: number; matched_roles: string[]; mismatched_roles: string[]; selection_reason: string };
+}
+
+export interface HiveSnapshotV2 {
+  schema_version: number;
+  hive: { id: string; status: string; capacity: number; occupied_cells: number; temperature: number; reasoning_step: number; energy: number };
+  summary: { scene_count: number; word_count: number; concept_count: number; active_word_count: number; query_anchor_count: number; candidate_scene_count: number; rejected_scene_count: number; resonance_status: string };
+  scenes: HiveSnapshotSceneV2[];
+  words: HiveSnapshotWordV2[];
+  query_overlay: Record<string, any>;
+  resonance: Record<string, any>;
+  timeline: Array<Record<string, any>>;
+  field: { center_of_mass: { x: number; y: number }; zones: Record<string, number> };
+  diagnostics: { warnings: Array<{ code: string; message: string }>; counts: Record<string, number> };
+}

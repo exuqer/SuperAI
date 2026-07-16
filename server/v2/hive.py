@@ -9,6 +9,7 @@ from .local_memory import V2LocalMemoryService, HiveLocalMemoryConfig
 from .repository import V2Repository
 from .vibration import HiveVibrationEngine, QueryActivation, VibrationConfig
 from .export import HiveExportService
+from .hive_snapshot import HiveSnapshotProjector
 from .analytics import HiveAnalyticsService
 from .query_scene import QuerySceneService
 from .unknown_search import UnknownTokenSearchService
@@ -212,11 +213,12 @@ class V2HiveService:
             return {"status": "FINISHED", "steps_completed": max(1, int(steps)), "winner": None, "answer": None, "hive": state}
         except KeyError:
             pass
+        step_config = {**(config or {}), "max_steps": max(1, int(steps))}
         completed = 0
         last = None
         for _ in range(max(1, int(steps))):
-            self.dynamics.step(hive_id, config)
-            last = self.query_scenes.step(hive_id, config)
+            self.dynamics.step(hive_id, step_config)
+            last = self.query_scenes.step(hive_id, step_config)
             completed += 1
             if last["hive"]["vibration"]["status"] in {"FINISHED", "finished"}:
                 break
@@ -322,6 +324,9 @@ class V2HiveService:
                 raise KeyError("run_id")
             return exporter.snapshot(run_id, 0)
         raise ValueError("unsupported export mode")
+
+    def snapshot(self, hive_id: str, **options: Any) -> Dict[str, Any]:
+        return HiveSnapshotProjector(self.service.repository).project(hive_id, **options)
 
     def diff(self, run_id: str, from_step: int, to_step: int) -> Dict[str, Any]:
         return HiveExportService(self.service.repository).diff(run_id, from_step, to_step)
