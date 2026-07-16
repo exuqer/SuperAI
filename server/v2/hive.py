@@ -17,6 +17,9 @@ from .morphology import MorphologyService
 from .dynamics import HiveDynamicsService
 from .resonance import InputIntentClassifier, LexicalCandidateResolver, PROBE_INTENTS
 from .hive_resonance import HiveResonanceEngine
+from server.analytics import MultilevelTraceAnalytics
+from server.hive.hive_dispatcher import MultilevelHiveService
+from server.visualization import VisualizationSuite
 
 
 class V2HiveService:
@@ -29,6 +32,7 @@ class V2HiveService:
         self.lexical = LexicalCandidateResolver(self.service.repository)
         self.resonance = self.lexical
         self.hive_resonance = HiveResonanceEngine(self.service.repository)
+        self.multilevel = MultilevelHiveService(self.service.repository)
 
     def create(self, max_cells: int = 24, conversation_id: str = "") -> Dict[str, Any]:
         return self.service.create_hive(max_cells, conversation_id)
@@ -49,13 +53,14 @@ class V2HiveService:
             probe = self.lexical.create(hive_id, text, scope)
             self.lexical.run(hive_id, probe["id"])
             state = self.lexical.state(hive_id)
-            return {
+            result = {
                 "message_id": probe["message_id"], "intent": intent, "resolved_mode": intent,
                 "decision": {"decision": "LEXICAL_CANDIDATE_PROBE", "external_search_required": False, "reasons": ["input classified before scene parsing"], "matches": []},
                 "metrics": {"external_search": False, "local_resonance": True, "working_cells": state["stats"]["working_cells"]},
                 "external_search": {"sources": [], "bees": [], "iterations": 0, "anchors": []}, "merge_results": [], "resonance_events": [],
                 **state,
             }
+            return self._attach_multilevel(hive_id, text, result)
         mode = self.query_scenes.resolve_mode(hive_id, text, resolved_mode)
         if mode == "LOCAL_RESONANCE":
             allow_global = resonance_scope == "LOCAL_THEN_GLOBAL"
@@ -77,7 +82,7 @@ class V2HiveService:
                 hive_id, text, use_global_memory=resonance_scope != "LOCAL_ONLY",
             )
             result["resonance_session"] = self.hive_resonance.run(session["id"])
-            return result
+            return self._attach_multilevel(hive_id, text, result)
         result = self.service.query(hive_id, text)
         parsed = self.query_scenes.parse(text)
         self.query_scenes.activate(hive_id, text, mode)
@@ -116,6 +121,12 @@ class V2HiveService:
             hive_id, text, use_global_memory=resonance_scope != "LOCAL_ONLY",
         )
         result["resonance_session"] = self.hive_resonance.run(session["id"])
+        return self._attach_multilevel(hive_id, text, result)
+
+    def _attach_multilevel(self, hive_id: str, text: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        multilevel = self.multilevel.process(hive_id, text, result)
+        result["multilevel"] = multilevel
+        result.setdefault("hive", {})["multilevel"] = multilevel
         return result
 
     def unknown_search_start(self, hive_id: str, surface: str, token_index: int, query_role: str = "", query_scene_id: str = "") -> Dict[str, Any]:
@@ -191,7 +202,10 @@ class V2HiveService:
                 raise ValueError("Для запуска вибрации сначала перенесите хотя бы один результат резонанса в улей")
             dynamics = self.dynamics.step(hive_id, config)
             state["dynamics"] = dynamics
-            return {"step": int(dynamics.get("step", 0)), "candidates": [], "history_event": None, "hive": state}
+            payload = {"step": int(dynamics.get("step", 0)), "candidates": [], "history_event": None, "hive": state}
+            payload["multilevel"] = self.multilevel.refresh_answer(hive_id, payload)
+            state["multilevel"] = payload["multilevel"]
+            return payload
         except KeyError:
             pass
         dynamics = self.dynamics.step(hive_id, config)
@@ -199,6 +213,8 @@ class V2HiveService:
         result["dynamics"] = dynamics
         result["hive"] = self.query_scenes.get(hive_id)
         result["hive"]["dynamics"] = result["dynamics"]
+        result["multilevel"] = self.multilevel.refresh_answer(hive_id, result["hive"])
+        result["hive"]["multilevel"] = result["multilevel"]
         return result
 
     def vibration_run(self, hive_id: str, steps: int = 3, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -210,7 +226,10 @@ class V2HiveService:
                 self.dynamics.step(hive_id, config)
             state = self.resonance.state(hive_id)
             state["dynamics"] = self.dynamics.get(hive_id)
-            return {"status": "FINISHED", "steps_completed": max(1, int(steps)), "winner": None, "answer": None, "hive": state}
+            payload = {"status": "FINISHED", "steps_completed": max(1, int(steps)), "winner": None, "answer": None, "hive": state}
+            payload["multilevel"] = self.multilevel.refresh_answer(hive_id, payload)
+            state["multilevel"] = payload["multilevel"]
+            return payload
         except KeyError:
             pass
         step_config = {**(config or {}), "max_steps": max(1, int(steps))}
@@ -234,7 +253,10 @@ class V2HiveService:
             self.query_scenes.persist_assistant_answer(hive_id)
             state = self.query_scenes.get(hive_id)
             state["dynamics"] = dynamics
-        return {"status": state["vibration"]["status"], "steps_completed": completed, "winner": winner, "answer": state.get("answer"), "hive": state}
+        payload = {"status": state["vibration"]["status"], "steps_completed": completed, "winner": winner, "answer": state.get("answer"), "hive": state}
+        payload["multilevel"] = self.multilevel.refresh_answer(hive_id, payload)
+        state["multilevel"] = payload["multilevel"]
+        return payload
 
     def dynamics_state(self, hive_id: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.dynamics.get(hive_id, config)
@@ -272,7 +294,30 @@ class V2HiveService:
                 state["resonance_session"] = self.hive_resonance.get_for_hive(hive_id, session_id)
             except KeyError:
                 pass
+        state["multilevel"] = self.multilevel.get(hive_id)
         return state
+
+    def multilevel_state(self, hive_id: str) -> Dict[str, Any]:
+        return self.multilevel.get(hive_id)
+
+    def multilevel_traces(self, hive_id: str) -> List[Dict[str, Any]]:
+        return self.multilevel.traces(hive_id)
+
+    def multilevel_views(self, hive_id: str, view_id: str = "all") -> Dict[str, Any]:
+        state = self.multilevel.store.load(hive_id)
+        return VisualizationSuite().build(state, view_id)
+
+    def multilevel_analytics(self, hive_id: str) -> Dict[str, Any]:
+        return MultilevelTraceAnalytics().all(self.multilevel.store.load(hive_id))
+
+    def compose_form(
+        self,
+        hive_id: str,
+        concept: str,
+        features: Dict[str, Any],
+        root: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.multilevel.compose_form(hive_id, concept, features, root)
 
     def generate(self, hive_id: str, sentence_plan: Dict[str, Any]) -> Dict[str, Any]:
         return MorphologyService(self.service.repository).generate_sentence(hive_id, sentence_plan)

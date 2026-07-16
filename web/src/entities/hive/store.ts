@@ -20,12 +20,15 @@ import type {
   QueryMessageMode,
   DynamicsStateV2,
   HiveSnapshotV2,
+  MultilevelHiveStateV2,
+  MultilevelViewsV2,
 } from '@/entities/hive/types';
 
 interface HiveStateResponse {
   hive: HiveV2;
   cells: HiveCellV2[];
   messages: HiveMessageV2[];
+  multilevel?: MultilevelHiveStateV2;
 }
 
 interface HiveQueryResponse extends HiveStateResponse {
@@ -54,6 +57,7 @@ interface HiveQueryResponse extends HiveStateResponse {
   dynamics?: DynamicsStateV2;
   reasoning_trace?: Record<string, any>;
   resonance_session?: HiveResonanceSessionV2;
+  multilevel?: MultilevelHiveStateV2;
 }
 
 interface ReasoningResponse {
@@ -135,6 +139,9 @@ export const useHiveStore = defineStore('hive', () => {
   const reasoningTrace = ref<Record<string, any> | null>(null);
   const hiveSnapshot = ref<HiveSnapshotV2 | null>(null);
   const snapshotLoading = ref(false);
+  const multilevel = ref<MultilevelHiveStateV2 | null>(null);
+  const multilevelViews = ref<MultilevelViewsV2 | null>(null);
+  const multilevelLoading = ref(false);
 
   // Computed
   const averageActivation = computed(() =>
@@ -195,7 +202,11 @@ export const useHiveStore = defineStore('hive', () => {
     try {
       const state = await api.get<any>(`/api/v2/hives/${hive.value.id}/query-state`);
       resonanceSession.value = state?.resonance_session || null;
-      if (!state?.query_scene) return state || null;
+      multilevel.value = state?.multilevel || multilevel.value;
+      if (!state?.query_scene) {
+        await loadMultilevelViews();
+        return state || null;
+      }
       queryFrame.value = state.query_frame;
       queryScene.value = state.query_scene;
       memoryScenes.value = state.memory_scenes || [];
@@ -218,6 +229,7 @@ export const useHiveStore = defineStore('hive', () => {
       activeQuery.value = state.active_query || null;
       hiveStructure.value = state.hive_structure || null;
       await loadSnapshot();
+      await loadMultilevelViews();
       return state;
     } catch {
       return null;
@@ -234,6 +246,20 @@ export const useHiveStore = defineStore('hive', () => {
       return null;
     } finally {
       snapshotLoading.value = false;
+    }
+  }
+
+  async function loadMultilevelViews() {
+    if (!hive.value) return null;
+    multilevelLoading.value = true;
+    try {
+      multilevel.value = await api.get<MultilevelHiveStateV2>(`/api/v2/hives/${hive.value.id}/multilevel`);
+      multilevelViews.value = await api.get<MultilevelViewsV2>(`/api/v2/hives/${hive.value.id}/multilevel/views`);
+      return multilevelViews.value;
+    } catch {
+      return null;
+    } finally {
+      multilevelLoading.value = false;
     }
   }
 
@@ -337,11 +363,13 @@ export const useHiveStore = defineStore('hive', () => {
       activeQuery.value = result.active_query || null;
       dynamics.value = (result as any).dynamics || null;
       reasoningTrace.value = result.reasoning_trace || null;
+      multilevel.value = result.multilevel || null;
       hiveStructure.value = (result as any).hive_structure || null;
       resolvedMode.value = result.resolved_mode || null;
       vibrationHistory.value = [];
       await hierarchy(false);
       await loadSnapshot();
+      await loadMultilevelViews();
       if (result.resolved_mode !== 'LOCAL_RESONANCE' && queryScene.value && queryAnswer.value?.status !== 'RESOLVED') {
         await runReasoning();
       }
@@ -383,8 +411,10 @@ export const useHiveStore = defineStore('hive', () => {
           vibrationHistory.value = result.hive.vibration.history;
           dynamics.value = result.hive.dynamics || null;
           reasoningTrace.value = result.hive.reasoning_trace || null;
+          multilevel.value = result.hive.multilevel || multilevel.value;
           await hierarchy(false);
           await loadSnapshot();
+          await loadMultilevelViews();
           return;
         }
         runResult.value = await api.post<ReasoningResponse>(`/api/v2/hives/${hive.value!.id}/reasoning`, {
@@ -538,6 +568,8 @@ export const useHiveStore = defineStore('hive', () => {
       dynamics.value = null;
     reasoningTrace.value = null;
     hiveSnapshot.value = null;
+    multilevel.value = null;
+    multilevelViews.value = null;
     inspectionProjections.value = [];
     memorySources.value = [];
     sentencePlan.value = null;
@@ -560,6 +592,7 @@ export const useHiveStore = defineStore('hive', () => {
   function applyState(state: HiveStateResponse, preserveMessages = true) {
     hive.value = state.hive;
     cells.value = state.cells || [];
+    multilevel.value = state.multilevel || (state.hive as any)?.multilevel || multilevel.value;
     if (!preserveMessages && state.messages?.length) {
       syncMessages(state.messages);
     }
@@ -674,6 +707,9 @@ export const useHiveStore = defineStore('hive', () => {
     reasoningTrace,
     hiveSnapshot,
     snapshotLoading,
+    multilevel,
+    multilevelViews,
+    multilevelLoading,
     copyStatus,
     jsonOpen,
     jsonMode,
@@ -692,6 +728,7 @@ export const useHiveStore = defineStore('hive', () => {
     preview,
     loadQueryState,
     loadSnapshot,
+    loadMultilevelViews,
     hierarchy,
     expandCell,
     query,

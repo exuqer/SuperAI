@@ -70,6 +70,12 @@ class HiveValidateSurfaceRequest(BaseModel):
     surface: str = Field(..., min_length=1)
 
 
+class HiveComposeFormRequest(BaseModel):
+    concept: str = Field(..., min_length=1, max_length=160)
+    root: str | None = Field(default=None, max_length=160)
+    features: dict[str, Any] = Field(default_factory=dict)
+
+
 class HiveQueryResponse(BaseModel):
     """Hive query response."""
     hive: dict[str, Any]

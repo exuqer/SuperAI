@@ -240,6 +240,38 @@ class HiveService:
         except KeyError as error:
             raise NotFoundError("hive", hive_id) from error
 
+    def multilevel_state(self, hive_id: str) -> dict[str, Any]:
+        try:
+            return self.facade.multilevel_state(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def multilevel_traces(self, hive_id: str) -> list[dict[str, Any]]:
+        try:
+            return self.facade.multilevel_traces(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def multilevel_views(self, hive_id: str, view_id: str = "all") -> dict[str, Any]:
+        try:
+            return self.facade.multilevel_views(hive_id, view_id)
+        except KeyError as error:
+            raise NotFoundError("hive or view", str(error)) from error
+
+    def multilevel_analytics(self, hive_id: str) -> dict[str, Any]:
+        try:
+            return self.facade.multilevel_analytics(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
+    def compose_form(
+        self, hive_id: str, concept: str, features: dict[str, Any], root: str | None = None
+    ) -> dict[str, Any]:
+        try:
+            return self.facade.compose_form(hive_id, concept, features, root)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
     def unknown_search_start(self, hive_id: str, surface: str, token_index: int, query_role: str = "", query_scene_id: str = "") -> dict[str, Any]:
         try:
             return self.facade.unknown_search_start(hive_id, surface, token_index, query_role, query_scene_id)

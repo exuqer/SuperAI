@@ -438,3 +438,40 @@ export interface HiveSnapshotV2 {
   field: { center_of_mass: { x: number; y: number }; zones: Record<string, number> };
   diagnostics: { warnings: Array<{ code: string; message: string }>; counts: Record<string, number> };
 }
+
+export interface MultilevelMemoryItemV2 {
+  item_id: string;
+  item_type: string;
+  content: Record<string, any>;
+  topics: string[];
+  activation: number;
+  temperature: number;
+  mass: number;
+  depth: number;
+  retention: number;
+  layer: 'hot' | 'warm' | 'cold' | 'archive';
+  compression_state: string;
+  pinned: boolean;
+}
+
+export interface MultilevelHiveStateV2 {
+  hive_id: string;
+  turn: number;
+  spaces: Record<string, { object_count: number; dimensions: string[] }>;
+  memory: {
+    turn: number;
+    layers: Record<'hot' | 'warm' | 'cold' | 'archive', number>;
+    items: MultilevelMemoryItemV2[];
+    clusters: Array<Record<string, any>>;
+    events: Array<Record<string, any>>;
+  };
+  active_tasks: Array<Record<string, any>>;
+  nectar_packets: Array<Record<string, any>>;
+  vertical_transitions: Array<Record<string, any>>;
+  factories: Array<Record<string, any>>;
+  reasoning_ticks: Array<Record<string, any>>;
+  trace: Record<string, any>;
+  answer: Record<string, any>;
+}
+
+export type MultilevelViewsV2 = Record<string, Record<string, any>>;

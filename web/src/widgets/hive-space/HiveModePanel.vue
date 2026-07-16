@@ -8,6 +8,8 @@
 
     <HiveWholeHive v-if="mode === 'whole'" />
 
+    <HiveMultilevelView v-else-if="mode === 'multilevel'" />
+
     <div v-else-if="mode === 'scene'" class="scene-view">
       <div class="scene-flow">
         <template v-for="(slot, index) in sceneSlots" :key="slot.id || slot.role">
@@ -110,10 +112,11 @@ import { useRouter } from 'vue-router';
 import { useHiveStore } from '@/entities/hive/store';
 import { mapVisualization, type HiveMode } from '@/features/reasoning/model/visualizationMapper';
 import HiveWholeHive from './HiveWholeHive.vue';
+import HiveMultilevelView from './HiveMultilevelView.vue';
 
 const hiveStore = useHiveStore();
 const router = useRouter();
-const mode = ref<HiveMode>('whole');
+const mode = ref<HiveMode>(hiveStore.queryScene ? 'scene' : 'whole');
 const answerTab = ref<'short' | 'full'>('short');
 const structureScale = ref<'all' | 'words' | 'morphemes' | 'letters'>('all');
 const bridgeOpen = ref(false);
@@ -122,7 +125,7 @@ const showForces = ref(true);
 const showTrajectories = ref(true);
 const selectedDynamicsNode = ref<any>(null);
 const selected = ref<unknown>(null);
-const tabs = computed(() => isProbe.value ? [{ id: 'whole' as HiveMode, label: 'Весь улей' }, { id: 'resonance' as HiveMode, label: 'Лексическое сопоставление' }, { id: 'structure' as HiveMode, label: 'Структура' }, { id: 'dynamics' as HiveMode, label: 'Импорт в улей' }] : [{ id: 'whole' as HiveMode, label: 'Весь улей' }, { id: 'scene' as HiveMode, label: 'Запрос' }, { id: 'search' as HiveMode, label: 'Сцены' }, { id: 'structure' as HiveMode, label: 'Сравнение' }, { id: 'resonance' as HiveMode, label: 'Резонанс' }, { id: 'answer' as HiveMode, label: 'Ответ' }]);
+const tabs = computed(() => isProbe.value ? [{ id: 'whole' as HiveMode, label: 'Весь улей' }, { id: 'multilevel' as HiveMode, label: 'Слои памяти' }, { id: 'resonance' as HiveMode, label: 'Лексическое сопоставление' }, { id: 'structure' as HiveMode, label: 'Структура' }, { id: 'dynamics' as HiveMode, label: 'Импорт в улей' }] : [{ id: 'whole' as HiveMode, label: 'Весь улей' }, { id: 'multilevel' as HiveMode, label: 'Слои памяти' }, { id: 'scene' as HiveMode, label: 'Запрос' }, { id: 'search' as HiveMode, label: 'Сцены' }, { id: 'structure' as HiveMode, label: 'Сравнение' }, { id: 'resonance' as HiveMode, label: 'Резонанс' }, { id: 'answer' as HiveMode, label: 'Ответ' }]);
 const visualization = computed(() => mapVisualization({ queryScene: hiveStore.queryScene, queryFrame: hiveStore.queryFrame, activeQuery: hiveStore.activeQuery, queryCandidates: hiveStore.queryCandidates, memoryScenes: hiveStore.memoryScenes, memorySources: hiveStore.memorySources, unknownTokenSearches: hiveStore.unknownTokenSearches, localResonance: hiveStore.localResonance, resonanceProbes: hiveStore.resonanceProbes, hiveStructure: (hiveStore as any).hiveStructure, vibrationHistory: hiveStore.vibrationHistory, sentencePlan: hiveStore.sentencePlan, fullSentencePlan: hiveStore.fullSentencePlan, generationCandidates: hiveStore.generationCandidates, morphologyTrace: hiveStore.morphologyTrace, reverseValidation: hiveStore.reverseValidation, queryAnswer: hiveStore.queryAnswer }));
 const resonanceProbe = computed<any>(() => visualization.value.resonance.probe);
 const isProbe = computed(() => Boolean(resonanceProbe.value));
@@ -201,7 +204,7 @@ function selectDynamicsNode(node: unknown) { selectedDynamicsNode.value = node; 
 function forcePath(node: any) { const x = node.position.x * 1000; const y = node.position.y * 620; return `M ${x} ${y} L ${x + node.net_force.x * 20} ${y + node.net_force.y * 20}`; }
 function anchorX(anchor: any) { return Number(anchor.position?.x || .5) * 1000; }
 function anchorY(anchor: any) { return Number(anchor.position?.y || .5) * 620; }
-function setMode(nextMode: HiveMode) { mode.value = nextMode; if (nextMode === 'structure') void hiveStore.hierarchy(); }
+function setMode(nextMode: HiveMode) { mode.value = nextMode; if (nextMode === 'structure') void hiveStore.hierarchy(); if (nextMode === 'multilevel') void hiveStore.loadMultilevelViews(); }
 function traceSummary(stage: any) {
   if (stage.stage === 'CONTEXT_INHERITANCE') return `${stage.output?.inherited_roles?.length || 0} унаследованных ролей`;
   if (stage.stage === 'QUERY_SCENE_COMPLETION') return `${stage.output?.slots?.length || 0} слотов сцены`;

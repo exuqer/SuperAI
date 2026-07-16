@@ -17,6 +17,7 @@ from server.modules.hive.api.dto import (
     HiveExpandRequest,
     HiveGenerateRequest,
     HiveValidateSurfaceRequest,
+    HiveComposeFormRequest,
     HiveVibrationRequest,
     LexicalCandidatesRequest,
     ResonanceRequest,
@@ -148,6 +149,45 @@ async def hive_snapshot(
         aggregation=aggregation,
         resonance_step=step,
     )
+
+
+@router.get("/{hive_id}/multilevel")
+async def hive_multilevel_state(
+    hive_id: str, service: HiveService = Depends(get_hive_service)
+) -> dict[str, Any]:
+    return service.multilevel_state(hive_id)
+
+
+@router.get("/{hive_id}/multilevel/traces")
+async def hive_multilevel_traces(
+    hive_id: str, service: HiveService = Depends(get_hive_service)
+) -> dict[str, Any]:
+    return {"traces": service.multilevel_traces(hive_id)}
+
+
+@router.get("/{hive_id}/multilevel/views")
+async def hive_multilevel_views(
+    hive_id: str,
+    view: str = Query(default="all"),
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    return service.multilevel_views(hive_id, view)
+
+
+@router.get("/{hive_id}/multilevel/analytics")
+async def hive_multilevel_analytics(
+    hive_id: str, service: HiveService = Depends(get_hive_service)
+) -> dict[str, Any]:
+    return service.multilevel_analytics(hive_id)
+
+
+@router.post("/{hive_id}/multilevel/compose-form")
+async def hive_compose_form(
+    hive_id: str,
+    request: HiveComposeFormRequest,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    return service.compose_form(hive_id, request.concept, request.features, request.root)
 
 
 @router.get("/{hive_id}/history")

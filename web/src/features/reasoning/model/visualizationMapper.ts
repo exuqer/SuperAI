@@ -1,6 +1,6 @@
 import type { QuerySceneV2, QuerySceneCandidateV2 } from '@/entities/hive/types';
 
-export type HiveMode = 'whole' | 'scene' | 'search' | 'structure' | 'answer' | 'resonance' | 'dynamics';
+export type HiveMode = 'whole' | 'scene' | 'search' | 'structure' | 'answer' | 'resonance' | 'dynamics' | 'multilevel';
 
 const roleLabel: Record<string, string> = { agent: 'AGENT', action: 'ACTION', predicate: 'ACTION', modal: 'MODAL', object: 'OBJECT', location: 'LOCATION', time: 'TIME', instrument: 'INSTRUMENT', subject: 'SUBJECT' };
 
