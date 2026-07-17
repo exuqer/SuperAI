@@ -143,6 +143,7 @@ class HiveAnalyticsService:
             source = next((scenes[str(source_id)] for source_id in source_ids if str(source_id) in scenes), {})
             source_roles = source.get("roles") or {}
             matched_roles = source.get("matched_roles") or []
+            activation = source.get("physics") or {}
             cell = cells.get(str(candidate.get("cell_id")), {})
             semantic = clamp(scores.get("semantic_total", scores.get("total", 0.0)))
             dynamic = clamp(
@@ -186,6 +187,12 @@ class HiveAnalyticsService:
                 "dynamic_score": round(dynamic, 6),
                 "viability": 0.1 if str(candidate.get("status")) in {"evicted", "conflict"} else 1.0,
                 "candidate_score": round(decision, 6),
+                "activation": round(float(activation.get("activation", cell.get("local_activation", 0.0))), 6),
+                "activation_tier": str(activation.get("relevance_tier") or "BACKGROUND"),
+                "activation_inputs": {
+                    "matched_role_count": int(activation.get("matched_role_count", len(matched_roles))),
+                    "semantic_total": round(float(activation.get("semantic_total", scores.get("semantic_total", 0.0))), 6),
+                },
                 "eviction_status": "EVICTED" if str(candidate.get("status")) in {"evicted", "conflict"} else "ACTIVE",
                 "explanation": explanation,
             })

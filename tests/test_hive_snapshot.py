@@ -38,3 +38,16 @@ def test_location_anchored_object_question_returns_a_complete_scene():
     assert answer["status"] == "RESOLVED"
     assert answer["answer_mode"] == "contextual_scene"
     assert answer["full_surface_answer"] == "Рыбу продают на рынке."
+
+
+def test_snapshot_projects_working_cells_without_empty_projection_warning():
+    snapshot = _snapshot("Кот ест рыбу. Медведь ест рыбу.", "Кто ест рыбу?")
+
+    counts = snapshot["diagnostics"]["counts"]
+    assert snapshot["cells"]
+    assert counts["cells_total"] == len(snapshot["cells"])
+    assert counts["working_cells_total"] == counts["cells_total"]
+    assert counts["projected_cells_total"] == len(snapshot["cells"])
+    assert counts["filtered_cells_total"] == 0
+    assert counts["projection_error"] is None
+    assert all(warning["code"] != "WORKING_CELLS_EMPTY" for warning in snapshot["diagnostics"]["warnings"])

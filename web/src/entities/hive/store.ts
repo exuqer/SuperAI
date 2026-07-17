@@ -603,10 +603,11 @@ export const useHiveStore = defineStore('hive', () => {
 
   function syncMessages(items: HiveMessageV2[]) {
     const synced = items.map(message => ({ ...message, role: message.role || 'user' }));
-    const optimistic = messages.value.filter(message =>
-      message.id.startsWith('user-') && !synced.some(item => item.role === 'user' && item.text === message.text)
+    const localOnly = messages.value.filter(message =>
+      (message.id.startsWith('user-') || message.id.startsWith('assistant-'))
+      && !synced.some(item => item.role === message.role && item.text === message.text)
     );
-    messages.value = [...synced, ...optimistic].sort((left, right) => left.created_at.localeCompare(right.created_at));
+    messages.value = [...synced, ...localOnly].sort((left, right) => left.created_at.localeCompare(right.created_at));
   }
 
   function ensureAssistantAnswer(messageId: string | undefined, answer: typeof queryAnswer.value) {

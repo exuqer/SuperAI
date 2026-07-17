@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from .repository import V2Repository, decode
+from .capacity import get_working_occupancy
 
 
 class HiveExportService:
@@ -88,7 +89,8 @@ class HiveExportService:
                 "center_of_mass": {"x": 0.5, "y": 0.5},
                 "zones": {}, "anchors": [], "nodes": [], "history": [], "eviction_history": [],
             }
-            working_cells = [item for item in cells if item.get("component_class") in {"semantic_bridge", "role_candidate", "reasoning_support"}]
+            capacity = get_working_occupancy(cells, int(hive["capacity"] or hive["max_cells"]))
+            working_cells = list(cells)
             memory_source_cells = [item for item in cells if item.get("component_class") == "memory_source"]
             hive_payload = self._json_row(hive)
             hive_payload.pop("total_energy", None)
@@ -102,6 +104,17 @@ class HiveExportService:
                 "active_reasoning_cells": len(reasoning_energy), "active_memory_sources": len(memory_energy), "calculation_version": 1,
             }
             hive_payload["energy"] = canonical_energy
+            action_concepts = [self._json_row(row) for row in conn.execute(
+                "SELECT * FROM action_concepts ORDER BY canonical_name"
+            )]
+            action_variants = [self._json_row(row) for row in conn.execute(
+                "SELECT * FROM action_variants ORDER BY action_concept_id, weight DESC, lemma"
+            )]
+            scene_projections = [self._json_row(row) for row in conn.execute(
+                """SELECT p.* FROM scene_concept_projections p
+                JOIN hive_cells hc ON hc.source_scene_cloud_id=p.scene_id
+                WHERE hc.hive_id=? ORDER BY p.scene_id,p.id""", (hive_id,)
+            )]
             payload = {
                 "schema_version": 2,
                 "normalization_version": 3,
@@ -132,9 +145,12 @@ class HiveExportService:
                 "working_cells": working_cells,
                 "memory_sources": working.get("memory_sources", memory_source_cells),
                 "inspection_projections": working.get("inspection_projections", []),
-                "capacity": working.get("capacity") or {"max_working_cells": int(hive["capacity"] or hive["max_cells"]), "working_cells": len(working_cells), "memory_sources": len(memory_source_cells), "inspection_projections": len(working.get("inspection_projections", [])), "total_placements": len(cells)},
+                "capacity": capacity,
                 "energy": canonical_energy,
                 "dynamics": dynamics,
+                "action_concepts": action_concepts,
+                "action_variants": action_variants,
+                "scene_concept_projections": scene_projections,
             }
             if detail != "compact":
                 payload["stats"] = {

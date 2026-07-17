@@ -8,6 +8,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, Optional
 
 from .repository import V2Repository, decode
+from .capacity import get_working_occupancy
 
 
 ROLE_OFFSETS = {
@@ -61,8 +62,10 @@ class HiveSnapshotProjector:
                 raise KeyError(hive_id)
             working = decode(hive["metadata_json"], {}).get("query_working_memory", {})
             cells = [dict(row) for row in conn.execute(
-                """SELECT hc.*, hp.x, hp.y, hp.local_gravity, hp.local_activation AS placement_activation
+                """SELECT hc.*, hp.x, hp.y, hp.local_gravity, hp.local_activation AS placement_activation,
+                          c.canonical_name AS cell_label
                    FROM hive_cells hc JOIN cloud_placements hp ON hp.id=hc.hive_placement_id
+                   JOIN clouds c ON c.id=hc.dominant_cloud_id
                    WHERE hc.hive_id=? ORDER BY hc.created_at, hc.id""", (hive_id,)
             )]
             scene_rows = self._scene_rows(conn, hive_id, cells)
@@ -70,13 +73,16 @@ class HiveSnapshotProjector:
             dynamic_nodes = {str(node.get("cell_id")): node for node in dynamics.get("nodes", [])}
             scenes = self._scenes(scene_rows, cells, dynamic_nodes, working)
             words = self._words(scene_rows, scenes, dynamic_nodes, aggregation)
+            projected_cells = self._cells(cells, dynamic_nodes)
+            capacity = get_working_occupancy(cells, int(hive["capacity"] or hive["max_cells"]))
             query_overlay = self._query_overlay(working)
             timeline = self._timeline(dynamics) if include_history else []
             resonance = self._resonance(dynamics, working) if include_resonance else {}
             projected_energy = sum(_number(scene["physics"].get("energy")) for scene in scenes) / max(1, len(scenes))
             active_words = sum(1 for word in words if _number(word["local"].get("activation")) >= .5)
             warnings = []
-            if cells and not working.get("working_cells"):
+            working_cells_total = len(working.get("working_cells") or [])
+            if cells and not projected_cells:
                 warnings.append({"code": "WORKING_CELLS_EMPTY", "message": "Cells exist but working_cells projection is empty"})
             if not dynamics.get("nodes"):
                 warnings.append({"code": "DYNAMICS_NOT_INITIALIZED", "message": "Static projection is used"})
@@ -86,7 +92,7 @@ class HiveSnapshotProjector:
                 "schema_version": 1,
                 "hive": {
                     "id": str(hive["id"]), "status": str(hive["status"] or "ACTIVE"),
-                    "capacity": int(hive["max_cells"] or 0), "occupied_cells": len(cells),
+                    "capacity": capacity["capacity"], "occupied_cells": capacity["active_total"], "occupancy": capacity["occupancy"], "pressure": capacity["pressure"],
                     "temperature": _number(hive["current_temperature"], .35),
                     "reasoning_step": int(hive["reasoning_step"] or 0), "energy": round(projected_energy, 6),
                 },
@@ -98,6 +104,7 @@ class HiveSnapshotProjector:
                     "rejected_scene_count": sum(1 for scene in scenes if scene["status"].get("candidate_status") in {"REJECTED", "NO_HIT", "SELF_MATCH"}),
                     "resonance_status": status,
                 },
+                "cells": projected_cells,
                 "scenes": scenes if include_scenes else [],
                 "words": words if include_words else [],
                 "query_overlay": query_overlay if include_query else {},
@@ -106,10 +113,39 @@ class HiveSnapshotProjector:
                 "field": {"center_of_mass": center, "zones": dynamics.get("zones") or {}},
                 "diagnostics": {"warnings": warnings, "counts": {
                     "cells": len(cells), "placements": len(cells),
-                    "working_cells": len(working.get("working_cells") or []),
+                    "working_cells": working_cells_total,
                     "dynamic_nodes": len(dynamics.get("nodes") or []), "projected_words": len(words),
+                    "cells_total": len(cells), "working_cells_total": working_cells_total,
+                    "projected_cells_total": len(projected_cells),
+                    "filtered_cells_total": max(0, len(cells) - len(projected_cells)),
+                    "projection_error": None,
                 }},
             }
+
+    @staticmethod
+    def _cells(cells: list[Dict[str, Any]], dynamic_nodes: Dict[str, Dict[str, Any]]) -> list[Dict[str, Any]]:
+        projected = []
+        for row in cells:
+            node = dynamic_nodes.get(str(row["id"]), {})
+            position = node.get("position") or {}
+            projected.append({
+                "id": str(row["id"]), "label": str(row.get("cell_label") or row["id"]),
+                "component_class": str(row.get("component_class") or "context"),
+                "source_scene_id": int(row["source_scene_cloud_id"]) if row.get("source_scene_cloud_id") is not None else None,
+                "position": {
+                    "x": _clamp(_number(position.get("x"), _number(row.get("x")) / 1000 if _number(row.get("x")) > 1 else _number(row.get("x")))),
+                    "y": _clamp(_number(position.get("y"), _number(row.get("y")) / 700 if _number(row.get("y")) > 1 else _number(row.get("y")))),
+                },
+                "physics": {
+                    "local_activation": _number(node.get("activation"), _number(row.get("local_activation"))),
+                    "local_gravity": _number(node.get("gravity"), _number(row.get("local_gravity"))),
+                    "stored_strength": _number(row.get("stored_strength")),
+                    "retention": _number(node.get("retention"), _number(row.get("retention"))),
+                    "energy": _number(node.get("energy"), _number(row.get("placement_activation"), _number(row.get("local_activation")))),
+                },
+                "projection_status": "PROJECTED",
+            })
+        return projected
 
     def _scene_rows(self, conn: Any, hive_id: str, cells: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
         cell_by_scene = {int(cell["source_scene_cloud_id"]): cell for cell in cells if cell.get("source_scene_cloud_id") is not None}

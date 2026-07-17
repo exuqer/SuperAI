@@ -5,7 +5,13 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _needs_constraint_migration(conn: sqlite3.Connection, table: str, expected_value: str) -> bool:
@@ -333,6 +339,106 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(source_scene_cloud_id) REFERENCES scenes(cloud_id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS action_concepts (
+            id TEXT PRIMARY KEY,
+            canonical_name TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            space_id INTEGER,
+            status TEXT NOT NULL CHECK(status IN ('CANDIDATE','PROBABLE','STABLE')),
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            mass REAL NOT NULL DEFAULT 0.5 CHECK(mass >= 0),
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(space_id) REFERENCES spaces(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS semantic_constructions (
+            id TEXT PRIMARY KEY,
+            predicate_lemma TEXT NOT NULL UNIQUE,
+            pattern_type TEXT NOT NULL,
+            argument_mapping_json TEXT NOT NULL DEFAULT '{}',
+            implied_semantics_json TEXT NOT NULL DEFAULT '{}',
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0)
+        );
+
+        CREATE TABLE IF NOT EXISTS action_variants (
+            id TEXT PRIMARY KEY,
+            action_concept_id TEXT NOT NULL,
+            lexeme_cloud_id INTEGER,
+            lemma TEXT NOT NULL,
+            construction_id TEXT,
+            weight REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
+            source_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(action_concept_id) REFERENCES action_concepts(id) ON DELETE CASCADE,
+            FOREIGN KEY(lexeme_cloud_id) REFERENCES clouds(id) ON DELETE SET NULL,
+            FOREIGN KEY(construction_id) REFERENCES semantic_constructions(id) ON DELETE SET NULL,
+            UNIQUE(action_concept_id, lemma)
+        );
+        CREATE INDEX IF NOT EXISTS action_variant_lemma_idx ON action_variants(lemma);
+
+        CREATE TABLE IF NOT EXISTS scene_concept_projections (
+            id TEXT PRIMARY KEY,
+            scene_id INTEGER NOT NULL,
+            action_concept_id TEXT NOT NULL,
+            semantic_frame_json TEXT NOT NULL DEFAULT '{}',
+            projection_confidence REAL NOT NULL CHECK(projection_confidence BETWEEN 0 AND 1),
+            projection_version INTEGER NOT NULL DEFAULT 1,
+            source_type TEXT NOT NULL DEFAULT 'scene_parser',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(scene_id) REFERENCES scenes(cloud_id) ON DELETE CASCADE,
+            FOREIGN KEY(action_concept_id) REFERENCES action_concepts(id) ON DELETE CASCADE,
+            UNIQUE(scene_id, action_concept_id, projection_version)
+        );
+        CREATE INDEX IF NOT EXISTS scene_projection_concept_idx
+            ON scene_concept_projections(action_concept_id, scene_id);
+
+        CREATE TABLE IF NOT EXISTS concept_relation_evidence (
+            id TEXT PRIMARY KEY,
+            source_scene_id INTEGER,
+            relation_type TEXT NOT NULL,
+            source_concept_id TEXT,
+            target_concept_id TEXT,
+            weight REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            status TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE SET NULL,
+            FOREIGN KEY(source_concept_id) REFERENCES action_concepts(id) ON DELETE SET NULL,
+            FOREIGN KEY(target_concept_id) REFERENCES action_concepts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS concept_relations (
+            id TEXT PRIMARY KEY,
+            relation_type TEXT NOT NULL CHECK(relation_type IN
+                ('IS_A','PART_OF','HAS_PROPERTY','SIMILAR_TO','OPPOSITE_TO','INSTANCE_OF')),
+            subject_lexeme_cloud_id INTEGER NOT NULL,
+            object_lexeme_cloud_id INTEGER NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            status TEXT NOT NULL DEFAULT 'STABLE',
+            direct INTEGER NOT NULL DEFAULT 1 CHECK(direct IN (0,1)),
+            depth INTEGER NOT NULL DEFAULT 1 CHECK(depth >= 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
+            source_type TEXT NOT NULL DEFAULT 'CLASSIFICATION_DEFINITION',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(subject_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(object_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            UNIQUE(relation_type, subject_lexeme_cloud_id, object_lexeme_cloud_id)
+        );
+        CREATE INDEX IF NOT EXISTS concept_relation_subject_type_idx
+            ON concept_relations(subject_lexeme_cloud_id, relation_type);
+        CREATE INDEX IF NOT EXISTS concept_relation_object_type_idx
+            ON concept_relations(object_lexeme_cloud_id, relation_type);
+        CREATE INDEX IF NOT EXISTS concept_relation_lookup_idx
+            ON concept_relations(subject_lexeme_cloud_id, relation_type, object_lexeme_cloud_id);
+
         CREATE TABLE IF NOT EXISTS scenes (
             cloud_id INTEGER PRIMARY KEY,
             scene_space_id INTEGER NOT NULL UNIQUE,
@@ -582,6 +688,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (cell_id) REFERENCES hive_cells(id) ON DELETE CASCADE
         );
         """
+    )
+    _add_column_if_missing(conn, "concept_relation_evidence", "concept_relation_id", "TEXT")
+    _add_column_if_missing(conn, "concept_relation_evidence", "source_training_observation_id", "INTEGER")
+    _add_column_if_missing(conn, "concept_relation_evidence", "evidence_type", "TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS concept_relation_evidence_source_idx "
+        "ON concept_relation_evidence(concept_relation_id, source_scene_id, source_training_observation_id) "
+        "WHERE concept_relation_id IS NOT NULL"
     )
     evidence_columns = {row[1] for row in conn.execute("PRAGMA table_info(semantic_evidence)").fetchall()}
     if "evidence_weight" not in evidence_columns:

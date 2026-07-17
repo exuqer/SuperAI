@@ -15,7 +15,7 @@
     <template v-else>
       <div class="whole-summary">
         <span>Сцены <b>{{ snapshot.summary.scene_count }}</b></span><span>Слова <b>{{ snapshot.summary.word_count }}</b></span>
-        <span>Активно <b>{{ snapshot.summary.active_word_count }}</b></span><span>Ёмкость <b>{{ snapshot.hive.occupied_cells }} / {{ snapshot.hive.capacity }}</b></span>
+        <span>Активно <b>{{ snapshot.summary.active_word_count }}</b></span><span>Ёмкость <b>{{ snapshot.hive.occupied_cells }} / {{ snapshot.hive.capacity }}</b></span><span>Ячейки <b>{{ snapshot.diagnostics.counts.working_cells_total }} / {{ snapshot.diagnostics.counts.projected_cells_total }}</b></span>
         <span>Энергия <b>{{ Math.round(snapshot.hive.energy * 100) }}%</b></span><span>Резонанс <b>{{ resonanceLabel }}</b></span>
       </div>
       <div class="whole-layout">
@@ -37,6 +37,10 @@
               </g>
               <g v-if="selectedWord" class="influence-lines"><line v-for="scene in contributedScenes" :key="scene.id" :x1="x(selectedWord.position.render_x)" :y1="y(selectedWord.position.render_y)" :x2="x(scene.position.x)" :y2="y(scene.position.y)" /></g>
               <g v-if="showQuery && snapshot.query_overlay?.anchors?.length" class="query-overlay"><circle :cx="center.x" :cy="center.y" r="235" /><text :x="center.x" :y="center.y - 248">ЗАПРОС · {{ snapshot.query_overlay.reconstructed_text || snapshot.query_overlay.source_text }}</text></g>
+              <g v-for="cell in projectedCells" :key="`cell-${cell.id}`" class="projected-cell" :style="{ opacity: .25 + cell.physics.retention * .65 }">
+                <circle :cx="x(cell.position.x)" :cy="y(cell.position.y)" :r="8 + cell.physics.local_activation * 14" :style="{ fill: cellColor(cell) }" />
+                <text :x="x(cell.position.x)" :y="y(cell.position.y) - 16">{{ cell.label }}</text>
+              </g>
               <g v-for="word in snapshot.words" :key="word.id" class="word-node" :class="{ selected: selected?.id === word.id, related: isRelatedWord(word) }" :style="{ opacity: .24 + word.local.retention * .76 }" @click.stop="selected = word">
                 <circle class="gravity" :cx="x(word.position.render_x)" :cy="y(word.position.render_y)" :r="halo(word)" :style="{ opacity: .07 + word.local.gravity * .15 }" />
                 <circle class="energy" :cx="x(word.position.render_x)" :cy="y(word.position.render_y)" :r="core(word) + 8 + word.local.energy * 8" :style="{ animationDuration: `${1.8 - word.local.energy * 1.1}s` }" />
@@ -71,7 +75,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useHiveStore } from '@/entities/hive/store';
-import type { HiveSnapshotSceneV2, HiveSnapshotWordV2 } from '@/entities/hive/types';
+import type { HiveSnapshotCellV2, HiveSnapshotSceneV2, HiveSnapshotWordV2 } from '@/entities/hive/types';
 
 const hiveStore = useHiveStore();
 const aggregation = ref<'lexeme' | 'word_form'>('lexeme');
@@ -87,12 +91,14 @@ const center = computed(() => ({ x: 500, y: 310 }));
 const transform = computed(() => `translate(${camera.value.x} ${camera.value.y}) scale(${camera.value.zoom}) translate(${500 - 500 / camera.value.zoom} ${310 - 310 / camera.value.zoom})`);
 const selectedWord = computed(() => selected.value && 'contributions' in selected.value ? selected.value : null);
 const selectedScene = computed(() => selected.value && 'physics' in selected.value ? selected.value : null);
+const projectedCells = computed(() => snapshot.value?.cells || [] as HiveSnapshotCellV2[]);
 const resonanceLabel = computed(() => snapshot.value?.summary.resonance_status === 'IDLE' ? 'не запущен' : snapshot.value?.summary.resonance_status || '—');
 const x = (value: number) => value * 1000;
 const y = (value: number) => value * 620;
 const core = (word: HiveSnapshotWordV2) => Math.max(10, Math.min(38, 10 + Math.sqrt(Math.max(0, word.global.mass)) * 9));
 const halo = (word: HiveSnapshotWordV2) => core(word) + 16 + word.local.gravity * 54;
 const color = (word: HiveSnapshotWordV2) => `hsl(${190 - word.local.activation * 42} 75% ${42 + word.local.activation * 20}%)`;
+const cellColor = (cell: HiveSnapshotCellV2) => cell.component_class === 'semantic_bridge' ? '#b891ff' : cell.component_class === 'role_candidate' ? '#ffc968' : '#59b8d8';
 const sceneById = (id: string) => snapshot.value?.scenes.find(scene => scene.id === id) || null;
 const contributedScenes = computed(() => selectedWord.value?.contributions.map(item => sceneById(item.scene_id)).filter(Boolean) as HiveSnapshotSceneV2[] || []);
 const isRelated = (scene: HiveSnapshotSceneV2) => Boolean(selectedWord.value?.contributions.some(item => item.scene_id === scene.id) || selectedScene.value?.id === scene.id);
@@ -108,4 +114,5 @@ function stopPan() { pointer.value.active = false; }
 
 <style scoped lang="scss">
 .whole-hive{display:grid;gap:10px;min-height:540px}.whole-toolbar,.whole-summary,.legend,.timeline{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.whole-toolbar{justify-content:space-between}.whole-toolbar label,.whole-summary span{color:#91a8c8;font-size:10px}.aggregation{display:flex;padding:3px;border:1px solid rgba(115,176,255,.2);border-radius:8px}.aggregation button,.refresh,.timeline button,.close{border:0;border-radius:6px;padding:7px 9px;color:#9cb9dc;background:transparent;font:10px system-ui;cursor:pointer}.aggregation button.active,.refresh,.timeline button.active{color:#e8fffa;background:rgba(71,155,137,.42)}.whole-summary{padding:9px 12px;border:1px solid rgba(120,231,208,.14);border-radius:9px;background:rgba(11,34,53,.42)}.whole-summary b{margin-left:3px;color:#e9f7ff}.whole-layout{display:grid;grid-template-columns:180px minmax(360px,1fr) 205px;min-height:455px;border:1px solid rgba(115,176,255,.17);border-radius:12px;overflow:hidden;background:#071523}.scene-list,.inspector{overflow:auto;padding:10px;background:rgba(6,17,31,.72)}.scene-list{border-right:1px solid rgba(115,176,255,.14)}.scene-list button{display:grid;gap:5px;width:100%;margin-bottom:6px;border:1px solid rgba(115,176,255,.15);border-left:3px solid #598fe1;border-radius:7px;padding:8px;color:#9bb4d4;background:rgba(20,48,79,.36);font:9px system-ui;text-align:left;cursor:pointer}.scene-list button.selected{border-left-color:#78e7d0;background:rgba(35,98,89,.4)}.scene-list strong{color:#e9f4ff;font-size:10px}.scene-list small{color:#7189ab}.canvas-wrap{position:relative;min-width:0;background:radial-gradient(circle at 50% 50%,rgba(44,113,141,.18),transparent 58%),#06111d}.whole-canvas{width:100%;height:100%;min-height:455px;touch-action:none}.zones circle{fill:none;stroke:#6ca2ff;stroke-dasharray:4 8;opacity:.25}.scene-regions ellipse{fill:#7a62bc;filter:url(#soft);transition:opacity .2s}.scene-regions ellipse.related{fill:#78e7d0;opacity:.35!important}.influence-lines line{stroke:#78e7d0;stroke-width:2;stroke-opacity:.65}.query-overlay circle{fill:none;stroke:#ffc968;stroke-width:1;stroke-dasharray:6 7;opacity:.45}.query-overlay text{fill:#ffd98b;font:10px system-ui;text-anchor:middle}.word-node{cursor:pointer}.word-node.related .core,.word-node.selected .core{stroke:#fff4ca}.gravity{fill:#65d6e0}.energy{fill:none;stroke:#a2fff0;stroke-width:1;opacity:.22;transform-origin:center;animation:pulse 1.2s ease-out infinite}.core{stroke:#e8fff9}.word-node text{fill:#eaf5ff;font:11px system-ui;text-anchor:middle;pointer-events:none}.legend{position:absolute;bottom:7px;left:12px;color:#90a9ca;font-size:9px}.legend i,.core-key,.halo-key,.ring-key,.pulse-key{display:inline-block;width:9px;height:9px;border-radius:50%;background:#6cd8e1}.halo-key{background:rgba(108,216,225,.22);box-shadow:0 0 0 4px rgba(108,216,225,.18)}.ring-key{border:2px solid #ffc968;background:transparent}.pulse-key{border:1px solid #b0fff2;background:transparent}.inspector{border-left:1px solid rgba(115,176,255,.14);color:#9bb3ce;font-size:10px}.inspector-head{display:grid;gap:5px;padding-bottom:10px;border-bottom:1px solid rgba(115,176,255,.14)}.inspector-head small,.contributions small{color:#81a8d8;letter-spacing:.1em}.inspector-head strong{color:#eff8ff;font-size:16px}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:12px 0}.metrics span,.contributions span{display:flex;justify-content:space-between;gap:7px}.metrics b,.contributions b{color:#78e7d0}.contributions{display:grid;gap:7px}.contributions button{display:grid;grid-template-columns:1fr auto;gap:5px;border:0;border-left:2px solid #5d99dc;padding:6px;color:#bcd1e8;background:rgba(20,52,79,.42);font:9px system-ui;text-align:left;cursor:pointer}.close{margin-top:12px;border:1px solid rgba(120,231,208,.25)}.warning{padding:7px;border-left:2px solid #ffc968;color:#d7bd83;background:rgba(109,78,30,.22);font-size:9px}.timeline{justify-content:center}.whole-empty{display:grid;place-items:center;min-height:420px;color:#91a8c8;border:1px dashed rgba(115,176,255,.28);border-radius:10px}@keyframes pulse{to{transform:scale(1.38);opacity:0}}@media(max-width:900px){.whole-layout{grid-template-columns:150px minmax(280px,1fr)}.inspector{grid-column:1/-1;border-top:1px solid rgba(115,176,255,.14);border-left:0}.whole-canvas{min-height:390px}}@media(max-width:620px){.whole-layout{grid-template-columns:1fr}.scene-list{max-height:150px;border-right:0;border-bottom:1px solid rgba(115,176,255,.14)}}
+.projected-cell{pointer-events:none}.projected-cell text{fill:#9fcee4;font:8px system-ui;text-anchor:middle}
 </style>

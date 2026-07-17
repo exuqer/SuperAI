@@ -12,12 +12,35 @@ from .repository import V2Repository, encode, utcnow
 from .morphology import MorphologyService
 from .unknown_search import StructuralIndexService
 from .semantic_fog import SemanticFogService
+from .semantic_projection import SemanticProjectionService
+from .concept_relations import ConceptRelationTrainer
 
 
 ROLE_VALUES = {
     "subject", "predicate", "object", "attribute", "location", "definition",
-    "complement", "preposition", "service", "unknown",
+    "destination", "source", "instrument", "purpose", "complement", "preposition",
+    "service", "unknown",
 }
+
+
+OBJECT_PREDICATES = {"есть", "питаться", "пугать", "видеть", "поймать", "принести", "употреблять"}
+LOCATION_PREDICATES = {"жить", "лежать", "находиться"}
+
+
+def predicate_argument_role(predicate_lemma: str, preposition: str, case: Optional[str]) -> Optional[str]:
+    """Return a semantic role for a governed noun when a known valency applies."""
+    predicate = (predicate_lemma or "").casefold()
+    prep = (preposition or "").casefold()
+    if predicate in LOCATION_PREDICATES:
+        if (prep in {"в", "во", "на"} and case in {"loct", None}) or (prep == "у" and case in {"gent", None}):
+            return "location"
+    if predicate == "употреблять" and prep in {"в", "во"} and case in {"accs", None}:
+        return "purpose"
+    if predicate == "питаться" and case == "ablt":
+        return "object"
+    if predicate in OBJECT_PREDICATES and case in {"accs", "gent", "datv"}:
+        return "object"
+    return None
 
 
 @dataclass(frozen=True)
@@ -63,8 +86,21 @@ class RoleResolver:
     NOUNS = {"NOUN", "NPRO"}
     ADJECTIVES = {"ADJF", "ADJS", "PRTF", "NUMR"}
 
+    @classmethod
+    def _governing_preposition(
+        cls, tokens: Sequence[WordToken], morphologies: Sequence[Morphology], index: int,
+    ) -> str:
+        for cursor in range(index - 1, max(-1, index - 4), -1):
+            token = tokens[cursor]
+            if token.normalized in cls.PREPOSITIONS:
+                return token.normalized
+            if morphologies[cursor].pos_tag not in cls.ADJECTIVES:
+                break
+        return ""
+
     def resolve(self, tokens: Sequence[WordToken], morphologies: Sequence[Morphology]) -> List[Dict[str, Any]]:
         predicate_index = next((i for i, item in enumerate(morphologies) if item.pos_tag in self.VERBS), None)
+        predicate_lemma = morphologies[predicate_index].lemma if predicate_index is not None else ""
         definition_index = next((i for i, token in enumerate(tokens) if token.normalized == "это"), None)
         has_source = any(
             tokens[index - 1].normalized in {"из", "от"} and morph.features.get("case") == "gent"
@@ -73,13 +109,19 @@ class RoleResolver:
         )
         result: List[Dict[str, Any]] = []
         for index, (token, morph) in enumerate(zip(tokens, morphologies)):
-            previous = tokens[index - 1].normalized if index else ""
+            previous = self._governing_preposition(tokens, morphologies, index)
             role, dependency, confidence = "unknown", "unknown", 0.45
             if token.normalized in self.PREPOSITIONS:
                 role, dependency, confidence = "preposition", "marker", 0.99
             elif token.normalized in self.SERVICE:
                 role, dependency, confidence = "service", "service", 0.98
+            elif morph.pos_tag in self.NOUNS and (
+                valency_role := predicate_argument_role(predicate_lemma, previous, morph.features.get("case"))
+            ):
+                role, dependency, confidence = valency_role, "predicate_valency", 0.94
             elif previous in {"в", "во", "на"} and morph.features.get("case") in {"loct", None}:
+                role, dependency, confidence = "location", "prepositional", 0.92
+            elif previous == "у" and morph.features.get("case") in {"gent", None}:
                 role, dependency, confidence = "location", "prepositional", 0.92
             elif previous in {"в", "во", "на"} and morph.features.get("case") == "accs":
                 role, dependency, confidence = "destination", "prepositional", 0.92
@@ -118,10 +160,10 @@ class RoleResolver:
                     predicate_index is not None and index < predicate_index and case in {None, "nomn"}
                 ):
                     role, dependency, confidence = "subject", "subject", 0.86
-                elif predicate_index is not None and (index > predicate_index or case in {"accs", "gent", "datv"}):
-                    role, dependency, confidence = "object", "object", 0.78
                 elif case == "ablt":
                     role, dependency, confidence = "instrument", "instrument", 0.76
+                elif predicate_index is not None and (index > predicate_index or case in {"accs", "gent", "datv"}):
+                    role, dependency, confidence = "object", "object", 0.78
             result.append({"role": role, "dependency_role": dependency, "confidence": confidence})
         return result
 
@@ -231,7 +273,7 @@ class WordFormStructureService:
 
 
 class TrainingPipelineV2:
-    parser_version = "ru-rule-v4"
+    parser_version = "ru-rule-v6"
 
     def __init__(self, repository: Optional[V2Repository] = None) -> None:
         self.repository = repository or V2Repository()
@@ -241,6 +283,8 @@ class TrainingPipelineV2:
         self.morphology_space = MorphologyService(self.repository)
         self.structural_index = StructuralIndexService()
         self.semantic_fog = SemanticFogService(self.repository)
+        self.semantic_projection = SemanticProjectionService()
+        self.concept_relations = ConceptRelationTrainer()
 
     def train(self, text: str, source_type: str = "training") -> Dict[str, Any]:
         tokenization = tokenize_hierarchical(text)
@@ -259,6 +303,12 @@ class TrainingPipelineV2:
                 self._train_sentence(conn, sentence, int(global_space["id"]), source_type, journal)
                 for sentence in tokenization.sentences
             ]
+            for scene_result, sentence in zip(scene_results, tokenization.sentences):
+                scene_id = int(scene_result["scene_cloud_id"])
+                scene_result["observation_type"] = self.semantic_projection.record_observation(conn, scene_id, sentence.text)
+                projection = self.semantic_projection.project_scene(conn, scene_id)
+                if projection:
+                    scene_result["semantic_projection"] = projection
             semantic_backfill = self.semantic_fog.backfill(conn, int(global_space["id"]))
             success = bool(scene_results)
             conn.execute(
@@ -269,6 +319,7 @@ class TrainingPipelineV2:
 
         def by_type(name: str) -> List[Dict[str, Any]]:
             return [item for item in journal.events if item["event_type"] == name]
+
         return {
             "success": success,
             "training_run_id": run_id,
@@ -284,6 +335,14 @@ class TrainingPipelineV2:
             "stats": stats,
             "semantic_backfill": semantic_backfill,
         }
+
+    def rebuild_concept_relations(self) -> Dict[str, Any]:
+        with self.repository.transaction() as conn:
+            return self.concept_relations.rebuild(conn)
+
+    def rebuild_semantic_projections(self) -> Dict[str, int]:
+        with self.repository.transaction() as conn:
+            return self.semantic_projection.rebuild(conn)
 
     def _migrate_existing_scenes(self, conn: Any) -> None:
         rows = conn.execute(
@@ -467,12 +526,18 @@ class TrainingPipelineV2:
                             (predicate, component_id),
                         )
 
-        conn.execute(
+        observation_cursor = conn.execute(
             """INSERT INTO training_observations
             (training_run_id, source_text, normalized_text, scene_cloud_id, source_type, created_at)
             VALUES (?, ?, ?, ?, ?, ?)""",
             (journal.run_id, sentence.text, canonical, scene["id"], source_type, utcnow()),
         )
+        classification = self.concept_relations.materialize(conn, int(scene["id"]), int(observation_cursor.lastrowid))
+        if classification:
+            conn.execute(
+                "UPDATE training_observations SET metadata_json=? WHERE id=?",
+                (encode({"observation_type": "CLASSIFICATION_DEFINITION", "concept_relation_id": classification["id"]}), observation_cursor.lastrowid),
+            )
         return {"scene_cloud_id": int(scene["id"]), "created": scene_created, "canonical_text": canonical}
 
     def _ensure_word(

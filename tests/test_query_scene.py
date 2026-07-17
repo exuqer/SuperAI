@@ -48,7 +48,9 @@ def test_strong_candidates_produce_a_deterministic_answer_after_bounded_vibratio
     final = service.vibration_run(hive_id, 3)
 
     assert final["answer"]["status"] == "RESOLVED"
-    assert final["answer"]["full_surface_answer"] == "Кот ест рыбу."
+    assert final["answer"]["answer_mode"] == "multiple"
+    assert final["answer"]["resolved_values"] == ["кот", "кошечка"]
+    assert final["answer"]["full_surface_answer"] == "Кот и кошечка."
     assert [message["role"] for message in final["hive"]["messages"]] == ["user", "assistant"]
 
 
@@ -389,3 +391,93 @@ def test_resolved_assistant_turn_is_persisted_once_with_session_memory():
     assert restored["hive"]["id"] == hive_id
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[-1]["text"] == "Белочка ест орех."
+
+
+def test_immediate_polar_answer_remains_in_dialogue_after_the_next_query():
+    TrainingPipelineV2().train("Корова не ест рыбу. Кот ест рыбу.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    first = service.query(hive_id, "Ест ли корова рыбу?")
+    second = service.query(hive_id, "Кто ест рыбу?")
+
+    assert [message["role"] for message in first["messages"]] == ["user", "assistant"]
+    assert first["messages"][-1]["text"] == "Нет. Корова не ест рыбу."
+    assert [message["role"] for message in second["messages"]] == ["user", "assistant", "user"]
+
+
+def test_query_frame_valency_constraints_and_multiple_answers_regression():
+    TrainingPipelineV2().train(
+        "Кот ест рыбу. Медведь ест рыбу. Пингвин ест рыбу. "
+        "Выдра живёт у реки. Медведь живёт в лесу. "
+        "Выдра питается рыбой. Цапля питается рыбой. "
+        "Кот поймал карася. Карась это рыба. "
+        "Кот это животное. Медведь это животное. "
+        "Кот употребляет рыбу в пищу. Медведь употребляет рыбу в пищу. Робот употребляет рыбу в пищу."
+    )
+    service = V2HiveService()
+    expectations = {
+        "Кто ест рыбу?": "Кот, медведь и пингвин.",
+        "Где живёт выдра?": "У реки.",
+        "Кто живёт в лесу?": "Медведь.",
+        "Кто питается рыбой?": "Выдра и цапля.",
+        "Какую рыбу поймал кот?": "Карася.",
+    }
+
+    for query, expected in expectations.items():
+        hive_id = service.create()["hive"]["id"]
+        service.query(hive_id, query)
+        assert service.vibration_run(hive_id, 3)["answer"]["surface_answer"] == expected
+
+    typed_object = QuerySceneService().parse("Какую рыбу поймал кот?")["query_frame"]
+    assert typed_object["missing_role"] == "object"
+    assert typed_object["slot_constraints"]["object"]["is_a"]["lemma"] == "рыба"
+    assert typed_object["answer_cardinality"] == "single"
+
+    hive_id = service.create()["hive"]["id"]
+    typed_agent = service.query(hive_id, "Какие животные употребляют рыбу в пищу?")
+    assert typed_agent["query_frame"]["missing_role"] == "agent"
+    assert typed_agent["query_frame"]["slot_constraints"]["agent"]["is_a"]["lemma"] == "животное"
+    assert typed_agent["query_frame"]["answer_cardinality"] == "multiple"
+    assert [candidate["lemma"] for candidate in typed_agent["candidates"]] == ["кот", "медведь"]
+    answer = service.vibration_run(hive_id, 3)["answer"]
+    assert answer["resolved_values"] == ["кот", "медведь"]
+    assert answer["surface_answer"] == answer["full_surface_answer"] == "Кот и медведь."
+
+
+def test_old_parser_scenes_are_reparsed_before_querying():
+    TrainingPipelineV2().train("Рыбак ловит рыбу удочкой.")
+    with V2Repository().transaction() as conn:
+        scene_id = conn.execute("SELECT cloud_id FROM scenes").fetchone()[0]
+        conn.execute("UPDATE scenes SET parser_version='ru-rule-v5' WHERE cloud_id=?", (scene_id,))
+
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+    result = service.query(hive_id, "Как рыбу ловит рыбак?")
+
+    assert [candidate["lemma"] for candidate in result["candidates"]] == ["удочка"]
+    with V2Repository().transaction() as conn:
+        parser_version = conn.execute("SELECT parser_version FROM scenes WHERE cloud_id=?", (scene_id,)).fetchone()[0]
+        role = conn.execute(
+            """SELECT sc.grammatical_role FROM scene_components sc
+               JOIN lexemes l ON l.cloud_id=sc.lexeme_cloud_id
+               WHERE sc.scene_cloud_id=? AND l.lemma='удочка'""",
+            (scene_id,),
+        ).fetchone()[0]
+    assert parser_version == TrainingPipelineV2.parser_version
+    assert role == "instrument"
+
+
+def test_query_activation_tiers_have_fixed_boundaries():
+    scenes = [
+        {"result_type": "FULL_HIT", "anchor_validation": {"status": "PASSED"}, "matched_roles": ["agent", "action"], "scores": {}},
+        {"result_type": "ROLE_HIT", "anchor_validation": {"status": "PASSED"}, "matched_roles": ["agent", "action"], "scores": {}},
+        {"result_type": "PARTIAL_HIT", "anchor_validation": {"status": "FAILED"}, "matched_roles": ["agent"], "scores": {}},
+        {"result_type": "NO_HIT", "anchor_validation": {"status": "FAILED"}, "matched_roles": [], "scores": {}},
+    ]
+
+    QuerySceneService._assign_scene_activation(scenes)
+
+    assert [(scene["physics"]["activation"], scene["physics"]["relevance_tier"]) for scene in scenes] == [
+        (1.0, "DIRECT"), (.75, "RELATED"), (.30, "PARTIAL"), (.05, "BACKGROUND"),
+    ]

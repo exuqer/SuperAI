@@ -224,6 +224,9 @@ class V2Repository:
             "concept_fogs_total": scalar("SELECT COUNT(*) FROM concept_fog_registry"),
             "concept_candidates_total": scalar("SELECT COUNT(*) FROM concept_candidate_registry"),
             "semantic_backfill_scenes_total": scalar("SELECT COUNT(*) FROM semantic_backfill_state"),
+            "action_concepts_total": scalar("SELECT COUNT(*) FROM action_concepts"),
+            "action_variants_total": scalar("SELECT COUNT(*) FROM action_variants"),
+            "scene_concept_projections_total": scalar("SELECT COUNT(*) FROM scene_concept_projections"),
         }
 
     def normalized_space(self, space_id: int) -> Dict[str, Any]:
@@ -263,7 +266,7 @@ class V2Repository:
         tables = (
             "clouds", "spaces", "cloud_placements", "structural_components",
             "lexemes", "word_forms", "word_form_features", "cloud_compositions",
-            "morph_pattern_data", "semantic_memberships", "semantic_evidence", "concept_fog_registry", "concept_candidate_registry", "semantic_backfill_state", "scenes",
+            "morph_pattern_data", "semantic_memberships", "semantic_evidence", "concept_fog_registry", "concept_candidate_registry", "semantic_backfill_state", "action_concepts", "semantic_constructions", "action_variants", "scene_concept_projections", "concept_relation_evidence", "scenes",
             "scene_components", "training_runs", "training_observations",
             "training_change_events",
         )
@@ -274,6 +277,11 @@ class V2Repository:
             "concept_fog_registry": "concept_cloud_id",
             "concept_candidate_registry": "concept_candidate_cloud_id",
             "semantic_backfill_state": "source_scene_cloud_id",
+            "action_concepts": "id",
+            "semantic_constructions": "id",
+            "action_variants": "id",
+            "scene_concept_projections": "id",
+            "concept_relation_evidence": "id",
             "scenes": "cloud_id",
         }
 
@@ -308,6 +316,8 @@ class V2Repository:
                 "hive_cell_matches", "hive_resonance_events", "hive_query_decisions",
                 "hive_messages", "hive_cell_components", "hive_cells", "hives",
                 "training_change_events", "training_observations", "training_runs",
+                "concept_relation_evidence", "scene_concept_projections", "action_variants",
+                "semantic_constructions", "action_concepts",
                 "scene_components", "scenes", "semantic_memberships", "semantic_evidence", "semantic_backfill_state", "concept_candidate_registry", "concept_fog_registry", "word_forms",
                 "lexemes", "structural_components", "cloud_placements", "spaces", "clouds",
             ):

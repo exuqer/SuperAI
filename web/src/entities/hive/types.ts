@@ -426,17 +426,28 @@ export interface HiveSnapshotSceneV2 {
   match: { total_score: number; matched_roles: string[]; mismatched_roles: string[]; selection_reason: string };
 }
 
+export interface HiveSnapshotCellV2 {
+  id: string;
+  label: string;
+  component_class: string;
+  source_scene_id: number | null;
+  position: { x: number; y: number };
+  physics: { local_activation: number; local_gravity: number; stored_strength: number; retention: number; energy: number };
+  projection_status: string;
+}
+
 export interface HiveSnapshotV2 {
   schema_version: number;
   hive: { id: string; status: string; capacity: number; occupied_cells: number; temperature: number; reasoning_step: number; energy: number };
   summary: { scene_count: number; word_count: number; concept_count: number; active_word_count: number; query_anchor_count: number; candidate_scene_count: number; rejected_scene_count: number; resonance_status: string };
+  cells: HiveSnapshotCellV2[];
   scenes: HiveSnapshotSceneV2[];
   words: HiveSnapshotWordV2[];
   query_overlay: Record<string, any>;
   resonance: Record<string, any>;
   timeline: Array<Record<string, any>>;
   field: { center_of_mass: { x: number; y: number }; zones: Record<string, number> };
-  diagnostics: { warnings: Array<{ code: string; message: string }>; counts: Record<string, number> };
+  diagnostics: { warnings: Array<{ code: string; message: string }>; counts: Record<string, number | null> };
 }
 
 export interface MultilevelMemoryItemV2 {

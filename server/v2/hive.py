@@ -76,7 +76,7 @@ class V2HiveService:
                 "hive": working_hive.get("hive", {}), "local_resonance": working_hive.get("local_resonance"),
                 "resonance_probes": working_hive.get("resonance_probes", []),
                 "resonance_scope": "LOCAL_THEN_GLOBAL" if allow_global else "LOCAL_ONLY",
-                    **{key: working_hive.get(key) for key in ("query_frame", "query_scene", "memory_scenes", "candidates", "answer", "pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "dialogue_context", "context_resolution", "retrieval_scope", "semantic_total", "gravity", "decision_score")},
+                    **{key: working_hive.get(key) for key in ("query_frame", "query_scene", "memory_scenes", "candidates", "answer", "pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "working_cells", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "dialogue_context", "context_resolution", "retrieval_scope", "semantic_total", "gravity", "decision_score")},
             }
             session = self.hive_resonance.create(
                 hive_id, text, use_global_memory=resonance_scope != "LOCAL_ONLY",
@@ -92,12 +92,15 @@ class V2HiveService:
             "query_scene": working_hive["query_scene"],
             "memory_scenes": working_hive["memory_scenes"],
             "candidates": working_hive["candidates"],
+            "accepted_candidates": working_hive.get("accepted_candidates", working_hive["candidates"]),
+            "rejected_candidates": working_hive.get("rejected_candidates", []),
                     "answer": working_hive["answer"],
                 })
         if parsed["query_frame"].get("requested_role") and not parsed["query_frame"].get("requires_clarification"):
             searches = self.unknown_searches.resolve_query_unknowns(hive_id)
             if searches:
                 result.update(self.service.get_hive(hive_id))
+                self.query_scenes.sync_working_cells(hive_id)
                 working_hive = self.query_scenes.get(hive_id)
                 result.update({
                     "query_frame": working_hive["query_frame"],
@@ -111,9 +114,13 @@ class V2HiveService:
             else:
                 working_hive = self.query_scenes.get(hive_id)
         result["cells"] = working_hive.get("cells", result.get("cells", []))
-        result.update({key: working_hive.get(key) for key in ("pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "resonance_probes", "local_resonance", "dialogue_context", "context_resolution", "retrieval_scope", "semantic_total", "gravity", "decision_score") if key in working_hive})
+        result.update({key: working_hive.get(key) for key in ("pipeline", "capacity", "energy", "stats", "display_status", "role_searches", "working_cells", "memory_sources", "inspection_projections", "sentence_plan", "full_sentence_plan", "generation_candidates", "morphology_trace", "reverse_validation", "reasoning_trace", "active_query", "query_session", "query_sessions", "active_query_session_id", "hive_structure", "resonance_probes", "local_resonance", "dialogue_context", "context_resolution", "retrieval_scope", "semantic_total", "gravity", "decision_score") if key in working_hive})
         result["dynamics"] = self.dynamics.get(hive_id)
         working_hive = self.query_scenes.get(hive_id)
+        if working_hive.get("answer", {}).get("status") == "RESOLVED":
+            self.query_scenes.persist_assistant_answer(hive_id)
+            working_hive = self.query_scenes.get(hive_id)
+        result["messages"] = working_hive.get("messages", result.get("messages", []))
         result["resolved_mode"] = mode
         result["hive"] = {**result.get("hive", {}), "intent": working_hive.get("hive", {}).get("intent"), "pipeline": working_hive.get("pipeline", {}), "capacity": working_hive.get("hive", {}).get("capacity", result.get("hive", {}).get("capacity")), "energy": working_hive.get("hive", {}).get("energy", result.get("hive", {}).get("energy")), "max_cells": result.get("hive", {}).get("max_cells", 24)}
         result["hive"].pop("total_energy", None)
