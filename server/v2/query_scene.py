@@ -8,7 +8,7 @@ from copy import deepcopy
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional
 
-from server.tokenizer import WordToken, tokenize_hierarchical
+from server.tokenizer import WordToken
 
 from .repository import V2Repository, decode, encode, utcnow
 from .training import RoleResolver, RussianMorphology, TrainingPipelineV2
@@ -17,6 +17,13 @@ from .semantic_projection import MATCH_WEIGHTS, SemanticProjectionService
 from .taxonomy_resolver import TaxonomyResolver
 from .capacity import get_working_occupancy
 from .event_core import UniversalEventPipeline, stable_id
+from .language import LanguageAnalysis, UniversalLanguageAnalyzer
+from .language.diagnostics import (
+    QUESTION_OPERATOR_ERROR,
+    REQUESTED_ROLE_ERROR,
+    ROLE_HYPOTHESIS_AMBIGUITY,
+)
+from .semantics import PredicateValencyProfile, RoleHypothesisResolver
 from server.core.settings import settings
 
 
@@ -105,20 +112,35 @@ class QuerySceneService:
         self.intent_classifier = IntentClassifier()
         self.semantic_projection = SemanticProjectionService()
         self.universal_events = UniversalEventPipeline(self.repository, self.morphology)
+        self.language = UniversalLanguageAnalyzer(self.morphology)
+        self.role_hypotheses = RoleHypothesisResolver()
 
     def parse(self, text: str) -> Dict[str, Any]:
         intent = self.intent_classifier.classify(text)
-        tokens = tokenize_hierarchical(text).all_tokens
+        language_analysis = self.language.analyze(
+            text,
+            detect_question=intent["intent"] not in {
+                "SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK",
+            },
+        )
         items = []
         question_word = ""
         typed_question_index: Optional[int] = None
         referential = None
-        for index, token in enumerate(tokens):
-            morph = self.morphology.parse(token.normalized)
+        for token in language_analysis.tokens:
+            index = token.index
             normalized = token.normalized.casefold()
-            entity_referential = morph.pos_tag == "NPRO" and morph.lemma in ENTITY_REFERENCE_LEMMAS
-            is_typed_question = morph.lemma == TYPED_QUESTION_LEMMA
-            is_question = (normalized in QUESTION_ROLES or is_typed_question) and not question_word and intent["intent"] not in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}
+            entity_referential = (
+                token.pos == "NPRO" and token.lemma in ENTITY_REFERENCE_LEMMAS
+            )
+            is_typed_question = token.lemma == TYPED_QUESTION_LEMMA
+            is_question = (
+                (normalized in QUESTION_ROLES or is_typed_question)
+                and not question_word
+                and intent["intent"] not in {
+                    "SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK",
+                }
+            )
             if is_question:
                 question_word = normalized
                 if is_typed_question:
@@ -127,9 +149,12 @@ class QuerySceneService:
                 referential = normalized
             modal = MODAL_WORDS.get(normalized)
             items.append({
-                "index": index, "surface": token.text, "normalized": normalized,
-                "lemma": morph.lemma, "part_of_speech": morph.pos_tag,
-                "grammatical_features": morph.features,
+                "index": index, "surface": token.surface, "normalized": normalized,
+                "lemma": token.lemma, "part_of_speech": token.pos,
+                "grammatical_features": dict(token.features),
+                "morphological_analyses": [
+                    analysis.as_dict() for analysis in token.analyses
+                ],
                 "component_type": "question_operator" if is_question else "context_reference" if normalized in REFERENTIALS else "query_modal" if modal else "query_token",
                 "entity_referential": entity_referential,
                 "role": "modal" if modal else None,
@@ -137,6 +162,11 @@ class QuerySceneService:
                 "expected_role": QUESTION_ROLES.get(normalized, "typed_slot") if is_question else None,
                 "resolution_state": TokenResolutionState.QUESTION_OPERATOR.value if is_question else TokenResolutionState.EXACT_FORM_MATCH.value if modal else TokenResolutionState.PARSED_UNGROUNDED.value,
             })
+        typed_resolution: tuple[
+            Optional[str], Optional[str], Optional[Dict[str, Any]],
+            List[Dict[str, Any]],
+        ] = (None, None, None, [])
+        valency_profile: Dict[str, Any] = {}
         with self.repository.transaction() as conn:
             for item in items:
                 if item["resolution_state"] == TokenResolutionState.QUESTION_OPERATOR.value:
@@ -158,6 +188,23 @@ class QuerySceneService:
                         "lexeme_cloud_id": int(row["lexeme_cloud_id"]),
                         "resolution_state": TokenResolutionState.LEXEME_MATCH.value,
                     })
+            roles = self._roles_from_language(
+                language_analysis,
+                items,
+                conn,
+                requested_role=QUESTION_ROLES.get(question_word, ""),
+            )
+            if typed_question_index is not None:
+                typed_resolution = self._resolve_typed_question(
+                    language_analysis,
+                    roles,
+                    items,
+                    conn,
+                )
+            if language_analysis.predicate:
+                valency_profile = PredicateValencyProfile.load(
+                    conn, language_analysis.predicate.lemma
+                ).as_dict()
         requested_role = QUESTION_ROLES.get(question_word, "")
         necessity_question = (
             requested_role == "object"
@@ -172,26 +219,34 @@ class QuerySceneService:
         }
         if intent["intent"] in {"SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK"}:
             requested_role = ""
-        roles = self._roles(items, requested_role=requested_role)
         slot_constraints: Dict[str, Dict[str, Any]] = {}
         semantic_constraints: Dict[str, Dict[str, Any]] = {}
         if typed_question_index is not None:
-            typed_role, typed_value = self._typed_question_role(roles, items, typed_question_index)
+            typed_slot, typed_role, typed_value, typed_hypotheses = typed_resolution
             if typed_role and typed_value:
-                roles.pop(typed_role, None)
+                roles = {
+                    role: value
+                    for role, value in roles.items()
+                    if value.get("phrase_id") != typed_value.get("phrase_id")
+                }
                 requested_role = typed_role
                 slot_constraints = {typed_role: {"is_a": deepcopy(typed_value)}}
                 question_token = items[typed_question_index]
                 question_token["expected_role"] = typed_role
-        requested_slot, role_hypotheses = self._resolve_question_role(
-            question_word,
-            roles,
-            items,
-            requested_role,
-            typed_question_index is not None,
-        )
+        if typed_question_index is not None and typed_resolution[0]:
+            requested_slot = typed_resolution[0]
+            role_hypotheses = typed_resolution[3]
+        else:
+            requested_slot, role_hypotheses = self._resolve_question_role(
+                question_word,
+                roles,
+                items,
+                requested_role,
+                typed_question_index is not None,
+            )
         if role_hypotheses:
-            requested_role = str(role_hypotheses[0]["role"])
+            if typed_question_index is None:
+                requested_role = str(role_hypotheses[0]["role"])
             if slot_constraints and requested_role not in slot_constraints:
                 constraint = next(iter(slot_constraints.values()))
                 slot_constraints = {requested_role: constraint}
@@ -201,6 +256,28 @@ class QuerySceneService:
             )
             if question_token:
                 question_token["expected_role"] = requested_role
+        role_ambiguity = (
+            len(role_hypotheses) > 1
+            and abs(
+                float(role_hypotheses[0].get("confidence", 0.0))
+                - float(role_hypotheses[1].get("confidence", 0.0))
+            ) < .04
+        )
+        if role_ambiguity:
+            language_analysis.diagnostics.append({
+                "code": ROLE_HYPOTHESIS_AMBIGUITY,
+                "hypotheses": deepcopy(role_hypotheses[:2]),
+            })
+        if typed_question_index is not None and not language_analysis.question_operator:
+            language_analysis.diagnostics.append({
+                "code": QUESTION_OPERATOR_ERROR,
+                "token_index": typed_question_index,
+            })
+        if typed_question_index is not None and not requested_role:
+            language_analysis.diagnostics.append({
+                "code": REQUESTED_ROLE_ERROR,
+                "reason": "typed_constraint_has_no_compatible_slot",
+            })
         if roles.get("purpose", {}).get("status") == "fixed":
             semantic_constraints["purpose"] = deepcopy(roles.pop("purpose"))
         polar_question = intent.get("question_kind") == "polar" and not requested_role
@@ -262,9 +339,21 @@ class QuerySceneService:
             "query_type": "continuation_role_question" if ellipsis_follow_up else "need_question" if necessity_question else "role_question" if requested_role else "polar_question" if polar_question else "statement",
             "question_word": question_word or None,
             "requested_role": requested_role or None,
+            "semantic_requested_role": (
+                str(role_hypotheses[0]["role"])
+                if role_hypotheses
+                else requested_role or None
+            ),
             "missing_role": requested_role or None,
             "requested_slot": requested_slot,
             "requested_role_hypotheses": role_hypotheses,
+            "resolution_status": (
+                "AMBIGUOUS"
+                if role_ambiguity
+                else "PARTIALLY_RESOLVED"
+                if typed_question_index is not None and not requested_role
+                else "RESOLVED"
+            ),
             "slot_constraints": slot_constraints,
             "semantic_constraints": semantic_constraints,
             "answer_cardinality": answer_cardinality,
@@ -285,6 +374,19 @@ class QuerySceneService:
             "predicate": self._token_value(predicate) if predicate else None,
             "roles": roles,
             "tokens": items,
+            "phrase_graph": language_analysis.phrase_graph.as_dict(),
+            "entity_mentions": [
+                mention.as_dict(language_analysis.tokens)
+                for mention in language_analysis.mentions
+            ],
+            "question_operator": (
+                language_analysis.question_operator.as_dict()
+                if language_analysis.question_operator
+                else None
+            ),
+            "relation_phrases": list(language_analysis.relation_phrases),
+            "predicate_valency_profile": valency_profile,
+            "language_diagnostics": list(language_analysis.diagnostics),
             "referential": referential,
             "ellipsis_follow_up": ellipsis_follow_up,
             "continuation_markers": sorted(continuation_markers),
@@ -322,26 +424,323 @@ class QuerySceneService:
         return {"intent_classification": intent, "query_frame": query_frame, "query_scene": query_scene}
 
     @staticmethod
-    def _typed_question_role(
-        roles: Dict[str, Dict[str, Any]], items: List[Dict[str, Any]], question_index: int,
-    ) -> tuple[str, Optional[Dict[str, Any]]]:
-        typed_value = next(
+    def _slot_role(slot: str) -> str:
+        return {
+            "subject": "agent",
+            "direct_object": "object",
+            "object": "object",
+            "indirect_object": "recipient",
+            "source_oblique": "source",
+            "destination_oblique": "destination",
+            "location_oblique": "location",
+            "reference_oblique": "location",
+            "instrumental": "instrument",
+            "purpose_oblique": "purpose",
+            "cause_oblique": "cause",
+        }.get(slot, "object")
+
+    def _roles_from_language(
+        self,
+        analysis: LanguageAnalysis,
+        items: List[Dict[str, Any]],
+        conn: Any,
+        *,
+        requested_role: str = "",
+    ) -> Dict[str, Dict[str, Any]]:
+        by_index = {item["index"]: item for item in items}
+        roles: Dict[str, Dict[str, Any]] = {}
+        if analysis.predicate:
+            predicate_item = by_index[analysis.predicate.index]
+            roles["action"] = {"status": "fixed", **predicate_item}
+        else:
+            # Elliptical dialogue fragments retain the established fallback,
+            # then receive phrase surfaces below.
+            roles.update(self._roles(items, requested_role=requested_role))
+        for item in items:
+            modal = MODAL_WORDS.get(item["normalized"])
+            if modal:
+                roles["modal"] = {
+                    "status": "fixed",
+                    **item,
+                    "role": "modal",
+                    "semantic_function": modal["semantic_function"],
+                }
+        operator_indices = set(
+            analysis.question_operator.token_indices
+            if analysis.question_operator
+            else []
+        )
+        known_mentions = [
+            mention for mention in analysis.mentions
+            if not operator_indices.intersection(mention.token_indices)
+            and mention.relation_function != "exclusion"
+        ]
+        if analysis.predicate:
+            resolved = self.role_hypotheses.resolve_mentions(
+                known_mentions,
+                predicate_index=analysis.predicate.index,
+                predicate_lemma=analysis.predicate.lemma,
+                conn=conn,
+            )
+        else:
+            resolved = []
+        for index, mention in enumerate(known_mentions):
+            head_item = by_index.get(mention.head)
+            if not head_item:
+                continue
+            observation = resolved[index] if index < len(resolved) else None
+            assigned_role = next(
+                (
+                    role for role, value in roles.items()
+                    if value.get("index") == mention.head
+                ),
+                "",
+            )
+            slot = (
+                str(observation["grammatical_slot"])
+                if observation
+                else str(head_item.get("scene_role") or assigned_role or "object")
+            )
+            role = self._slot_role(slot) if observation else assigned_role
+            if not role or role in {"action", "modal"}:
+                continue
+            value = {
+                "status": "fixed",
+                **head_item,
+                "surface": (
+                    analysis.tokens[mention.head].surface
+                    if mention.mention_type == "apposition"
+                    else mention.surface
+                ),
+                "normalized": (
+                    analysis.tokens[mention.head].normalized
+                    if mention.mention_type == "apposition"
+                    else mention.normalized_surface
+                ),
+                "lemma": mention.lemma,
+                "preposition": mention.preposition,
+                "phrase_id": f"phrase-np-{analysis.mentions.index(mention)}",
+                "token_start": mention.start,
+                "token_end": mention.end,
+                "mention_surface": mention.surface,
+                "full_surface": mention.surface,
+                "mention_type": mention.mention_type,
+                "head_token_index": mention.head,
+                "attributes": list(mention.attributes),
+                "grammatical_slot": slot,
+                "role_hypotheses": (
+                    deepcopy(observation["hypotheses"])
+                    if observation
+                    else []
+                ),
+                "relation_type": mention.relation_type,
+            }
+            roles[role] = value
+            phrase_id = value["phrase_id"]
+            phrase = next(
+                (
+                    phrase for phrase in analysis.phrase_graph.phrases
+                    if phrase.id == phrase_id
+                ),
+                None,
+            )
+            if phrase:
+                phrase.metadata.update({
+                    "grammatical_slot": slot,
+                    "role_hypotheses": deepcopy(
+                        value["role_hypotheses"]
+                    ),
+                })
+            for dependency in analysis.phrase_graph.dependencies:
+                if dependency.get("target") == phrase_id:
+                    dependency["relation"] = slot
+            # Direct objects retain the public generic role while preserving
+            # the finer semantic distribution on the participant.
+            if slot == "direct_object":
+                roles.setdefault("object", value)
+        return roles
+
+    @staticmethod
+    def _shared_question_cases(
+        analysis: LanguageAnalysis,
+        question_index: int,
+        head_index: int,
+    ) -> Dict[str, float]:
+        question = analysis.tokens[question_index]
+        head = analysis.tokens[head_index]
+        result: Dict[str, float] = {}
+        for question_analysis in question.analyses:
+            if question_analysis.lemma != TYPED_QUESTION_LEMMA:
+                continue
+            for head_analysis in head.analyses:
+                if head_analysis.pos not in {"NOUN", "NPRO"}:
+                    continue
+                case = question_analysis.features.get("case")
+                if not case or case != head_analysis.features.get("case"):
+                    continue
+                agrees = all(
+                    not question_analysis.features.get(key)
+                    or not head_analysis.features.get(key)
+                    or question_analysis.features.get(key)
+                    == head_analysis.features.get(key)
+                    for key in ("number", "gender")
+                )
+                if not agrees:
+                    continue
+                result[case] = max(
+                    result.get(case, 0.0),
+                    min(
+                        float(question_analysis.confidence),
+                        float(head_analysis.confidence),
+                    ),
+                )
+        return result
+
+    def _resolve_typed_question(
+        self,
+        analysis: LanguageAnalysis,
+        roles: Dict[str, Dict[str, Any]],
+        items: List[Dict[str, Any]],
+        conn: Any,
+    ) -> tuple[
+        Optional[str], Optional[str], Optional[Dict[str, Any]],
+        List[Dict[str, Any]],
+    ]:
+        operator = analysis.question_operator
+        if (
+            not operator
+            or operator.operator_type != "TYPED_ROLE_QUERY"
+            or operator.type_constraint_token_index is None
+        ):
+            return None, None, None, []
+        question_index = operator.token_indices[0]
+        head_index = operator.type_constraint_token_index
+        typed_mention = next(
             (
-                item for item in items
-                if item["index"] > question_index and item["part_of_speech"] in {"NOUN", "NPRO"}
+                mention for mention in analysis.mentions
+                if mention.head == head_index
+                and question_index in mention.token_indices
             ),
             None,
         )
-        if not typed_value:
-            return "", None
-        assigned_role = next(
-            (role for role, value in roles.items() if value.get("index") == typed_value["index"]),
-            "",
+        if not typed_mention:
+            return None, None, None, []
+        cases = self._shared_question_cases(
+            analysis, question_index, head_index
         )
-        if assigned_role in {"agent", "object", "location", "destination", "source", "time", "instrument", "attribute"}:
-            return assigned_role, typed_value
-        case = typed_value.get("grammatical_features", {}).get("case")
-        return ("agent" if case in {"nomn", None} else "object"), typed_value
+        if not cases:
+            selected_case = typed_mention.features.get("case")
+            if selected_case:
+                cases[selected_case] = .35
+        slot_scores: Dict[str, float] = {}
+        prep = typed_mention.preposition.casefold().split()[-1] if typed_mention.preposition else ""
+        for case, confidence in cases.items():
+            if prep in {"в", "во", "на"} and case in {"loct", "loc2"}:
+                slot = "location_oblique"
+            elif prep in {"в", "во", "на"} and case == "accs":
+                slot = "destination_oblique"
+            elif prep in {"из", "от", "с", "со"} and case == "gent":
+                slot = "source_oblique"
+            elif prep in {"к", "ко"} and case == "datv":
+                slot = "destination_oblique"
+            elif case == "nomn":
+                slot = "subject"
+            elif case in {"accs", "gent"}:
+                slot = "direct_object"
+            elif case == "datv":
+                slot = "indirect_object"
+            elif case == "ablt":
+                slot = "instrumental"
+            else:
+                slot = "object"
+            slot_scores[slot] = max(slot_scores.get(slot, 0.0), confidence)
+        fixed_slots = {
+            value.get("grammatical_slot")
+            for value in roles.values()
+            if isinstance(value, dict) and value.get("status") == "fixed"
+        }
+        predicate_lemma = analysis.predicate.lemma if analysis.predicate else ""
+        learned_slots = {
+            str(row["grammatical_slot"])
+            for row in conn.execute(
+                """SELECT DISTINCT ca.grammatical_slot
+                   FROM construction_arguments ca
+                   JOIN construction_templates ct ON ct.id=ca.construction_id
+                   WHERE ct.predicate_lemma=?""",
+                (predicate_lemma,),
+            ).fetchall()
+        } if predicate_lemma else set()
+        for slot in list(slot_scores):
+            if slot in fixed_slots:
+                slot_scores[slot] -= .80
+            if slot in learned_slots:
+                slot_scores[slot] += .42
+            if slot == "subject" and "subject" not in fixed_slots:
+                slot_scores[slot] += .20
+            if slot == "direct_object" and "subject" in fixed_slots:
+                slot_scores[slot] += .28
+        if not slot_scores:
+            return None, None, None, []
+        requested_slot = max(
+            slot_scores,
+            key=lambda slot: (slot_scores[slot], slot),
+        )
+        requested_role = self._slot_role(requested_slot)
+        semantic = self.role_hypotheses.hypotheses(
+            requested_slot,
+            requested_slot == "subject"
+            or "direct_object" in learned_slots,
+            predicate_lemma=predicate_lemma,
+            conn=conn,
+        )
+        role_hypotheses = [
+            {
+                "role": item["role"],
+                "confidence": item["confidence"],
+                "source": item["source_type"],
+                "evidence": [
+                    *item.get("evidence", []),
+                    "typed_unfilled_slot",
+                    "type_constraint_separated",
+                ],
+            }
+            for item in semantic
+        ]
+        typed_value = {
+            **deepcopy(items[head_index]),
+            "surface": analysis.tokens[head_index].surface,
+            "normalized": analysis.tokens[head_index].normalized,
+            "lemma": analysis.tokens[head_index].lemma,
+            "phrase_id": f"phrase-np-{analysis.mentions.index(typed_mention)}",
+            "mention_surface": typed_mention.surface,
+            "head_token_index": head_index,
+            "grammatical_slot": requested_slot,
+            "constraint_type": "TYPE_MEMBERSHIP",
+        }
+        operator.requested_slot_hypotheses = [
+            {"slot": slot, "score": score}
+            for slot, score in sorted(
+                slot_scores.items(), key=lambda item: -item[1]
+            )
+        ]
+        typed_phrase_id = typed_value["phrase_id"]
+        typed_phrase = next(
+            (
+                phrase for phrase in analysis.phrase_graph.phrases
+                if phrase.id == typed_phrase_id
+            ),
+            None,
+        )
+        if typed_phrase:
+            typed_phrase.metadata.update({
+                "grammatical_slot": requested_slot,
+                "question_constraint": analysis.tokens[head_index].lemma,
+                "requested_role_hypotheses": deepcopy(role_hypotheses),
+            })
+        for dependency in analysis.phrase_graph.dependencies:
+            if dependency.get("target") == typed_phrase_id:
+                dependency["relation"] = f"requested:{requested_slot}"
+        return requested_slot, requested_role, typed_value, role_hypotheses
 
     @staticmethod
     def _resolve_question_role(
@@ -594,8 +993,32 @@ class QuerySceneService:
                             "id": "query-frame", "stage": "QUERY_FRAME", "status": "RESOLVED",
                             "output": {
                                 "requested_role": parsed["query_frame"].get("requested_role"),
+                                "requested_slot": parsed["query_frame"].get("requested_slot"),
+                                "requested_role_hypotheses": deepcopy(
+                                    parsed["query_frame"].get(
+                                        "requested_role_hypotheses", []
+                                    )
+                                ),
                                 "roles": deepcopy(parsed["query_frame"].get("roles", {})),
                                 "tokens": deepcopy(parsed["query_frame"].get("tokens", [])),
+                                "phrase_graph": deepcopy(
+                                    parsed["query_frame"].get("phrase_graph", {})
+                                ),
+                                "entity_mentions": deepcopy(
+                                    parsed["query_frame"].get(
+                                        "entity_mentions", []
+                                    )
+                                ),
+                                "question_operator": deepcopy(
+                                    parsed["query_frame"].get(
+                                        "question_operator"
+                                    )
+                                ),
+                                "diagnostics": deepcopy(
+                                    parsed["query_frame"].get(
+                                        "language_diagnostics", []
+                                    )
+                                ),
                                 "dialogue_context": deepcopy(dialogue_context),
                                 "context_resolution": deepcopy(parsed["query_frame"].get("context_resolution", {})),
                             },
@@ -2165,7 +2588,13 @@ class QuerySceneService:
                         "lemma": participant["lemma"],
                         "surface": participant["surface"],
                         "mention_surface": participant.get("mention_surface"),
+                        "full_surface": participant.get("full_surface"),
                         "mention_type": participant.get("mention_type"),
+                        "entity_value": participant.get("entity_value"),
+                        "entity_type": deepcopy(participant.get("entity_type")),
+                        "answer_surfaces": deepcopy(
+                            participant.get("answer_surfaces", {})
+                        ),
                         "entity_id": participant["entity_id"],
                         "lexeme_cloud_id": participant.get("lexeme_cloud_id"),
                         "semantic_role": participant["role"],
@@ -2353,6 +2782,16 @@ class QuerySceneService:
     def _is_a_match_detail(self, value: Dict[str, Any], constraint: Dict[str, Any], conn: Any = None) -> Dict[str, Any]:
         value = value or {}
         constraint = constraint or {}
+        observed_type = value.get("entity_type")
+        if isinstance(observed_type, dict):
+            type_match = self._value_match_detail(observed_type, constraint, conn)
+            if float(type_match.get("score", 0.0)) >= .95:
+                return {
+                    **type_match,
+                    "score": 1.0,
+                    "role_match_score": 1.0,
+                    "match_type": "apposition_type_membership",
+                }
         exact = self._value_match_detail(value, constraint, conn)
         if float(exact.get("score", 0.0)) >= .95:
             return {**exact, "score": 1.0, "role_match_score": 1.0, "match_type": "exact_type"}
@@ -2903,6 +3342,36 @@ class QuerySceneService:
                 "id": f"candidate-{lemma}-{uuid.uuid5(uuid.NAMESPACE_URL, lemma).hex[:8]}",
                 "concept_id": f"concept-{lemma}", "lemma": lemma, "surface": answer_surface,
                 "entity_id": value.get("entity_id"),
+                "entity_value": value.get("entity_value") or value.get("surface"),
+                "entity_type": deepcopy(value.get("entity_type")),
+                "full_surface": (
+                    value.get("full_surface")
+                    or value.get("mention_surface")
+                    or value.get("surface")
+                ),
+                "mention": {
+                    "surface": (
+                        value.get("full_surface")
+                        or value.get("mention_surface")
+                        or value.get("surface")
+                    ),
+                    "head_surface": (
+                        value.get("entity_value") or value.get("surface")
+                    ),
+                    "mention_type": value.get("mention_type", "noun_phrase"),
+                    "attributes": deepcopy(value.get("attributes", [])),
+                },
+                "answer_surfaces": deepcopy(
+                    value.get("answer_surfaces")
+                    or {
+                        "short_name": value.get("surface"),
+                        "full_mention": (
+                            value.get("full_surface")
+                            or value.get("mention_surface")
+                            or value.get("surface")
+                        ),
+                    }
+                ),
                 "lexeme_cloud_id": value.get("lexeme_cloud_id"),
                 "word_form_cloud_id": value.get("word_form_cloud_id"),
                 "preposition": value.get("preposition", ""),
@@ -2919,7 +3388,7 @@ class QuerySceneService:
                     "slot": deepcopy(scene["scores"].get("slot_constraints", {})),
                     "semantic": deepcopy(scene["scores"].get("semantic_constraints", {})),
                 },
-                "entity_type": "entity",
+                "entity_kind": "entity",
                 "answer_mode": "explanation" if explanation else "direct",
                 "answer_scene_id": scene["id"] if explanation else None,
                 "hard_forbidden": bool(scene["scores"].get("context_conflict")),
@@ -2952,11 +3421,28 @@ class QuerySceneService:
             )
             required_type = constraint_source.get("is_a") or constraint_source.get("IS_A")
             if required_type:
-                taxonomy = TaxonomyResolver(conn).resolve_is_a(
-                    int(value.get("lexeme_cloud_id") or 0),
-                    int(required_type.get("lexeme_cloud_id") or 0),
-                    max_depth=3,
-                ) if conn else {"passed": False, "score": 0.0, "failure_reason": "RELATION_NOT_FOUND", "path": [], "evidence_scene_ids": []}
+                observed_type = value.get("entity_type")
+                direct_type_match = (
+                    self._value_match_detail(observed_type, required_type, conn)
+                    if isinstance(observed_type, dict)
+                    else {"score": 0.0}
+                )
+                if float(direct_type_match.get("score", 0.0)) >= .95:
+                    taxonomy = {
+                        "passed": True,
+                        "score": 1.0,
+                        "match_type": "apposition_type_membership",
+                        "path": [deepcopy(observed_type)],
+                        "depth": 1,
+                        "evidence_scene_ids": [scene["id"]],
+                        "failure_reason": None,
+                    }
+                else:
+                    taxonomy = TaxonomyResolver(conn).resolve_is_a(
+                        int(value.get("lexeme_cloud_id") or 0),
+                        int(required_type.get("lexeme_cloud_id") or 0),
+                        max_depth=3,
+                    ) if conn else {"passed": False, "score": 0.0, "failure_reason": "RELATION_NOT_FOUND", "path": [], "evidence_scene_ids": []}
             polarity = {
                 "passed": not bool(scene["negation"]),
                 "scene_polarity": "negative" if scene["negation"] else "positive",

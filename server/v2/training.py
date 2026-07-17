@@ -27,7 +27,8 @@ ROLE_VALUES = {
 class Morphology:
     lemma: str
     pos_tag: str
-    features: Dict[str, str]
+    features: Dict[str, Any]
+    confidence: float = 1.0
 
 
 class RussianMorphology:
@@ -39,11 +40,10 @@ class RussianMorphology:
         except Exception:
             self._analyzer = None
 
-    def parse(self, word: str) -> Morphology:
-        if not self._analyzer:
-            return Morphology(word.casefold(), "UNK", {})
-        parsed = self._analyzer.parse(word)[0]
+    @staticmethod
+    def _features(parsed: Any) -> Dict[str, Any]:
         tag = parsed.tag
+        grammemes = set(tag.grammemes)
         features = {
             key: value
             for key, value in {
@@ -53,10 +53,43 @@ class RussianMorphology:
                 "tense": tag.tense,
                 "person": tag.person,
                 "aspect": tag.aspect,
+                "animacy": tag.animacy,
+                "transitivity": tag.transitivity,
             }.items()
-            if value
+            if value is not None
         }
-        return Morphology(parsed.normal_form, str(tag.POS or "UNK"), features)
+        features["proper_name"] = bool(
+            grammemes & {"Name", "Surn", "Patr", "Geox", "Orgn", "Trad"}
+        )
+        return features
+
+    def parse_variants(self, word: str, limit: int = 12) -> List[Morphology]:
+        if not self._analyzer:
+            return [Morphology(word.casefold(), "UNK", {}, 1.0)]
+        result: List[Morphology] = []
+        seen: set[tuple[Any, ...]] = set()
+        for parsed in self._analyzer.parse(word):
+            features = self._features(parsed)
+            signature = (
+                parsed.normal_form,
+                str(parsed.tag.POS or "UNK"),
+                tuple(sorted(features.items())),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            result.append(Morphology(
+                parsed.normal_form,
+                str(parsed.tag.POS or "UNK"),
+                features,
+                float(parsed.score),
+            ))
+            if len(result) >= limit:
+                break
+        return result or [Morphology(word.casefold(), "UNK", {}, 1.0)]
+
+    def parse(self, word: str) -> Morphology:
+        return self.parse_variants(word, limit=1)[0]
 
     def inflect(self, word: str, features: Dict[str, str]) -> str:
         if not self._analyzer or not word:
@@ -276,7 +309,7 @@ class WordFormStructureService:
 
 
 class TrainingPipelineV2:
-    parser_version = "ru-rule-v7"
+    parser_version = "ru-phrase-v8"
 
     def __init__(self, repository: Optional[V2Repository] = None) -> None:
         self.repository = repository or V2Repository()

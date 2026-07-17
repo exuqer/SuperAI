@@ -12,27 +12,47 @@ from .training import RussianMorphology
 
 
 REBUILD_STEPS = (
+    "phrase_graphs",
     "entity_mentions",
+    "appositions",
     "event_frames",
+    "event_participants",
     "construction_templates",
+    "role_distributions",
+    "spatial_relations",
+    "answer_surfaces",
     "concept_relations",
     "scene_concept_projections",
     "indexes",
 )
 
 STEP_TABLES = {
+    "phrase_graphs": ("entity_mentions",),
     "entity_mentions": ("entities", "entity_aliases", "entity_mentions"),
+    "appositions": (
+        "entities", "entity_aliases", "entity_mentions", "concept_relations",
+    ),
     "event_frames": (
         "events",
         "event_participants",
         "event_modifiers",
         "event_role_hypotheses",
     ),
+    "event_participants": (
+        "event_participants", "event_modifiers", "event_role_hypotheses",
+    ),
     "construction_templates": (
         "construction_templates",
         "construction_arguments",
         "construction_evidence",
     ),
+    "role_distributions": (
+        "construction_arguments", "event_role_hypotheses",
+    ),
+    "spatial_relations": (
+        "concept_relations", "concept_relation_evidence",
+    ),
+    "answer_surfaces": ("entity_mentions", "event_participants"),
     "concept_relations": (
         "concepts",
         "concept_members",
@@ -192,7 +212,7 @@ class UniversalKnowledgeRebuilder:
                 })
             return {
                 "success": True,
-                "schema_version": 7,
+                "schema_version": 8,
                 "steps": requested,
                 "reports": reports,
                 "source_scenes_preserved": len(after_scenes),
@@ -203,11 +223,29 @@ class UniversalKnowledgeRebuilder:
     def rebuild_entity_mentions(self) -> Dict[str, Any]:
         return self.rebuild(["entity_mentions"])
 
+    def rebuild_phrase_graphs(self) -> Dict[str, Any]:
+        return self.rebuild(["phrase_graphs"])
+
+    def rebuild_appositions(self) -> Dict[str, Any]:
+        return self.rebuild(["appositions"])
+
     def rebuild_event_frames(self) -> Dict[str, Any]:
         return self.rebuild(["event_frames"])
 
+    def rebuild_event_participants(self) -> Dict[str, Any]:
+        return self.rebuild(["event_participants"])
+
     def rebuild_construction_templates(self) -> Dict[str, Any]:
         return self.rebuild(["construction_templates"])
+
+    def rebuild_role_distributions(self) -> Dict[str, Any]:
+        return self.rebuild(["role_distributions"])
+
+    def rebuild_spatial_relations(self) -> Dict[str, Any]:
+        return self.rebuild(["spatial_relations"])
+
+    def rebuild_answer_surfaces(self) -> Dict[str, Any]:
+        return self.rebuild(["answer_surfaces"])
 
     def rebuild_concept_relations(self) -> Dict[str, Any]:
         return self.rebuild(["concept_relations"])

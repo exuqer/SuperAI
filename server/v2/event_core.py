@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from server.tokenizer import tokenize_hierarchical
-
+from .language import (
+    EntityMentionParser,
+    MentionDraft,
+    ParsedToken,
+    UniversalLanguageAnalyzer,
+)
 from .repository import decode, encode, utcnow
+from .semantics import RoleCompatibilityGraph, RoleHypothesisResolver
 
 
-PARSER_VERSION = "universal-event-v1"
+PARSER_VERSION = "universal-event-v2"
 NOUN_POS = {"NOUN", "NPRO"}
 ADJECTIVE_POS = {"ADJF", "ADJS", "PRTF", "PRTS", "NUMR"}
 PREDICATE_POS = {"VERB", "INFN", "PRTS", "GRND"}
@@ -36,192 +41,15 @@ def clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-@dataclass
-class ParsedToken:
-    index: int
-    surface: str
-    normalized: str
-    lemma: str
-    pos: str
-    features: Dict[str, Any]
-    lexeme_cloud_id: Optional[int]
-    word_form_cloud_id: Optional[int]
-    grammatical_role: str
-
-    @property
-    def grammatical_case(self) -> Optional[str]:
-        return self.features.get("case")
-
-
-@dataclass
-class MentionDraft:
-    start: int
-    end: int
-    head: int
-    token_indices: List[int]
-    surface: str
-    normalized_surface: str
-    lemma: str
-    features: Dict[str, Any]
-    preposition: str
-    attributes: List[str]
-    type_token: Optional[int] = None
-    owner_token: Optional[int] = None
-
-
-class EntityMentionParser:
-    prepositions = {
-        "в", "во", "на", "у", "к", "ко", "из", "от", "с", "со", "для", "через",
-        "под", "над", "между", "около", "возле", "рядом", "после", "до", "перед",
-    }
-
-    @staticmethod
-    def _agrees(left: ParsedToken, right: ParsedToken) -> bool:
-        for key in ("number", "gender"):
-            a = left.features.get(key)
-            b = right.features.get(key)
-            if a and b and a != b:
-                return False
-        return True
-
-    def parse(self, tokens: Sequence[ParsedToken]) -> List[MentionDraft]:
-        mentions: List[MentionDraft] = []
-        consumed: set[int] = set()
-        for token in tokens:
-            if token.index in consumed or token.pos not in NOUN_POS:
-                continue
-            start = token.index
-            while start > 0:
-                previous = tokens[start - 1]
-                if previous.pos in ADJECTIVE_POS and self._agrees(previous, token):
-                    start -= 1
-                    continue
-                break
-            end = token.index
-            head = token.index
-            type_token: Optional[int] = None
-            owner_token: Optional[int] = None
-            if end + 1 < len(tokens):
-                following = tokens[end + 1]
-                is_proper_apposition = (
-                    following.pos in NOUN_POS
-                    and following.surface[:1].isupper()
-                    and token.surface[:1].islower()
-                    and (
-                        following.grammatical_case == "nomn"
-                        or following.grammatical_case == token.grammatical_case
-                    )
-                )
-                if is_proper_apposition:
-                    end += 1
-                    head = following.index
-                    type_token = token.index
-                elif (
-                    following.pos in NOUN_POS
-                    and following.grammatical_case == "gent"
-                    and token.grammatical_case != "gent"
-                ):
-                    end += 1
-                    owner_token = following.index
-            indices = list(range(start, end + 1))
-            values = [tokens[index] for index in indices]
-            head_token = tokens[head]
-            attributes = [
-                item.lemma for item in values
-                if item.pos in ADJECTIVE_POS
-            ]
-            preposition = ""
-            cursor = start - 1
-            while cursor >= 0 and start - cursor <= 3:
-                candidate = tokens[cursor]
-                if candidate.normalized in self.prepositions:
-                    preposition = candidate.normalized
-                    break
-                if candidate.pos not in ADJECTIVE_POS and candidate.pos != "ADVB":
-                    break
-                cursor -= 1
-            mentions.append(MentionDraft(
-                start=start,
-                end=end,
-                head=head,
-                token_indices=indices,
-                surface=" ".join(item.surface for item in values),
-                normalized_surface=" ".join(item.normalized for item in values),
-                lemma=head_token.lemma,
-                features=dict(head_token.features),
-                preposition=preposition,
-                attributes=attributes,
-                type_token=type_token,
-                owner_token=owner_token,
-            ))
-            consumed.update(indices)
-        return mentions
-
-
-class UniversalRoleResolver:
-    source_prepositions = {"из", "от", "с", "со"}
-    destination_prepositions = {"в", "во", "на", "к", "ко"}
-    location_prepositions = {"в", "во", "на", "у", "около", "возле", "рядом", "под", "над"}
-
-    @staticmethod
-    def grammatical_slot(
-        mention: MentionDraft,
-        predicate_index: int,
-        has_preverbal_subject: bool,
-    ) -> str:
-        case = mention.features.get("case")
-        prep = mention.preposition
-        if prep in UniversalRoleResolver.source_prepositions and case == "gent":
-            return "source_oblique"
-        if prep in {"для"}:
-            return "purpose_oblique"
-        if prep in {"к", "ко"} and case in {"datv", None}:
-            return "indirect_object"
-        if prep in {"в", "во", "на"} and case == "accs":
-            return "destination_oblique"
-        if prep in UniversalRoleResolver.location_prepositions:
-            return "location_oblique"
-        if case == "datv":
-            return "indirect_object"
-        if case == "ablt":
-            return "instrumental"
-        if not prep and case in {"accs", "gent"}:
-            return "direct_object"
-        if case == "nomn" and mention.start < predicate_index:
-            return "subject"
-        if case == "nomn" and mention.start > predicate_index and has_preverbal_subject:
-            return "direct_object"
-        if mention.start < predicate_index:
-            return "subject"
-        return "object"
-
-    @staticmethod
-    def hypotheses(slot: str, has_direct_object: bool) -> List[Dict[str, Any]]:
-        mapping: Dict[str, List[tuple[str, float]]] = {
-            "subject": (
-                [("agent", .72), ("cause", .46), ("theme", .42)]
-                if has_direct_object
-                else [("theme", .68), ("agent", .58), ("cause", .34)]
-            ),
-            "direct_object": [("patient", .74), ("theme", .64), ("object", .50)],
-            "indirect_object": [("recipient", .78), ("experiencer", .50), ("object", .38)],
-            "source_oblique": [("source", .92), ("location", .38)],
-            "destination_oblique": [("destination", .92), ("location", .52)],
-            "location_oblique": [("location", .90), ("destination", .40)],
-            "instrumental": [("instrument", .76), ("material", .52), ("theme", .36)],
-            "purpose_oblique": [("purpose", .90)],
-            "object": [("object", .55), ("theme", .45), ("patient", .40)],
-        }
-        return [
-            {"role": role, "confidence": confidence, "source_type": "grammar_prior"}
-            for role, confidence in mapping.get(slot, [("object", .5)])
-        ]
+class UniversalRoleResolver(RoleHypothesisResolver):
+    """Compatibility name for the former event-core-local resolver."""
 
 
 class UniversalEventPipeline:
     def __init__(self, repository: Any, morphology: Any) -> None:
         self.repository = repository
         self.morphology = morphology
+        self.language = UniversalLanguageAnalyzer(morphology)
         self.mentions = EntityMentionParser()
         self.roles = UniversalRoleResolver()
 
@@ -232,7 +60,6 @@ class UniversalEventPipeline:
         if not scene:
             raise KeyError(scene_id)
         source_text = str(scene["sentence_text"])
-        surfaces = tokenize_hierarchical(source_text).all_tokens
         rows = conn.execute(
             """SELECT sc.token_index,sc.grammatical_role,sc.morphology_json,
                       sc.lexeme_cloud_id,sc.word_form_cloud_id,wf.normalized_form,
@@ -243,26 +70,28 @@ class UniversalEventPipeline:
                WHERE sc.scene_cloud_id=? ORDER BY sc.token_index""",
             (scene_id,),
         ).fetchall()
-        result: List[ParsedToken] = []
+        metadata: Dict[int, Dict[str, Any]] = {}
         for row in rows:
             index = int(row["token_index"])
-            morphology = decode(row["morphology_json"], {})
-            surface = surfaces[index].text if index < len(surfaces) else str(row["normalized_form"])
-            result.append(ParsedToken(
-                index=index,
-                surface=surface,
-                normalized=str(row["normalized_form"]),
-                lemma=str(row["lemma"] or morphology.get("lemma") or row["normalized_form"]),
-                pos=str(row["pos_tag"] or morphology.get("pos") or "UNKN"),
-                features={
-                    key: value for key, value in morphology.items()
-                    if key not in {"lemma", "pos"}
-                },
-                lexeme_cloud_id=int(row["lexeme_cloud_id"]) if row["lexeme_cloud_id"] else None,
-                word_form_cloud_id=int(row["word_form_cloud_id"]) if row["word_form_cloud_id"] else None,
-                grammatical_role=str(row["grammatical_role"]),
-            ))
-        return source_text, result
+            metadata[index] = {
+                "lexeme_cloud_id": (
+                    int(row["lexeme_cloud_id"])
+                    if row["lexeme_cloud_id"]
+                    else None
+                ),
+                "word_form_cloud_id": (
+                    int(row["word_form_cloud_id"])
+                    if row["word_form_cloud_id"]
+                    else None
+                ),
+                "grammatical_role": str(row["grammatical_role"]),
+            }
+        analysis = self.language.analyze(
+            source_text,
+            token_metadata=metadata,
+            detect_question=False,
+        )
+        return source_text, analysis.tokens
 
     def _ensure_entity(
         self,
@@ -385,13 +214,51 @@ class UniversalEventPipeline:
         return relation_id
 
     @staticmethod
-    def _pattern(tokens: Sequence[ParsedToken], predicate_index: int) -> str:
+    def _pattern(
+        tokens: Sequence[ParsedToken],
+        predicate_index: int,
+        mentions: Sequence[MentionDraft] = (),
+    ) -> str:
+        mention_by_start = {mention.start: mention for mention in mentions}
+        covered = {
+            index
+            for mention in mentions
+            for index in mention.token_indices
+        }
+        relation_tokens = {
+            index
+            for mention in mentions
+            if mention.preposition
+            for index in range(
+                max(0, mention.start - len(mention.preposition.split())),
+                mention.start,
+            )
+        }
         values = []
         for token in tokens:
             if token.pos in {"PNCT"}:
                 continue
             if token.index == predicate_index:
                 values.append("VERB")
+                continue
+            mention = mention_by_start.get(token.index)
+            if mention:
+                relation = (
+                    f"REL:{mention.relation_type}"
+                    if mention.relation_type
+                    else f"PREP:{mention.preposition.casefold()}"
+                    if mention.preposition
+                    else ""
+                )
+                noun_phrase = (
+                    f"NP:{mention.features.get('case') or '*'}"
+                    f":{mention.mention_type}"
+                )
+                values.extend(item for item in (relation, noun_phrase) if item)
+                continue
+            if token.index in covered:
+                continue
+            if token.index in relation_tokens:
                 continue
             if token.pos in NOUN_POS:
                 values.append(f"NOUN:{token.features.get('case') or '*'}")
@@ -823,7 +690,17 @@ class UniversalEventPipeline:
 
     def materialize_scene(self, conn: Any, scene_id: int) -> Dict[str, Any]:
         source_text, tokens = self._scene_tokens(conn, scene_id)
-        drafts = self.mentions.parse(tokens)
+        previous_event = conn.execute(
+            "SELECT construction_id FROM events WHERE source_scene_id=?",
+            (scene_id,),
+        ).fetchone()
+        previous_construction_id = (
+            str(previous_event["construction_id"])
+            if previous_event and previous_event["construction_id"]
+            else None
+        )
+        relation_phrases = self.language.relation_phrases.parse(tokens)
+        drafts = self.mentions.parse(tokens, relation_phrases)
         predicate = next(
             (
                 token for token in tokens
@@ -855,6 +732,24 @@ class UniversalEventPipeline:
                 lexeme_cloud_id=head.lexeme_cloud_id,
                 alias=head.surface,
             )
+            if draft.normalized_surface != head.normalized:
+                conn.execute(
+                    """INSERT INTO entity_aliases
+                       (entity_id,alias,normalized_alias,lexeme_cloud_id,
+                        source_scene_id,confidence,source_type,created_at)
+                       VALUES(?,?,?,?,?,.92,'phrase_observation',?)
+                       ON CONFLICT(entity_id,normalized_alias) DO UPDATE SET
+                         confidence=MAX(entity_aliases.confidence,
+                                        excluded.confidence)""",
+                    (
+                        entity_id,
+                        draft.surface,
+                        draft.normalized_surface,
+                        head.lexeme_cloud_id,
+                        scene_id,
+                        utcnow(),
+                    ),
+                )
             entity_type_id = None
             if draft.type_token is not None:
                 type_head = tokens[draft.type_token]
@@ -958,12 +853,24 @@ class UniversalEventPipeline:
                 "lemma": draft.lemma,
                 "features": draft.features,
                 "preposition": draft.preposition,
+                "relation_type": draft.relation_type,
+                "relation_function": draft.relation_function,
                 "attributes": draft.attributes,
+                "mention_type": draft.mention_type,
+                "entity_value_surface": head.surface,
+                "entity_type_surface": (
+                    tokens[draft.type_token].surface
+                    if draft.type_token is not None
+                    else None
+                ),
             })
         has_preverbal_subject = any(
             mention["start"] < predicate.index
             and mention["features"].get("case") in {"nomn", None}
             for mention in mention_rows
+        )
+        predicate_profile = self.roles.spatial.predicate_profile(
+            conn, predicate.lemma
         )
         participant_drafts: List[Dict[str, Any]] = []
         for mention in mention_rows:
@@ -981,9 +888,12 @@ class UniversalEventPipeline:
                     features=mention["features"],
                     preposition=mention["preposition"],
                     attributes=mention["attributes"],
+                    relation_type=mention.get("relation_type"),
+                    relation_function=mention.get("relation_function"),
                 ),
                 predicate.index,
                 has_preverbal_subject,
+                predicate_profile=predicate_profile,
             )
             participant_drafts.append({
                 **mention,
@@ -996,10 +906,12 @@ class UniversalEventPipeline:
             participant["hypotheses"] = self.roles.hypotheses(
                 participant["slot"],
                 has_direct_object,
+                predicate_lemma=predicate.lemma,
+                conn=conn,
             )
             participant["role"] = participant["hypotheses"][0]["role"]
             participant["confidence"] = participant["hypotheses"][0]["confidence"]
-        pattern = self._pattern(tokens, predicate.index)
+        pattern = self._pattern(tokens, predicate.index, drafts)
         construction = self._construction(
             conn,
             scene_id,
@@ -1040,6 +952,47 @@ class UniversalEventPipeline:
             (scene_id,),
         ).fetchone()
         event_id = str(stored_event["id"])
+        if (
+            previous_construction_id
+            and previous_construction_id != construction["id"]
+        ):
+            conn.execute(
+                """DELETE FROM construction_evidence
+                   WHERE construction_id=? AND source_scene_id=?""",
+                (previous_construction_id, scene_id),
+            )
+            previous_count = int(conn.execute(
+                """SELECT COUNT(*) FROM construction_evidence
+                   WHERE construction_id=?""",
+                (previous_construction_id,),
+            ).fetchone()[0])
+            if previous_count == 0:
+                conn.execute(
+                    "DELETE FROM construction_templates WHERE id=?",
+                    (previous_construction_id,),
+                )
+            else:
+                previous_status = (
+                    "OBSERVED"
+                    if previous_count == 1
+                    else "CANDIDATE"
+                    if previous_count == 2
+                    else "PROBABLE"
+                    if previous_count < 5
+                    else "STABLE"
+                )
+                conn.execute(
+                    """UPDATE construction_templates
+                       SET evidence_count=?,status=?,confidence=?,updated_at=?
+                       WHERE id=?""",
+                    (
+                        previous_count,
+                        previous_status,
+                        min(.95, .5 + .1 * previous_count),
+                        now,
+                        previous_construction_id,
+                    ),
+                )
         conn.execute("DELETE FROM event_modifiers WHERE event_id=?", (event_id,))
         conn.execute("DELETE FROM event_participants WHERE event_id=?", (event_id,))
         participants: List[Dict[str, Any]] = []
@@ -1070,13 +1023,14 @@ class UniversalEventPipeline:
                     """INSERT INTO event_role_hypotheses
                        (id,participant_id,semantic_role,confidence,source_type,
                         evidence_json,created_at)
-                       VALUES(?,?,?,?,?,'{}',?)""",
+                       VALUES(?,?,?,?,?,?,?)""",
                     (
                         stable_id("role-hypothesis", participant_id, hypothesis["role"]),
                         participant_id,
                         hypothesis["role"],
                         hypothesis["confidence"],
                         hypothesis["source_type"],
+                        encode({"evidence": hypothesis.get("evidence", [])}),
                         now,
                     ),
                 )
@@ -1091,6 +1045,10 @@ class UniversalEventPipeline:
                 "preposition": participant["preposition"],
                 "attributes": participant["attributes"],
                 "owner_entity_id": participant["owner_entity_id"],
+                "mention_type": participant["mention_type"],
+                "mention_surface": participant["surface"],
+                "entity_value_surface": participant["entity_value_surface"],
+                "entity_type_surface": participant["entity_type_surface"],
                 "confidence": participant["confidence"],
                 "hypotheses": participant["hypotheses"],
             })
@@ -1170,8 +1128,13 @@ class UniversalEventPipeline:
                     ),
                 )
                 modifiers.append(modifier)
+        relation_token_indices = {
+            index
+            for relation in relation_phrases
+            for index in range(relation.token_start, relation.token_end + 1)
+        }
         for token in tokens:
-            if token.pos != "ADVB":
+            if token.pos != "ADVB" or token.index in relation_token_indices:
                 continue
             modifier = {
                 "id": stable_id(
@@ -1269,10 +1232,15 @@ class UniversalEventPipeline:
                 if participant.get("slot") == "location_oblique":
                     preposition = str(participant.get("preposition") or "")
                     relation_type = (
+                        participant.get("relation_type")
+                        if participant.get("relation_type") in {
+                            "LOCATED_IN", "LOCATED_ON", "LOCATED_NEAR"
+                        }
+                        else
                         "LOCATED_ON"
-                        if preposition in {"на", "над", "под"}
+                        if preposition.casefold() in {"на", "над", "под"}
                         else "LOCATED_NEAR"
-                        if preposition in {"около", "возле", "рядом"}
+                        if preposition.casefold() in {"около", "возле", "рядом"}
                         else "LOCATED_IN"
                     )
                     self._ensure_relation(
@@ -1387,6 +1355,46 @@ class UniversalEventPipeline:
                 "construction_id": construction["id"],
             },
             "entity_mentions": mention_rows,
+            "phrase_graph": {
+                "phrases": [
+                    {
+                        "id": f"phrase-np-{index}",
+                        "type": "noun_phrase",
+                        "token_start": participant["start"],
+                        "token_end": participant["end"],
+                        "head_token_index": participant["head"],
+                        "tokens": list(range(
+                            participant["start"], participant["end"] + 1
+                        )),
+                        "surface": participant["surface"],
+                        "mention_type": participant["mention_type"],
+                        "preposition": participant["preposition"],
+                        "grammatical_slot": participant["slot"],
+                        "role_hypotheses": deepcopy(
+                            participant["hypotheses"]
+                        ),
+                    }
+                    for index, participant in enumerate(participant_drafts)
+                ] + ([{
+                    "id": "phrase-predicate",
+                    "type": "verb_phrase",
+                    "token_start": predicate.index,
+                    "token_end": predicate.index,
+                    "head_token_index": predicate.index,
+                    "tokens": [predicate.index],
+                    "surface": predicate.surface,
+                    "lemma": predicate.lemma,
+                }] if predicate.index >= 0 else []),
+                "dependencies": [
+                    {
+                        "source": "phrase-predicate",
+                        "relation": participant["slot"],
+                        "target": f"phrase-np-{index}",
+                    }
+                    for index, participant in enumerate(participant_drafts)
+                    if predicate.index >= 0
+                ],
+            },
             "role_hypotheses": [
                 {
                     "participant_id": participant["id"],
@@ -1427,6 +1435,9 @@ class UniversalEventPipeline:
         for row in conn.execute(
             """SELECT ep.*,e.display_name,e.canonical_lemma,
                       em.surface AS mention_surface,em.mention_type,
+                      em.entity_type_id,
+                      et.display_name AS entity_type_surface,
+                      et.canonical_lemma AS entity_type_lemma,
                       em.grammatical_features_json,em.attributes_json,
                       (SELECT ea.lexeme_cloud_id
                          FROM entity_aliases ea
@@ -1437,6 +1448,7 @@ class UniversalEventPipeline:
                FROM event_participants ep
                JOIN entities e ON e.cloud_id=ep.entity_id
                LEFT JOIN entity_mentions em ON em.id=ep.mention_id
+               LEFT JOIN entities et ON et.cloud_id=em.entity_type_id
                WHERE ep.event_id=? ORDER BY ep.participant_index""",
             (event["id"],),
         ).fetchall():
@@ -1465,7 +1477,22 @@ class UniversalEventPipeline:
                     else str(row["surface"]).casefold()
                 ),
                 "mention_surface": row["mention_surface"] or row["surface"],
+                "full_surface": row["mention_surface"] or row["surface"],
                 "mention_type": row["mention_type"] or "noun_phrase",
+                "entity_value": row["display_name"],
+                "entity_type": (
+                    {
+                        "entity_id": int(row["entity_type_id"]),
+                        "surface": row["entity_type_surface"],
+                        "lemma": row["entity_type_lemma"],
+                    }
+                    if row["entity_type_id"] is not None
+                    else None
+                ),
+                "answer_surfaces": {
+                    "short_name": row["display_name"],
+                    "full_mention": row["mention_surface"] or row["surface"],
+                },
                 "lemma": row["canonical_lemma"] or row["lemma"],
                 "lexeme_cloud_id": (
                     int(row["lexeme_cloud_id"])
@@ -1537,6 +1564,7 @@ def role_compatible(
     participant: Dict[str, Any],
     requested_hypotheses: Iterable[Dict[str, Any]] = (),
 ) -> float:
+    graph = RoleCompatibilityGraph()
     if requested_slot and participant.get("grammatical_slot") == requested_slot:
         return 1.0
     if requested_role and participant.get("role") == requested_role:
@@ -1547,7 +1575,7 @@ def role_compatible(
     }
     if requested_role in participant_roles:
         return participant_roles[requested_role]
-    return max(
+    hypothesis_score = max(
         (
             min(
                 float(hypothesis.get("confidence", 0.0)),
@@ -1557,3 +1585,16 @@ def role_compatible(
         ),
         default=0.0,
     )
+    compatibility_score = max(
+        (
+            graph.score(str(requested_role or ""), str(role))
+            * confidence
+            for role, confidence in {
+                participant.get("role"): 1.0,
+                **participant_roles,
+            }.items()
+            if role
+        ),
+        default=0.0,
+    )
+    return max(hypothesis_score, compatibility_score)
