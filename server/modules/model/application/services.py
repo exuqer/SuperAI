@@ -7,6 +7,9 @@ from typing import Any
 from server.core.exceptions import ConflictError, NotFoundError
 from server.modules.model.infrastructure.repository import ModelRepository
 from server.v2.physics import PlacementPhysicsV2
+from server.v2.event_core import UniversalEventPipeline
+from server.v2.maintenance import UniversalKnowledgeRebuilder
+from server.v2.repository import decode
 from server.v2.validation import ModelInvariantValidator
 
 
@@ -128,7 +131,29 @@ class ModelService:
             ]
             scene_dto = dict(scene)
             scene_dto["components"] = components
+            scene_dto["entity_mentions"] = UniversalEventPipeline.load_mentions(
+                conn,
+                scene_id,
+            )
+            scene_dto["event"] = UniversalEventPipeline.load_event(
+                conn,
+                scene_id,
+            )
+            scene_dto["concept_evidence"] = [
+                {
+                    **dict(row),
+                    "payload": decode(row["payload_json"], {}),
+                }
+                for row in conn.execute(
+                    """SELECT * FROM concept_evidence
+                       WHERE source_scene_id=? ORDER BY created_at,id""",
+                    (scene_id,),
+                )
+            ]
             return {"scene": scene_dto}
+
+    def rebuild_model(self, steps: list[str] | None = None) -> dict[str, Any]:
+        return UniversalKnowledgeRebuilder(self.repository).rebuild(steps or None)
 
     def debug_invariants(self) -> dict[str, Any]:
         return ModelInvariantValidator(self.repository).validate()

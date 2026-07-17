@@ -71,7 +71,7 @@ def test_analytics_ranks_role_matched_answer_and_preserves_evicted_candidate():
     active = service.analytics(hive_id, active_run["run"]["id"])["primary"]
     active_candidates = active["snapshots"][-1]["candidates"]
     assert active_candidates[0]["answer"] == "рыбак"
-    assert active_candidates[0]["semantic_score"] == 1.0
+    assert active_candidates[0]["semantic_score"] == .964
     assert active_candidates[0]["eviction_status"] == "ACTIVE"
 
     evicted_run = service.reason(hive_id, config={
@@ -85,7 +85,7 @@ def test_analytics_ranks_role_matched_answer_and_preserves_evicted_candidate():
     evicted_candidate = next(
         item for item in evicted["snapshots"][-1]["candidates"] if item["answer"] == "рыбак"
     )
-    assert evicted_candidate["semantic_score"] == 1.0
+    assert evicted_candidate["semantic_score"] == .964
     assert evicted_candidate["eviction_status"] == "EVICTED"
     assert evicted_candidate["viability"] == 0.10
 

@@ -15,6 +15,7 @@ from server.modules.hive.api.router import router as hive_router
 from server.modules.hive.api.query_router import router as query_scene_router
 from server.modules.hive.api.dynamics_router import router as dynamics_router
 from server.v2.taxonomy_api import router as taxonomy_router
+from server.v2.knowledge_api import router as knowledge_router
 
 
 def create_app() -> FastAPI:
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(query_scene_router)
     app.include_router(dynamics_router)
     app.include_router(taxonomy_router)
+    app.include_router(knowledge_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
@@ -60,15 +62,31 @@ async def lifespan(_: FastAPI):
     # bounded and never performs a full-model migration.
     init_db()
     from server.v2.repository import V2Repository
+    from server.v2.domain_packs import DomainPackService
+    from server.v2.event_core import UniversalEventPipeline
     from server.v2.semantic_fog import SemanticFogService
+    from server.v2.training import RussianMorphology
 
     repository = V2Repository()
     with repository.transaction() as conn:
+        pipeline = UniversalEventPipeline(repository, RussianMorphology())
+        missing_events = conn.execute(
+            """SELECT s.cloud_id FROM scenes s
+               LEFT JOIN events e ON e.source_scene_id=s.cloud_id
+               WHERE e.id IS NULL ORDER BY s.cloud_id"""
+        ).fetchall()
+        for scene in missing_events:
+            pipeline.materialize_scene(conn, int(scene["cloud_id"]))
         global_space = conn.execute(
             "SELECT id FROM spaces WHERE space_type='global_field' LIMIT 1"
         ).fetchone()
         if global_space:
             SemanticFogService(repository).backfill(conn, int(global_space["id"]))
+    pack = settings.load_domain_pack
+    if not pack and settings.load_demo_knowledge:
+        pack = "demo_food"
+    if pack:
+        DomainPackService(repository).load(pack)
     yield
     # Shutdown: cleanup if needed
 

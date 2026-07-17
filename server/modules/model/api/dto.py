@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CloudResponse(BaseModel):
@@ -142,3 +142,16 @@ class InvariantCheckResponse(BaseModel):
     passed: bool
     violations: list[str]
     checks: dict[str, InvariantViolation]
+
+
+class RebuildRequest(BaseModel):
+    steps: list[
+        Literal[
+            "entity_mentions",
+            "event_frames",
+            "construction_templates",
+            "concept_relations",
+            "scene_concept_projections",
+            "indexes",
+        ]
+    ] = Field(default_factory=list)

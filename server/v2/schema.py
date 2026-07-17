@@ -5,11 +5,14 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    columns = {
+        str(row["name"] if hasattr(row, "keys") else row[1])
+        for row in conn.execute(f"PRAGMA table_info({table})")
+    }
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
@@ -29,7 +32,7 @@ def _needs_constraint_migration(conn: sqlite3.Connection, table: str, expected_v
 
 def _migrate_legacy_type_constraints(conn: sqlite3.Connection) -> None:
     """Expand legacy cloud/space type constraints without losing model data."""
-    migrate_clouds = _needs_constraint_migration(conn, "clouds", "morph_pattern")
+    migrate_clouds = _needs_constraint_migration(conn, "clouds", "'entity'")
     migrate_spaces = _needs_constraint_migration(conn, "spaces", "morphology_space")
     if not migrate_clouds and not migrate_spaces:
         return
@@ -46,7 +49,8 @@ def _migrate_legacy_type_constraints(conn: sqlite3.Connection) -> None:
                     id INTEGER PRIMARY KEY,
                     cloud_type TEXT NOT NULL CHECK (cloud_type IN
                         ('character','word_form','lexeme','scene','concept_candidate','concept',
-                         'morpheme_candidate','morpheme','morph_operator','morph_pattern','sentence_frame')),
+                         'entity','morpheme_candidate','morpheme','morph_operator','morph_pattern',
+                         'sentence_frame')),
                     canonical_name TEXT NOT NULL,
                     mass REAL NOT NULL DEFAULT 1.0 CHECK (mass >= 0),
                     density REAL NOT NULL DEFAULT 1.0 CHECK (density >= 0),
@@ -94,6 +98,55 @@ def _migrate_legacy_type_constraints(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migrate_concept_relation_constraints(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='concept_relations'"
+    ).fetchone()
+    sql = str((row[0] if row else "") or "")
+    if not sql or "ALIAS_OF" in sql:
+        return
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS concept_relation_subject_type_idx;
+        DROP INDEX IF EXISTS concept_relation_object_type_idx;
+        DROP INDEX IF EXISTS concept_relation_lookup_idx;
+        CREATE TABLE concept_relations__v7 (
+            id TEXT PRIMARY KEY,
+            relation_type TEXT NOT NULL CHECK(relation_type IN
+                ('IS_A','INSTANCE_OF','PART_OF','HAS_PART','HAS_PROPERTY','LOCATED_IN',
+                 'LOCATED_ON','LOCATED_NEAR','OWNS','USES','PRODUCES','REQUIRES','CAUSES',
+                 'RESULTS_IN','BEFORE','AFTER','SIMILAR_TO','OPPOSITE_TO','ALIAS_OF')),
+            subject_lexeme_cloud_id INTEGER NOT NULL,
+            object_lexeme_cloud_id INTEGER NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            status TEXT NOT NULL DEFAULT 'STABLE',
+            direct INTEGER NOT NULL DEFAULT 1 CHECK(direct IN (0,1)),
+            depth INTEGER NOT NULL DEFAULT 1 CHECK(depth >= 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
+            source_type TEXT NOT NULL DEFAULT 'CLASSIFICATION_DEFINITION',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(subject_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(object_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE CASCADE,
+            UNIQUE(relation_type, subject_lexeme_cloud_id, object_lexeme_cloud_id)
+        );
+        INSERT INTO concept_relations__v7
+            SELECT id, relation_type, subject_lexeme_cloud_id, object_lexeme_cloud_id,
+                   confidence, status, direct, depth, evidence_count, source_type,
+                   created_at, updated_at
+            FROM concept_relations;
+        DROP TABLE concept_relations;
+        ALTER TABLE concept_relations__v7 RENAME TO concept_relations;
+        CREATE INDEX concept_relation_subject_type_idx
+            ON concept_relations(subject_lexeme_cloud_id, relation_type);
+        CREATE INDEX concept_relation_object_type_idx
+            ON concept_relations(object_lexeme_cloud_id, relation_type);
+        CREATE INDEX concept_relation_lookup_idx
+            ON concept_relations(subject_lexeme_cloud_id, relation_type, object_lexeme_cloud_id);
+        """
+    )
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_legacy_type_constraints(conn)
     conn.execute("PRAGMA foreign_keys = ON")
@@ -108,7 +161,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY,
             cloud_type TEXT NOT NULL CHECK (cloud_type IN
                 ('character','word_form','lexeme','scene','concept_candidate','concept',
-                 'morpheme_candidate','morpheme','morph_operator','morph_pattern','sentence_frame')),
+                 'entity','morpheme_candidate','morpheme','morph_operator','morph_pattern',
+                 'sentence_frame')),
             canonical_name TEXT NOT NULL,
             mass REAL NOT NULL DEFAULT 1.0 CHECK (mass >= 0),
             density REAL NOT NULL DEFAULT 1.0 CHECK (density >= 0),
@@ -344,7 +398,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             canonical_name TEXT NOT NULL UNIQUE,
             display_name TEXT NOT NULL,
             space_id INTEGER,
-            status TEXT NOT NULL CHECK(status IN ('CANDIDATE','PROBABLE','STABLE')),
+            status TEXT NOT NULL CHECK(status IN
+                ('OBSERVED','CANDIDATE','PROBABLE','STABLE','CONFLICTED','DEPRECATED')),
             confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
             mass REAL NOT NULL DEFAULT 0.5 CHECK(mass >= 0),
             evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
@@ -417,7 +472,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS concept_relations (
             id TEXT PRIMARY KEY,
             relation_type TEXT NOT NULL CHECK(relation_type IN
-                ('IS_A','PART_OF','HAS_PROPERTY','SIMILAR_TO','OPPOSITE_TO','INSTANCE_OF')),
+                ('IS_A','INSTANCE_OF','PART_OF','HAS_PART','HAS_PROPERTY','LOCATED_IN',
+                 'LOCATED_ON','LOCATED_NEAR','OWNS','USES','PRODUCES','REQUIRES','CAUSES',
+                 'RESULTS_IN','BEFORE','AFTER','SIMILAR_TO','OPPOSITE_TO','ALIAS_OF')),
             subject_lexeme_cloud_id INTEGER NOT NULL,
             object_lexeme_cloud_id INTEGER NOT NULL,
             confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
@@ -472,6 +529,337 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (placement_id) REFERENCES cloud_placements(id) ON DELETE CASCADE,
             FOREIGN KEY (head_component_id) REFERENCES scene_components(id),
             UNIQUE(scene_cloud_id, token_index)
+        );
+        CREATE INDEX IF NOT EXISTS scene_component_lexeme_idx
+            ON scene_components(lexeme_cloud_id, scene_cloud_id);
+        CREATE INDEX IF NOT EXISTS scene_component_form_idx
+            ON scene_components(word_form_cloud_id, scene_cloud_id);
+        CREATE INDEX IF NOT EXISTS scene_component_role_idx
+            ON scene_components(grammatical_role, lexeme_cloud_id, scene_cloud_id);
+
+        CREATE TABLE IF NOT EXISTS entities (
+            cloud_id INTEGER PRIMARY KEY,
+            canonical_lemma TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            entity_kind TEXT NOT NULL DEFAULT 'entity',
+            status TEXT NOT NULL DEFAULT 'OBSERVED',
+            confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(cloud_id) REFERENCES clouds(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS entity_lemma_idx ON entities(canonical_lemma);
+
+        CREATE TABLE IF NOT EXISTS entity_aliases (
+            id INTEGER PRIMARY KEY,
+            entity_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            normalized_alias TEXT NOT NULL,
+            lexeme_cloud_id INTEGER,
+            source_scene_id INTEGER,
+            confidence REAL NOT NULL DEFAULT 1 CHECK(confidence BETWEEN 0 AND 1),
+            source_type TEXT NOT NULL DEFAULT 'observation',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(entity_id) REFERENCES entities(cloud_id) ON DELETE CASCADE,
+            FOREIGN KEY(lexeme_cloud_id) REFERENCES clouds(id) ON DELETE SET NULL,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE SET NULL,
+            UNIQUE(entity_id, normalized_alias)
+        );
+        CREATE INDEX IF NOT EXISTS entity_alias_lookup_idx
+            ON entity_aliases(normalized_alias, entity_id);
+
+        CREATE TABLE IF NOT EXISTS entity_mentions (
+            id TEXT PRIMARY KEY,
+            source_scene_id INTEGER NOT NULL,
+            entity_id INTEGER NOT NULL,
+            token_start INTEGER NOT NULL CHECK(token_start >= 0),
+            token_end INTEGER NOT NULL CHECK(token_end >= token_start),
+            head_token_index INTEGER NOT NULL,
+            surface TEXT NOT NULL,
+            normalized_surface TEXT NOT NULL,
+            mention_type TEXT NOT NULL DEFAULT 'noun_phrase',
+            entity_type_id INTEGER,
+            preposition TEXT NOT NULL DEFAULT '',
+            grammatical_features_json TEXT NOT NULL DEFAULT '{}',
+            attributes_json TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+            parser_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE CASCADE,
+            FOREIGN KEY(entity_id) REFERENCES entities(cloud_id) ON DELETE CASCADE,
+            FOREIGN KEY(entity_type_id) REFERENCES entities(cloud_id) ON DELETE SET NULL,
+            UNIQUE(source_scene_id, token_start, token_end)
+        );
+        CREATE INDEX IF NOT EXISTS entity_mention_scene_idx
+            ON entity_mentions(source_scene_id, token_start);
+        CREATE INDEX IF NOT EXISTS entity_mention_entity_idx
+            ON entity_mentions(entity_id, source_scene_id);
+
+        CREATE TABLE IF NOT EXISTS construction_templates (
+            id TEXT PRIMARY KEY,
+            predicate_lemma TEXT NOT NULL,
+            surface_pattern TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OBSERVED',
+            confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
+            source_type TEXT NOT NULL DEFAULT 'learned',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(predicate_lemma, surface_pattern)
+        );
+        CREATE INDEX IF NOT EXISTS construction_predicate_idx
+            ON construction_templates(predicate_lemma, confidence DESC);
+
+        CREATE TABLE IF NOT EXISTS construction_arguments (
+            id TEXT PRIMARY KEY,
+            construction_id TEXT NOT NULL,
+            argument_index INTEGER NOT NULL,
+            grammatical_slot TEXT NOT NULL,
+            morphological_constraints_json TEXT NOT NULL DEFAULT '{}',
+            semantic_role TEXT NOT NULL CHECK(semantic_role IN
+                ('agent','patient','theme','object','experiencer','recipient','source',
+                 'destination','location','instrument','material','cause','result','purpose',
+                 'time','attribute','quantity','owner','possessed','manner')),
+            confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+            FOREIGN KEY(construction_id) REFERENCES construction_templates(id) ON DELETE CASCADE,
+            UNIQUE(construction_id, argument_index, semantic_role)
+        );
+
+        CREATE TABLE IF NOT EXISTS construction_evidence (
+            id TEXT PRIMARY KEY,
+            construction_id TEXT NOT NULL,
+            source_scene_id INTEGER NOT NULL,
+            evidence_type TEXT NOT NULL,
+            weight REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(construction_id) REFERENCES construction_templates(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE CASCADE,
+            UNIQUE(construction_id, source_scene_id, evidence_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,
+            source_scene_id INTEGER NOT NULL UNIQUE,
+            predicate_lemma TEXT NOT NULL,
+            predicate_surface TEXT NOT NULL,
+            predicate_lexeme_cloud_id INTEGER,
+            construction_id TEXT,
+            polarity TEXT NOT NULL DEFAULT 'positive',
+            modality TEXT NOT NULL DEFAULT 'fact',
+            confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+            parser_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE CASCADE,
+            FOREIGN KEY(predicate_lexeme_cloud_id) REFERENCES clouds(id) ON DELETE SET NULL,
+            FOREIGN KEY(construction_id) REFERENCES construction_templates(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS event_predicate_idx
+            ON events(predicate_lemma, source_scene_id);
+        CREATE INDEX IF NOT EXISTS event_construction_idx
+            ON events(construction_id, source_scene_id);
+
+        CREATE TABLE IF NOT EXISTS event_participants (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            entity_id INTEGER NOT NULL,
+            mention_id TEXT NOT NULL,
+            semantic_role TEXT NOT NULL CHECK(semantic_role IN
+                ('agent','patient','theme','object','experiencer','recipient','source',
+                 'destination','location','instrument','material','cause','result','purpose',
+                 'time','attribute','quantity','owner','possessed','manner')),
+            grammatical_slot TEXT NOT NULL,
+            participant_index INTEGER NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+            preposition TEXT NOT NULL DEFAULT '',
+            surface TEXT NOT NULL,
+            lemma TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE,
+            FOREIGN KEY(entity_id) REFERENCES entities(cloud_id) ON DELETE CASCADE,
+            FOREIGN KEY(mention_id) REFERENCES entity_mentions(id) ON DELETE CASCADE,
+            UNIQUE(event_id, participant_index)
+        );
+        CREATE INDEX IF NOT EXISTS event_participant_role_entity_idx
+            ON event_participants(semantic_role, entity_id, event_id);
+        CREATE INDEX IF NOT EXISTS event_participant_slot_entity_idx
+            ON event_participants(grammatical_slot, entity_id, event_id);
+        CREATE INDEX IF NOT EXISTS event_participant_event_role_idx
+            ON event_participants(event_id, semantic_role);
+
+        CREATE TABLE IF NOT EXISTS event_role_hypotheses (
+            id TEXT PRIMARY KEY,
+            participant_id TEXT NOT NULL,
+            semantic_role TEXT NOT NULL CHECK(semantic_role IN
+                ('agent','patient','theme','object','experiencer','recipient','source',
+                 'destination','location','instrument','material','cause','result','purpose',
+                 'time','attribute','quantity','owner','possessed','manner')),
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            source_type TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(participant_id) REFERENCES event_participants(id) ON DELETE CASCADE,
+            UNIQUE(participant_id, semantic_role, source_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS event_modifiers (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            target_participant_id TEXT,
+            role TEXT NOT NULL,
+            value_entity_id INTEGER,
+            value_text TEXT NOT NULL DEFAULT '',
+            attributes_json TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+            source_mention_id TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_participant_id) REFERENCES event_participants(id) ON DELETE CASCADE,
+            FOREIGN KEY(value_entity_id) REFERENCES entities(cloud_id) ON DELETE SET NULL,
+            FOREIGN KEY(source_mention_id) REFERENCES entity_mentions(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS concepts (
+            id TEXT PRIMARY KEY,
+            cloud_id INTEGER,
+            concept_kind TEXT NOT NULL,
+            canonical_name TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN
+                ('OBSERVED','CANDIDATE','PROBABLE','STABLE','CONFLICTED','DEPRECATED')),
+            confidence REAL NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
+            source_type TEXT NOT NULL DEFAULT 'learned',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(cloud_id) REFERENCES clouds(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS concept_kind_status_idx
+            ON concepts(concept_kind, status, confidence DESC);
+
+        CREATE TABLE IF NOT EXISTS concept_members (
+            id TEXT PRIMARY KEY,
+            concept_id TEXT NOT NULL,
+            member_cloud_id INTEGER,
+            member_lemma TEXT NOT NULL,
+            member_role TEXT NOT NULL DEFAULT 'variant',
+            weight REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(concept_id) REFERENCES concepts(id) ON DELETE CASCADE,
+            FOREIGN KEY(member_cloud_id) REFERENCES clouds(id) ON DELETE SET NULL,
+            UNIQUE(concept_id, member_lemma, member_role)
+        );
+        CREATE INDEX IF NOT EXISTS concept_member_lemma_idx
+            ON concept_members(member_lemma, concept_id);
+
+        CREATE TABLE IF NOT EXISTS concept_evidence (
+            id TEXT PRIMARY KEY,
+            concept_id TEXT NOT NULL,
+            source_scene_id INTEGER,
+            source_observation_id INTEGER,
+            evidence_type TEXT NOT NULL,
+            weight REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            independence_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(concept_id) REFERENCES concepts(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE SET NULL,
+            FOREIGN KEY(source_observation_id) REFERENCES training_observations(id) ON DELETE SET NULL,
+            UNIQUE(concept_id, independence_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS query_frames (
+            id TEXT PRIMARY KEY,
+            hive_id TEXT,
+            source_text TEXT NOT NULL,
+            predicate_lemma TEXT,
+            requested_role TEXT,
+            requested_slot TEXT,
+            status TEXT NOT NULL,
+            frame_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS query_frame_hive_idx
+            ON query_frames(hive_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS query_role_hypotheses (
+            id TEXT PRIMARY KEY,
+            query_frame_id TEXT NOT NULL,
+            semantic_role TEXT NOT NULL CHECK(semantic_role IN
+                ('agent','patient','theme','object','experiencer','recipient','source',
+                 'destination','location','instrument','material','cause','result','purpose',
+                 'time','attribute','quantity','owner','possessed','manner')),
+            grammatical_slot TEXT,
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(query_frame_id) REFERENCES query_frames(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS query_constraints (
+            id TEXT PRIMARY KEY,
+            query_frame_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            constraint_type TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 1 CHECK(confidence BETWEEN 0 AND 1),
+            FOREIGN KEY(query_frame_id) REFERENCES query_frames(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS scene_matches (
+            id TEXT PRIMARY KEY,
+            query_frame_id TEXT NOT NULL,
+            source_scene_id INTEGER NOT NULL,
+            retrieval_stage TEXT NOT NULL,
+            score REAL NOT NULL CHECK(score BETWEEN 0 AND 1),
+            matched_roles_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(query_frame_id) REFERENCES query_frames(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE CASCADE,
+            UNIQUE(query_frame_id, source_scene_id, retrieval_stage)
+        );
+
+        CREATE TABLE IF NOT EXISTS pre_candidates (
+            id TEXT PRIMARY KEY,
+            scene_match_id TEXT NOT NULL,
+            query_frame_id TEXT NOT NULL,
+            entity_id INTEGER,
+            target_role TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            score REAL NOT NULL CHECK(score BETWEEN 0 AND 1),
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(scene_match_id) REFERENCES scene_matches(id) ON DELETE CASCADE,
+            FOREIGN KEY(query_frame_id) REFERENCES query_frames(id) ON DELETE CASCADE,
+            FOREIGN KEY(entity_id) REFERENCES entities(cloud_id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS accepted_candidates (
+            id TEXT PRIMARY KEY,
+            pre_candidate_id TEXT NOT NULL UNIQUE,
+            score REAL NOT NULL CHECK(score BETWEEN 0 AND 1),
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(pre_candidate_id) REFERENCES pre_candidates(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS rejected_candidates (
+            id TEXT PRIMARY KEY,
+            pre_candidate_id TEXT NOT NULL UNIQUE,
+            reason_code TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(pre_candidate_id) REFERENCES pre_candidates(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS training_runs (
@@ -689,6 +1077,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _migrate_concept_relation_constraints(conn)
     _add_column_if_missing(conn, "concept_relation_evidence", "concept_relation_id", "TEXT")
     _add_column_if_missing(conn, "concept_relation_evidence", "source_training_observation_id", "INTEGER")
     _add_column_if_missing(conn, "concept_relation_evidence", "evidence_type", "TEXT")

@@ -611,7 +611,13 @@ export const useHiveStore = defineStore('hive', () => {
   }
 
   function ensureAssistantAnswer(messageId: string | undefined, answer: typeof queryAnswer.value) {
-    const text = String(answer?.full_surface_answer || answer?.surface_answer || '').trim();
+    const text = String(
+      answer?.full_surface_answer
+      || answer?.surface_answer
+      || (answer?.status === 'UNRESOLVED'
+        ? 'Подходящий ответ в доступной памяти не найден.'
+        : '')
+    ).trim();
     if (!text) return;
     const lastMessage = messages.value.at(-1);
     if (lastMessage?.role === 'assistant' && lastMessage.text === text) return;

@@ -51,6 +51,13 @@ test.describe('Hive chat', () => {
         external_search: { sources: [], bees: [], iterations: 0, anchors: [] },
         merge_results: [],
         metrics: { bees: 0, iterations: 0, activated_cells: 0, merged_cells: 0 },
+        answer: {
+          status: 'UNRESOLVED',
+          answer_mode: 'none',
+          confidence: 0,
+          surface_answer: null,
+          full_surface_answer: null,
+        },
       },
     }));
     await page.route('**/api/v2/hives/hive-e2e/reasoning/export**', route => route.fulfill({

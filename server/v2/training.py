@@ -12,8 +12,8 @@ from .repository import V2Repository, encode, utcnow
 from .morphology import MorphologyService
 from .unknown_search import StructuralIndexService
 from .semantic_fog import SemanticFogService
-from .semantic_projection import SemanticProjectionService
 from .concept_relations import ConceptRelationTrainer
+from .event_core import UniversalEventPipeline
 
 
 ROLE_VALUES = {
@@ -21,26 +21,6 @@ ROLE_VALUES = {
     "destination", "source", "instrument", "purpose", "complement", "preposition",
     "service", "unknown",
 }
-
-
-OBJECT_PREDICATES = {"есть", "питаться", "пугать", "видеть", "поймать", "принести", "употреблять"}
-LOCATION_PREDICATES = {"жить", "лежать", "находиться"}
-
-
-def predicate_argument_role(predicate_lemma: str, preposition: str, case: Optional[str]) -> Optional[str]:
-    """Return a semantic role for a governed noun when a known valency applies."""
-    predicate = (predicate_lemma or "").casefold()
-    prep = (preposition or "").casefold()
-    if predicate in LOCATION_PREDICATES:
-        if (prep in {"в", "во", "на"} and case in {"loct", None}) or (prep == "у" and case in {"gent", None}):
-            return "location"
-    if predicate == "употреблять" and prep in {"в", "во"} and case in {"accs", None}:
-        return "purpose"
-    if predicate == "питаться" and case == "ablt":
-        return "object"
-    if predicate in OBJECT_PREDICATES and case in {"accs", "gent", "datv"}:
-        return "object"
-    return None
 
 
 @dataclass(frozen=True)
@@ -78,6 +58,34 @@ class RussianMorphology:
         }
         return Morphology(parsed.normal_form, str(tag.POS or "UNK"), features)
 
+    def inflect(self, word: str, features: Dict[str, str]) -> str:
+        if not self._analyzer or not word:
+            return word
+        grammemes = {
+            value
+            for key, value in features.items()
+            if key in {"case", "number", "gender"} and value
+        }
+        if not grammemes:
+            return word
+        parsed = self._analyzer.parse(word)
+        source = next(
+            (
+                item
+                for item in parsed
+                if item.normal_form == parsed[0].normal_form
+                and str(item.tag.POS or "") in {"NOUN", "NPRO", "ADJF", "PRTF", "NUMR"}
+            ),
+            parsed[0],
+        )
+        generated = source.inflect(grammemes)
+        if not generated:
+            return word
+        surface = generated.word
+        if word[:1].isupper():
+            surface = surface[:1].upper() + surface[1:]
+        return surface
+
 
 class RoleResolver:
     PREPOSITIONS = {"в", "во", "на", "к", "с", "со", "из", "от", "для", "по", "о", "об", "у"}
@@ -100,7 +108,6 @@ class RoleResolver:
 
     def resolve(self, tokens: Sequence[WordToken], morphologies: Sequence[Morphology]) -> List[Dict[str, Any]]:
         predicate_index = next((i for i, item in enumerate(morphologies) if item.pos_tag in self.VERBS), None)
-        predicate_lemma = morphologies[predicate_index].lemma if predicate_index is not None else ""
         definition_index = next((i for i, token in enumerate(tokens) if token.normalized == "это"), None)
         has_source = any(
             tokens[index - 1].normalized in {"из", "от"} and morph.features.get("case") == "gent"
@@ -115,11 +122,7 @@ class RoleResolver:
                 role, dependency, confidence = "preposition", "marker", 0.99
             elif token.normalized in self.SERVICE:
                 role, dependency, confidence = "service", "service", 0.98
-            elif morph.pos_tag in self.NOUNS and (
-                valency_role := predicate_argument_role(predicate_lemma, previous, morph.features.get("case"))
-            ):
-                role, dependency, confidence = valency_role, "predicate_valency", 0.94
-            elif previous in {"в", "во", "на"} and morph.features.get("case") in {"loct", None}:
+            elif previous in {"в", "во", "на"} and morph.features.get("case") in {"loct", "loc2", None}:
                 role, dependency, confidence = "location", "prepositional", 0.92
             elif previous == "у" and morph.features.get("case") in {"gent", None}:
                 role, dependency, confidence = "location", "prepositional", 0.92
@@ -273,7 +276,7 @@ class WordFormStructureService:
 
 
 class TrainingPipelineV2:
-    parser_version = "ru-rule-v6"
+    parser_version = "ru-rule-v7"
 
     def __init__(self, repository: Optional[V2Repository] = None) -> None:
         self.repository = repository or V2Repository()
@@ -283,8 +286,8 @@ class TrainingPipelineV2:
         self.morphology_space = MorphologyService(self.repository)
         self.structural_index = StructuralIndexService()
         self.semantic_fog = SemanticFogService(self.repository)
-        self.semantic_projection = SemanticProjectionService()
         self.concept_relations = ConceptRelationTrainer()
+        self.universal_events = UniversalEventPipeline(self.repository, self.morphology)
 
     def train(self, text: str, source_type: str = "training") -> Dict[str, Any]:
         tokenization = tokenize_hierarchical(text)
@@ -305,10 +308,8 @@ class TrainingPipelineV2:
             ]
             for scene_result, sentence in zip(scene_results, tokenization.sentences):
                 scene_id = int(scene_result["scene_cloud_id"])
-                scene_result["observation_type"] = self.semantic_projection.record_observation(conn, scene_id, sentence.text)
-                projection = self.semantic_projection.project_scene(conn, scene_id)
-                if projection:
-                    scene_result["semantic_projection"] = projection
+                universal = self.universal_events.materialize_scene(conn, scene_id)
+                scene_result.update(universal)
             semantic_backfill = self.semantic_fog.backfill(conn, int(global_space["id"]))
             success = bool(scene_results)
             conn.execute(
@@ -342,7 +343,23 @@ class TrainingPipelineV2:
 
     def rebuild_semantic_projections(self) -> Dict[str, int]:
         with self.repository.transaction() as conn:
-            return self.semantic_projection.rebuild(conn)
+            projected = 0
+            for row in conn.execute("SELECT cloud_id FROM scenes ORDER BY cloud_id").fetchall():
+                result = self.universal_events.materialize_scene(conn, int(row["cloud_id"]))
+                if result.get("scene_concept_projection"):
+                    projected += 1
+            return {
+                "action_concepts": int(conn.execute(
+                    "SELECT COUNT(*) FROM action_concepts"
+                ).fetchone()[0]),
+                "action_variants": int(conn.execute(
+                    "SELECT COUNT(*) FROM action_variants"
+                ).fetchone()[0]),
+                "semantic_constructions": int(conn.execute(
+                    "SELECT COUNT(*) FROM construction_templates"
+                ).fetchone()[0]),
+                "scene_concept_projections": projected,
+            }
 
     def _migrate_existing_scenes(self, conn: Any) -> None:
         rows = conn.execute(

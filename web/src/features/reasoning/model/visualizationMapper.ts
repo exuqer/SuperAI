@@ -1,6 +1,20 @@
 import type { QuerySceneV2, QuerySceneCandidateV2 } from '@/entities/hive/types';
 
-export type HiveMode = 'whole' | 'scene' | 'search' | 'structure' | 'answer' | 'resonance' | 'dynamics' | 'multilevel';
+export type HiveMode =
+  | 'whole'
+  | 'parse'
+  | 'event'
+  | 'scene'
+  | 'roles'
+  | 'search'
+  | 'candidates'
+  | 'concepts'
+  | 'concept-evidence'
+  | 'structure'
+  | 'answer'
+  | 'resonance'
+  | 'dynamics'
+  | 'multilevel';
 
 const roleLabel: Record<string, string> = { agent: 'AGENT', action: 'ACTION', predicate: 'ACTION', modal: 'MODAL', object: 'OBJECT', location: 'LOCATION', time: 'TIME', instrument: 'INSTRUMENT', subject: 'SUBJECT' };
 
@@ -56,6 +70,55 @@ export function mapVisualization(source: Record<string, any>) {
       sources,
       counts: { found: sources.length, validated: sources.filter((item: any) => item.anchorValidation?.status === 'PASSED').length, candidates: candidates.length },
       history: source.vibrationHistory || [],
+    },
+    analysis: {
+      parse: {
+        source_text: source.queryFrame?.source_text || '',
+        tokens: source.queryFrame?.tokens || [],
+        slots: source.queryScene?.slots || [],
+      },
+      events: sources.map((item: any) => ({
+        scene_id: item.id,
+        source_text: item.text,
+        event: item.event || null,
+        entity_mentions: item.entity_mentions || [],
+      })),
+      roleHypotheses: {
+        requested_role: source.queryFrame?.requested_role || null,
+        requested_slot: source.queryFrame?.requested_slot || null,
+        query: source.queryFrame?.requested_role_hypotheses || [],
+        events: sources.flatMap((item: any) =>
+          (item.event?.participants || []).map((participant: any) => ({
+            scene_id: item.id,
+            entity: participant.surface,
+            grammatical_slot: participant.grammatical_slot,
+            selected_role: participant.role,
+            hypotheses: participant.role_hypotheses || [],
+          }))
+        ),
+      },
+      candidates: {
+        accepted: candidateSource,
+        rejected: sources
+          .filter((item: any) => item.candidate_validation || item.candidate_status === 'rejected')
+          .map((item: any) => item.candidate_validation || {
+            scene_id: item.id,
+            reason_code: item.decision_reason || 'CONSTRAINT_FAILED',
+          }),
+      },
+      concepts: {
+        query: source.queryFrame?.conceptual_query_frame || null,
+        projections: sources
+          .filter((item: any) => item.scene_concept_projection || item.event)
+          .map((item: any) => ({
+            scene_id: item.id,
+            projection: item.scene_concept_projection || null,
+            construction_id: item.event?.construction_id || null,
+          })),
+      },
+      conceptEvidence: sources.flatMap((item: any) =>
+        item.concept_evidence || item.event?.concept_evidence || []
+      ),
     },
     answerBuild: {
       shortPlan: source.sentencePlan || null,

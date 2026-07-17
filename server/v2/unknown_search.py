@@ -351,7 +351,22 @@ class UnknownTokenSearchService:
         if not state.get("memory_scenes"):
             from .query_scene import QuerySceneService
             query_service = QuerySceneService(self.repository)
-            global_scenes = query_service._memory_scenes(conn, None)
+            bridge_frame = {
+                "requested_role": state.get("query_frame", {}).get("requested_role"),
+                "roles": {
+                    str(search.get("query_role") or "object"): {
+                        "status": "fixed",
+                        "lemma": target,
+                        "surface": target,
+                        "normalized": target,
+                    },
+                },
+            }
+            global_scenes = query_service._memory_scenes(
+                conn,
+                None,
+                bridge_frame,
+            )
             state["memory_scenes"] = [
                 query_service._score_scene(state.get("query_frame", {}), scene, conn)
                 for scene in global_scenes
@@ -387,7 +402,6 @@ class UnknownTokenSearchService:
                     scene_id = str(source_id).removeprefix("scene-")
                     scene = next((item for item in state.get("memory_scenes", []) if item.get("id") == source_id), None)
                     if scene and scene_id.isdigit():
-                        self._place_memory_source(conn, hive_id, int(scene_id), scene, search)
                         sources = state.setdefault("memory_sources", [])
                         if not any(item.get("source_scene_id") == int(scene_id) for item in sources):
                             sources.append({"id": f"memory-source-{scene_id}", "component_class": "memory_source", "source_scene_id": int(scene_id), "source_text": scene.get("source_text", ""), "query_frame_id": state.get("query_frame_id"), "conversation_id": state.get("conversation_id"), "message_id": state.get("message_id")})

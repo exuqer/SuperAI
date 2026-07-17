@@ -212,11 +212,12 @@ def test_learned_continuation_keeps_rejected_broad_scenes_visible():
 
     follow = service.query(hive_id, "А ещё что?")
     assert [item["lemma"] for item in follow["candidates"]] == ["рыба"]
-    market = next(item for item in follow["memory_scenes"] if "рынке" in item["source_text"])
-    assert market["result_type"] == "PARTIAL_HIT"
-    assert market["anchor_validation"]["status"] == "FAILED"
-    assert market["candidate_status"] == "rejected"
-    assert set(market["anchor_validation"]["failed_roles"]) == {"action", "agent"}
+    assert all("рынке" not in item["source_text"] for item in follow["memory_scenes"])
+    assert follow["query_frame"]["retrieval_metrics"]["indexed"] is True
+    assert (
+        follow["query_frame"]["retrieval_metrics"]["scenes_considered"]
+        < follow["query_frame"]["retrieval_metrics"]["scenes_total"]
+    )
     stages = [item["stage"] for item in follow["reasoning_trace"]["stages"]]
     assert stages[1:6] == [
         "QUERY_FRAME", "CONTEXT_INHERITANCE", "QUERY_SCENE_COMPLETION",

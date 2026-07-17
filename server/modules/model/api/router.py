@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from server.modules.model.api.dto import RebuildRequest
 from server.modules.model.application.services import ModelService
 
 
@@ -34,6 +35,14 @@ async def clear_model(service: ModelService = Depends(get_model_service)) -> dic
 @router.get("/model")
 async def get_model(service: ModelService = Depends(get_model_service)) -> dict[str, Any]:
     return service.get_trained_model_snapshot()
+
+
+@router.post("/model/rebuild")
+async def rebuild_model(
+    body: RebuildRequest,
+    service: ModelService = Depends(get_model_service),
+) -> dict[str, Any]:
+    return service.rebuild_model(body.steps)
 
 
 @router.get("/clouds/{cloud_id}")

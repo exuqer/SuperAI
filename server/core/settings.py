@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,6 +24,22 @@ class Settings(BaseSettings):
     app_title: str = "SuperAI Cloud / Space / Placement API"
     app_version: str = "2.0.0"
     debug: bool = False
+    load_demo_knowledge: bool = False
+    load_domain_pack: str | None = None
+    allow_manual_seeds: bool = False
+    retrieval_weights: dict[str, float] = Field(default_factory=lambda: {
+        "predicate_match": 0.22,
+        "required_roles_match": 0.18,
+        "requested_role_support": 0.15,
+        "entity_match": 0.12,
+        "constraint_match": 0.10,
+        "polarity_match": 0.08,
+        "context_match": 0.05,
+        "evidence_confidence": 0.10,
+    })
+    exact_retrieval_stop_threshold: float = 0.85
+    concept_retrieval_stop_threshold: float = 0.75
+    retrieval_stage_limit: int = 64
 
     @field_validator("debug", mode="before")
     @classmethod

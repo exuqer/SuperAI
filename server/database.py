@@ -7,8 +7,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from server.core.settings import settings
 
-DB_PATH = Path(".superai/state.sqlite")
+
+DB_PATH = Path(settings.database_path)
 
 
 def get_db_path() -> Path:

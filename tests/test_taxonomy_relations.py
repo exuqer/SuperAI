@@ -32,7 +32,7 @@ def test_candidate_taxonomy_is_checked_after_semantic_extraction_and_rejections_
     )
     service = V2HiveService()
     hive_id = service.create()["hive"]["id"]
-    result = service.query(hive_id, "Какие животные употребляют рыбу в пищу?")
+    result = service.query(hive_id, "Какие животные употребляют рыбу?")
     assert [candidate["lemma"] for candidate in result["accepted_candidates"]] == ["кот", "медведь", "пингвин", "выдра", "цапля"]
     rejected = {candidate["lemma"]: candidate["rejection_reason"] for candidate in result["rejected_candidates"]}
     assert rejected == {"корова": "POLARITY_MISMATCH", "робот": "TAXONOMY_RELATION_NOT_FOUND"}

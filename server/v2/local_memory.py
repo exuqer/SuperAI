@@ -32,7 +32,7 @@ ROLE_ALIASES = {
 
 QUESTION_ANSWER_ROLES = {
     "кто": "agent",
-    "кого": "agent_or_object",
+    "кого": "patient",
     "кому": "recipient",
     "что": "object",
     "где": "location",
@@ -48,7 +48,7 @@ QUESTION_ANSWER_ROLES = {
 
 ANSWER_ROLE_ALIASES = {
     "agent": {"agent", "subject"},
-    "agent_or_object": {"agent", "subject", "object"},
+    "patient": {"patient", "theme", "object"},
     "location": {"location", "destination"},
     "destination": {"location", "destination"},
     "source": {"location", "source"},
