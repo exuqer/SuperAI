@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Set
 
 from .models import ParsedToken, QuestionOperator
 
@@ -14,6 +14,30 @@ class QuestionOperatorParser:
     }
     TYPED_QUESTION_LEMMA = "какой"
 
+    def role_operator_indices(
+        self,
+        tokens: Sequence[ParsedToken],
+    ) -> Set[int]:
+        """Return tokens that reserve an argument slot instead of a noun slot.
+
+        Interrogative pronouns can have noun-like morphology (``кому`` is an
+        ``NPRO``), but they do not name an entity in the utterance.  Keeping
+        their indices separate lets the phrase parser avoid treating a
+        following proper noun as an apposition to the question word.
+
+        ``какой`` is deliberately excluded: it is a determiner of a typed
+        question and must remain available to construct ``какой <noun>``.
+        """
+        return {
+            token.index
+            for token in tokens
+            if (
+                token.lemma in self.QUESTION_LEMMAS
+                or token.normalized in self.QUESTION_LEMMAS
+            )
+            and token.lemma != self.TYPED_QUESTION_LEMMA
+        }
+
     def parse(
         self,
         tokens: Sequence[ParsedToken],
@@ -22,9 +46,8 @@ class QuestionOperatorParser:
         question = next(
             (
                 token for token in tokens
-                if token.lemma == self.TYPED_QUESTION_LEMMA
-                or token.normalized in self.QUESTION_LEMMAS
-                or token.lemma in self.QUESTION_LEMMAS
+                if token.index in self.role_operator_indices(tokens)
+                or token.lemma == self.TYPED_QUESTION_LEMMA
             ),
             None,
         )

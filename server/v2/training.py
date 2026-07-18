@@ -98,7 +98,10 @@ class RussianMorphology:
         grammemes = {
             value
             for key, value in features.items()
-            if key in {"case", "number", "gender"} and value
+            if key in {
+                "case", "number", "gender", "tense", "person",
+                "mood", "aspect",
+            } and value
         }
         if not grammemes:
             return word
@@ -108,7 +111,10 @@ class RussianMorphology:
                 item
                 for item in parsed
                 if item.normal_form == parsed[0].normal_form
-                and str(item.tag.POS or "") in {"NOUN", "NPRO", "ADJF", "PRTF", "NUMR"}
+                and str(item.tag.POS or "") in {
+                    "NOUN", "NPRO", "ADJF", "PRTF", "NUMR", "VERB",
+                    "INFN", "PRTS",
+                }
             ),
             parsed[0],
         )

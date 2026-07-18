@@ -120,6 +120,19 @@ def test_apposition_uses_type_case_for_role_when_word_order_is_inverted():
     assert participant["semantic_role"] == "patient"
 
 
+def test_role_question_operator_is_not_absorbed_into_a_following_proper_name():
+    analysis = UniversalLanguageAnalyzer(RussianMorphology()).analyze(
+        "Кому Артём передал контейнер?"
+    )
+
+    assert analysis.question_operator is not None
+    assert analysis.question_operator.token_indices == [0]
+    assert [(mention.surface, mention.token_indices) for mention in analysis.mentions] == [
+        ("Артём", [1]),
+        ("контейнер", [3]),
+    ]
+
+
 def test_typed_question_is_constraint_and_uses_unfilled_construction_slot():
     repository = V2Repository()
     TrainingPipelineV2(repository).train(

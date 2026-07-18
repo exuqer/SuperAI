@@ -9,3 +9,7 @@
 - A stable semantic fog has one `concept` owner and one isolated `concept_space`.
 - Semantic backfill is idempotent and never changes global or hive coordinates.
 - A scene is admitted as an answer candidate only when the requested role exists and every required anchor scores at least `0.45`.
+- A role question operator reserves an unfilled semantic slot and is never included in an entity mention.
+- Resolving a known entity adds identity metadata but never overwrites the token's morphological features.
+- Canonical entity lemma, observed surface and realized answer surface are stored separately.
+- A short answer validates its resolved slot; a full answer validates every fixed role it realizes.

@@ -141,18 +141,22 @@ class QuerySceneService:
         received_at: str = "",
         return_analysis: bool = False,
     ) -> Dict[str, Any]:
-        intent = self.intent_classifier.classify(text)
         language_analysis = self.language.analyze(
             text,
-            detect_question=intent["intent"] not in {
-                "SMALL_TALK", "GREETING", "GREETING_WITH_SMALL_TALK",
-            },
+            # Communicative routing is decided from the shared utterance
+            # analysis below.  Parsing the operator first prevents the legacy
+            # intent classifier and dialogue-act parser from disagreeing.
+            detect_question=True,
             conversation_id=conversation_id,
             turn_index=turn_index,
             speaker_role=speaker_role,
             source_type=source_type,
             utterance_id=utterance_id,
             received_at=received_at,
+        )
+        intent = self.intent_classifier.classify(
+            text,
+            dialogue_acts=language_analysis.dialogue_acts,
         )
         items = []
         question_word = ""
@@ -797,6 +801,8 @@ class QuerySceneService:
                     else mention.normalized_surface
                 ),
                 "lemma": mention.lemma,
+                "canonical_lemma": mention.lemma,
+                "observed_surface": mention.surface,
                 "preposition": mention.preposition,
                 "phrase_id": f"phrase-np-{analysis.mentions.index(mention)}",
                 "token_start": mention.start,
@@ -1633,7 +1639,6 @@ class QuerySceneService:
             if alias:
                 token.update({
                     "entity_id": int(alias["entity_id"]),
-                    "proper_name": True,
                     "resolution_state": "KNOWN_ENTITY_ALIAS",
                     "entity_type": (
                         {
@@ -1643,10 +1648,13 @@ class QuerySceneService:
                         }
                         if alias["entity_type_id"] is not None else None
                     ),
-                    "grammatical_features": {
-                        **token.get("grammatical_features", {}),
-                        "proper_name": True,
-                        "animacy": "anim",
+                    # Entity identity is semantic memory, whereas animacy and
+                    # proper-name status describe this concrete word form.
+                    # Do not infer either morphology property merely because
+                    # an alias is known to memory.
+                    "entity_resolution": {
+                        "entity_id": int(alias["entity_id"]),
+                        "matched_alias": str(token.get("surface") or ""),
                     },
                 })
         for role, value in frame.get("roles", {}).items():
@@ -4378,15 +4386,32 @@ class QuerySceneService:
                 scene["decision_reason"] = "requested_role_missing"
                 continue
             validation = scene.get("anchor_validation") or scene["scores"].get("anchor_validation", {})
+            failed_anchor_roles = list(validation.get("failed_roles") or [])
+            # Conceptual expansion can supply a missing semantic frame, but it
+            # must never override an explicitly stated participant in the
+            # query.  Candidate admission therefore remains structural before
+            # vibration or physical ranking begins.
+            has_explicit_anchor_conflict = bool(failed_anchor_roles)
             semantic_candidate_ready = bool(
                 conceptual_candidate
                 and float(scene["scores"].get("action_concept_match", 0.0)) >= .75
                 and float(scene["scores"].get("object_match", 0.0)) >= .85
                 and float(scene["scores"].get("purpose_match", 0.0)) >= .85
+                and not has_explicit_anchor_conflict
             )
             if not explanation and validation.get("status") != "PASSED" and not semantic_candidate_ready:
                 scene["candidate_status"] = "rejected"
+                failed_role = next(
+                    (
+                        role for role in ("agent", "action", "object")
+                        if role in failed_anchor_roles
+                    ),
+                    failed_anchor_roles[0] if failed_anchor_roles else "",
+                )
                 scene["decision_reason"] = (
+                    f"{failed_role.upper()}_MISMATCH"
+                    if failed_role
+                    else
                     "anchor_validation_failed"
                     if action_question
                     else "OBJECT_MISMATCH"
@@ -4472,6 +4497,8 @@ class QuerySceneService:
             candidate = {
                 "id": f"candidate-{lemma}-{uuid.uuid5(uuid.NAMESPACE_URL, candidate_key).hex[:8]}",
                 "concept_id": f"concept-{lemma}", "lemma": lemma, "surface": answer_surface,
+                "resolved_lemma": lemma,
+                "resolved_surface": answer_surface,
                 "entity_id": value.get("entity_id"),
                 "entity_value": value.get("entity_value") or value.get("surface"),
                 "entity_type": deepcopy(value.get("entity_type")),
@@ -4496,6 +4523,8 @@ class QuerySceneService:
                     value.get("answer_surfaces")
                     or {
                         "short_name": value.get("surface"),
+                        "observed_surface": value.get("surface"),
+                        "canonical_lemma": value.get("lemma"),
                         "full_mention": (
                             value.get("full_surface")
                             or value.get("mention_surface")
@@ -4751,10 +4780,11 @@ class QuerySceneService:
         seen = set()
         for candidate in state.get("candidates", []):
             score = float(candidate.get("scores", {}).get("decision_score", candidate.get("scores", {}).get("total", 0.0)))
-            if candidate.get("status") in {"evicted", "EVICTED", "conflict"} or candidate.get("hard_forbidden"):
+            if candidate.get("status") == "conflict" or candidate.get("hard_forbidden"):
                 continue
-            if candidate is not winner and candidate.get("status") not in {"stable", "winner"}:
-                continue
+            # A plural question asks for every structurally admitted value in
+            # the answer band.  Vibration still orders those values, but a
+            # transient local weakening must not discard a separate fact.
             if score < max(.55, top_score - .15):
                 continue
             key = str(candidate.get("lemma") or candidate.get("surface") or "").casefold()
@@ -4777,6 +4807,12 @@ class QuerySceneService:
                 values = [
                     {
                         "lemma": candidate["lemma"], "surface": candidate["surface"],
+                        "resolved_lemma": candidate.get("resolved_lemma", candidate["lemma"]),
+                        "resolved_surface": candidate.get("resolved_surface", candidate["surface"]),
+                        "entity_id": candidate.get("entity_id"),
+                        "grammatical_features": deepcopy(
+                            candidate.get("grammatical_features", {})
+                        ),
                         "concept_id": candidate["concept_id"], "preposition": candidate.get("preposition", ""),
                     }
                     for candidate in selected_candidates
@@ -4832,6 +4868,20 @@ class QuerySceneService:
         answer = {
             "query": state["query_frame"]["source_text"], "answer_mode": mode, "resolved_role": role,
             "resolved_value": winner["surface"], "resolved_values": resolved_values,
+            "resolved_lemma": winner.get("resolved_lemma", winner["lemma"]),
+            "resolved_surface": winner.get("resolved_surface", winner["surface"]),
+            "resolved_entity_id": winner.get("entity_id"),
+            "resolved_value_records": [
+                {
+                    "resolved_lemma": candidate.get("resolved_lemma", candidate["lemma"]),
+                    "resolved_surface": candidate.get("resolved_surface", candidate["surface"]),
+                    "entity_id": candidate.get("entity_id"),
+                    "grammatical_features": deepcopy(
+                        candidate.get("grammatical_features", {})
+                    ),
+                }
+                for candidate in selected_candidates
+            ],
             "selected_candidate_ids": state["selected_candidate_ids"], "confidence": answer_confidence,
             "answer_id": answer_provenance["answer_id"],
             "provenance": answer_provenance,
@@ -4956,6 +5006,11 @@ class QuerySceneService:
                         continue
                     answer_roles[name] = value
                     role_sources[name] = role_source
+            if answer_roles.get("action"):
+                answer_roles["action"] = self._realize_predicate(
+                    answer_roles["action"],
+                    answer_roles.get("agent"),
+                )
             short = (
                 self._upper_first(selected) + "."
                 if multiple
@@ -5073,8 +5128,44 @@ class QuerySceneService:
                 ]
             answer = state["answer"]
             confidence = float(winner["scores"].get("semantic_total", winner["scores"].get("answer_confidence", winner["scores"]["total"])))
-            validation = self.reverse_validate(state, full, answer_roles)
-            answer.update({"status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED", "answer_mode": "contextual_scene" if is_contextual_scene_answer else answer.get("answer_mode") if answer.get("answer_mode") not in {"pending", "unknown"} else "probable", "source_scene_id": (source_scene or {}).get("id"), "surface_answer": short, "full_surface_answer": full, "confidence": confidence, "short": {"surface": short, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}, "full": {"surface": full, "status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED"}})
+            short_validation = self.reverse_validate(
+                state,
+                short,
+                answer_roles,
+                profile="short",
+            )
+            full_validation = self.reverse_validate(
+                state,
+                full,
+                answer_roles,
+                # A list of requested values is deliberately elliptical even
+                # though it is exposed through the historical ``full`` field.
+                profile="short" if multiple else "full",
+            )
+            validation = {
+                "status": (
+                    "PASSED"
+                    if short_validation["status"] == "PASSED"
+                    and full_validation["status"] == "PASSED"
+                    else "FAILED"
+                ),
+                "score": round(
+                    (
+                        float(short_validation["score"])
+                        + float(full_validation["score"])
+                    ) / 2,
+                    4,
+                ),
+                # Preserve the established top-level shape for existing API
+                # consumers while keeping both profile traces explicit.
+                "checks": deepcopy(full_validation["checks"]),
+                "errors": deepcopy(full_validation["errors"]),
+                "profiles": {
+                    "short": short_validation,
+                    "full": full_validation,
+                },
+            }
+            answer.update({"status": "RESOLVED" if validation["status"] == "PASSED" else "BUILD_FAILED", "answer_mode": "contextual_scene" if is_contextual_scene_answer else answer.get("answer_mode") if answer.get("answer_mode") not in {"pending", "unknown"} else "probable", "source_scene_id": (source_scene or {}).get("id"), "surface_answer": short, "full_surface_answer": full, "confidence": confidence, "short": {"surface": short, "status": "RESOLVED" if short_validation["status"] == "PASSED" else "BUILD_FAILED", "reverse_validation": short_validation}, "full": {"surface": full, "status": "RESOLVED" if full_validation["status"] == "PASSED" else "BUILD_FAILED", "reverse_validation": full_validation}})
             score_breakdown = self._score_breakdown()
             row = conn.execute("SELECT cloud_id FROM lexemes WHERE lemma=? LIMIT 1", (winner["lemma"],)).fetchone()
             candidate = {
@@ -5132,6 +5223,58 @@ class QuerySceneService:
     def _upper_first(value: str) -> str:
         return value[:1].upper() + value[1:] if value else value
 
+    def _realize_predicate(
+        self,
+        predicate: Dict[str, Any],
+        agent: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Inflect a predicate from its lemma after resolving its subject."""
+        if not predicate:
+            return predicate
+        result = deepcopy(predicate)
+        lemma = str(result.get("lemma") or "")
+        source_surface = str(result.get("surface") or "")
+        # Predicate-phrase answers already include their complements and are
+        # realized from the supporting scene as a whole.  Reinflection here is
+        # only for a single finite predicate in a newly composed full answer.
+        if not lemma or len(source_surface.split()) != 1:
+            return result
+        observed_features = dict(result.get("grammatical_features") or {})
+        if not observed_features.get("tense") and source_surface:
+            observed_features = dict(
+                self.morphology.parse(source_surface).features
+            )
+        requested_features = {
+            key: str(observed_features[key])
+            for key in ("tense", "number", "gender", "person")
+            if observed_features.get(key)
+        }
+        agent_features = dict((agent or {}).get("grammatical_features") or {})
+        if requested_features.get("tense") == "past" and agent_features:
+            if agent_features.get("number"):
+                requested_features["number"] = str(agent_features["number"])
+            # A plural past-tense verb has no grammatical gender.
+            if requested_features.get("number") == "plur":
+                requested_features.pop("gender", None)
+            elif agent_features.get("gender"):
+                requested_features["gender"] = str(agent_features["gender"])
+        if requested_features.get("tense"):
+            generated = self.morphology.inflect(lemma, requested_features)
+            if generated:
+                result["surface"] = (
+                    self._upper_first(generated)
+                    if source_surface[:1].isupper()
+                    else generated
+                )
+                result["realization"] = {
+                    "source": "lemma_inflection",
+                    "lemma": lemma,
+                    "requested_features": requested_features,
+                    "observed_features": observed_features,
+                    "agent_features": agent_features,
+                }
+        return result
+
     @staticmethod
     def _score_breakdown() -> Dict[str, Any]:
         values = {"semantic": 1.0, "grammar": 1.0, "pattern": 1.0, "orthography": 1.0, "context": 1.0, "reverse_validation": 1.0}
@@ -5186,65 +5329,111 @@ class QuerySceneService:
         return max(candidates, key=score)
 
     @staticmethod
+    def _surface_contains_value(text: str, value: Dict[str, Any]) -> bool:
+        """Match a realized word or phrase against its canonical value."""
+        if not value:
+            return True
+        candidates = [
+            value.get("surface"),
+            value.get("resolved_surface"),
+            value.get("mention_surface"),
+            (value.get("answer_surfaces") or {}).get("short_name"),
+            (value.get("answer_surfaces") or {}).get("full_mention"),
+        ]
+        for candidate in candidates:
+            normalized = str(candidate or "").casefold().strip()
+            if normalized and normalized in text:
+                return True
+        lemma = str(
+            value.get("resolved_lemma") or value.get("lemma") or ""
+        ).casefold().strip()
+        return bool(lemma and len(lemma) >= 4 and lemma[:4] in text)
+
+    @classmethod
     def reverse_validate(
-        state: Dict[str, Any], surface: str, answer_roles: Optional[Dict[str, Dict[str, Any]]] = None,
+        cls,
+        state: Dict[str, Any],
+        surface: str,
+        answer_roles: Optional[Dict[str, Dict[str, Any]]] = None,
+        *,
+        profile: str = "full",
     ) -> Dict[str, Any]:
+        if profile not in {"short", "full"}:
+            raise ValueError(f"unsupported validation profile: {profile}")
         text = str(surface or "").casefold()
-        query_roles = state.get("query_frame", {}).get("roles", {})
+        query_frame = state.get("query_frame", {})
+        query_roles = query_frame.get("roles", {})
         roles = answer_roles or query_roles
         scene = state.get("query_scene") or {}
-        checks: Dict[str, bool] = {}
-        errors: List[Dict[str, Any]] = []
-        expected = {
-            "object": roles.get("object", {}).get("surface") or roles.get("object", {}).get("lemma"),
-            "modal": roles.get("modal", {}).get("surface") or roles.get("modal", {}).get("lemma"),
-            "action": roles.get("action", {}).get("surface") or roles.get("action", {}).get("lemma"),
-        }
-        if state.get("query_frame", {}).get("answer_cardinality") == "multiple":
-            expected = {"object": None, "modal": None, "action": None}
-        requested_role = state.get("query_frame", {}).get("requested_role")
-        resolved = next((slot for slot in scene.get("slots", []) if slot.get("status", "").upper() == "RESOLVED" and slot.get("role") == requested_role), None)
+        requested_role = query_frame.get("requested_role")
+        resolved = next(
+            (
+                slot for slot in scene.get("slots", [])
+                if slot.get("status", "").upper() == "RESOLVED"
+                and slot.get("role") == requested_role
+            ),
+            None,
+        )
         resolved_value = resolved.get("value", {}) if resolved else {}
         resolved_values = resolved.get("values", [resolved_value]) if resolved else []
-        location = resolved_value if requested_role == "location" else roles.get("location", {})
-        object_lemma = roles.get("object", {}).get("lemma")
-        checks["object_preserved"] = (
-            not expected["object"]
-            or str(expected["object"]).casefold() in text
-            or bool(
-                object_lemma
-                and str(object_lemma).casefold()[:4] in text
-            )
-        )
-        checks["modal_preserved"] = not expected["modal"] or str(expected["modal"]).casefold() in text
-        checks["action_preserved"] = not expected["action"] or str(expected["action"]).casefold() in text
-        location_surface = location.get("surface") if isinstance(location, dict) else None
-        location_lemma = location.get("lemma") if isinstance(location, dict) else None
-        checks["location_preserved"] = not location_surface or str(location_surface).casefold() in text or bool(location_lemma and str(location_lemma).casefold()[:4] in text)
-        resolved_surface = resolved_value.get("surface") if isinstance(resolved_value, dict) else None
-        resolved_lemma = resolved_value.get("lemma") if isinstance(resolved_value, dict) else None
-        checks["resolved_role_preserved"] = all(
-            not value.get("surface")
-            or str(value["surface"]).casefold() in text
-            or bool(value.get("lemma") and str(value["lemma"]).casefold()[:4] in text)
-            for value in resolved_values if isinstance(value, dict)
-        )
-        checks["grammar_valid"] = bool(text.strip()) and text.rstrip().endswith(".")
-        if expected["modal"] and not checks["modal_preserved"]:
-            errors.append({"type": "MISSING_MODAL", "expected": expected["modal"], "semantic_function": roles.get("modal", {}).get("semantic_function")})
-        if expected["action"] and not checks["action_preserved"]:
-            errors.append({"type": "MISSING_ACTION", "expected": expected["action"]})
-        if expected["object"] and not checks["object_preserved"]:
-            errors.append({"type": "MISSING_OBJECT", "expected": expected["object"]})
-        if not checks["location_preserved"]:
-            errors.append({"type": "MISSING_LOCATION", "expected": location_surface or location_lemma})
+        checks: Dict[str, bool] = {
+            "grammar_valid": bool(text.strip()) and text.rstrip().endswith("."),
+            "resolved_role_preserved": all(
+                cls._surface_contains_value(text, value)
+                for value in resolved_values
+                if isinstance(value, dict)
+            ),
+            # A direct answer inherits the query's polarity and attribution
+            # scope; spelling out a full sentence is responsible for making
+            # those axes explicit on the surface.
+            "polarity_preserved": True,
+            "attribution_preserved": True,
+        }
+        errors: List[Dict[str, Any]] = []
         if not checks["resolved_role_preserved"]:
-            errors.append({"type": "MISSING_RESOLVED_ROLE", "role": requested_role, "expected": resolved_surface or resolved_lemma})
-        semantic_checks = [checks["object_preserved"], checks["modal_preserved"], checks["action_preserved"], checks["location_preserved"], checks["resolved_role_preserved"]]
-        score = sum(semantic_checks) / max(1, len(semantic_checks))
+            errors.append({
+                "type": "MISSING_RESOLVED_ROLE",
+                "role": requested_role,
+                "expected": (
+                    resolved_value.get("resolved_surface")
+                    or resolved_value.get("surface")
+                    or resolved_value.get("resolved_lemma")
+                    or resolved_value.get("lemma")
+                ) if isinstance(resolved_value, dict) else None,
+            })
+        if profile == "full":
+            for role, value in roles.items():
+                if not isinstance(value, dict) or not value.get("surface"):
+                    continue
+                # An empty requested slot is resolved above; all other fixed
+                # roles define the complete sentence contract.
+                if value.get("status") not in {None, "fixed"} and role != requested_role:
+                    continue
+                check_name = f"{role}_preserved"
+                checks[check_name] = cls._surface_contains_value(text, value)
+                if not checks[check_name]:
+                    errors.append({
+                        "type": f"MISSING_{role.upper()}",
+                        "role": role,
+                        "expected": value.get("surface") or value.get("lemma"),
+                    })
+            # Retain stable check names for API consumers and analytics.
+            for role in ("agent", "object", "modal", "action", "location"):
+                checks.setdefault(f"{role}_preserved", True)
+        else:
+            # Short answers validate only the requested semantic slot.
+            for role in ("agent", "object", "modal", "action", "location"):
+                checks[f"{role}_preserved"] = True
         if not checks["grammar_valid"]:
-            score = min(score, 0.75)
-        return {"status": "PASSED" if not errors and all(checks.values()) else "FAILED", "score": round(score, 4), "checks": checks, "errors": errors}
+            errors.append({"type": "INVALID_SURFACE"})
+        score = sum(checks.values()) / max(1, len(checks))
+        return {
+            "status": "PASSED" if not errors and all(checks.values()) else "FAILED",
+            "score": round(score, 4),
+            "checks": checks,
+            "errors": errors,
+            "profile": profile,
+        }
 
     @staticmethod
     def _empty_answer(frame: Dict[str, Any], result_type: str) -> Dict[str, Any]:

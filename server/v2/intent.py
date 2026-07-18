@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
-from .language.models import DialogueActType
+from .language.models import DialogueAct, DialogueActType
 from .language.utterance_parser import DialogueActParser
 
 
@@ -25,11 +25,18 @@ class IntentClassifier:
     def __init__(self) -> None:
         self.dialogue_acts = DialogueActParser()
 
-    def classify(self, text: str) -> Dict[str, Any]:
+    def classify(
+        self,
+        text: str,
+        *,
+        dialogue_acts: Optional[Sequence[DialogueAct]] = None,
+    ) -> Dict[str, Any]:
         source = str(text or "").strip()
         normalized = re.sub(r"\s+", " ", source.casefold()).strip(" .!?,;:")
-        dialogue_acts = self.dialogue_acts.parse(source)
-        act_types = {act.act_type for act in dialogue_acts}
+        resolved_acts = list(dialogue_acts) if dialogue_acts is not None else (
+            self.dialogue_acts.parse(source)
+        )
+        act_types = {act.act_type for act in resolved_acts}
         greeting = next((item for item in GREETING_WORDS if re.search(rf"(?:^|\s){re.escape(item)}(?:$|\s|[!?,.])", source.casefold())), None)
         small_talk_surface: Optional[str] = None
         small_talk_type: Optional[str] = None
@@ -70,7 +77,7 @@ class IntentClassifier:
         result: Dict[str, Any] = {
             "intent": intent,
             "source_text": source,
-            "dialogue_acts": [act.as_dict() for act in dialogue_acts],
+            "dialogue_acts": [act.as_dict() for act in resolved_acts],
         }
         if intent == "SCENE_QUESTION":
             result["question_kind"] = (

@@ -227,7 +227,16 @@ class UniversalLanguageAnalyzer:
             for index, (surface, winner) in enumerate(zip(surfaces, winners))
         ]
         relations = self.relation_phrases.parse(tokens)
-        mentions = self.noun_phrases.parse(tokens, relations)
+        question_operator_indices = (
+            self.questions.role_operator_indices(tokens)
+            if detect_question
+            else set()
+        )
+        mentions = self.noun_phrases.parse(
+            tokens,
+            relations,
+            excluded_indices=question_operator_indices,
+        )
         predicate = next(
             (
                 token for token in tokens

@@ -101,6 +101,82 @@ def test_question_roles_object_location_and_instrument():
     assert instrument_answer["full_surface_answer"] == "Рыбак ловит рыбу сетью."
 
 
+def test_explicit_agent_is_an_admission_anchor_for_recipient_questions():
+    repository = V2Repository()
+    TrainingPipelineV2(repository).train(
+        "Артём передал отчёт Марине. Робот передал отчёт оператору."
+    )
+    service = V2HiveService(repository)
+    hive_id = service.create()["hive"]["id"]
+
+    result = service.query(hive_id, "Кому Артём передал отчёт?")
+
+    assert result["query_frame"]["roles"]["agent"]["lemma"] == "артём"
+    assert [candidate["lemma"] for candidate in result["candidates"]] == ["марина"]
+    assert all(candidate["lemma"] != "оператор" for candidate in result["candidates"])
+    answer = service.vibration_run(hive_id, 3)["answer"]
+    assert answer["surface_answer"] == "Марине."
+    assert answer["full_surface_answer"] == "Артём передал отчёт Марине."
+
+
+def test_question_operator_routes_to_one_shared_question_intent_without_punctuation():
+    parsed = QuerySceneService().parse("Кому Артём передал отчёт")
+
+    intent = parsed["intent_classification"]
+    assert intent["intent"] == "SCENE_QUESTION"
+    assert [act["act_type"] for act in intent["dialogue_acts"]] == ["QUESTION"]
+    assert intent["dialogue_acts"] == parsed["query_frame"]["dialogue_acts"]
+
+
+def test_multiple_short_answer_has_its_own_validation_profile():
+    service, hive_id, _ = _ask(
+        "Сергей хранит контейнер на складе. Сергей хранит сканер на складе.",
+        "Что Сергей хранит на складе?",
+    )
+
+    final = service.vibration_run(hive_id, 3)
+    answer = final["answer"]
+
+    assert answer["surface_answer"] == "Контейнер и сканер."
+    assert answer["status"] == "RESOLVED"
+    assert answer["short"]["status"] == "RESOLVED"
+    assert answer["full"]["status"] == "RESOLVED"
+    assert final["hive"]["reverse_validation"]["profiles"]["short"]["status"] == "PASSED"
+    assert final["hive"]["reverse_validation"]["profiles"]["full"]["status"] == "PASSED"
+
+
+def test_full_answer_reinflects_a_past_predicate_to_the_resolved_agent():
+    service, hive_id, _ = _ask(
+        "Марина отнесла отчёт в офис.",
+        "Кто отнес отчёт в офис?",
+    )
+
+    answer = service.vibration_run(hive_id, 3)["answer"]
+
+    assert answer["surface_answer"] == "Марина."
+    assert answer["full_surface_answer"] == "Марина отнесла отчёт в офис."
+    assert answer["full"]["reverse_validation"]["checks"]["action_preserved"]
+    assert answer["resolved_lemma"] == "марина"
+    assert answer["resolved_surface"] == "Марина"
+
+
+def test_known_entity_resolution_does_not_overwrite_token_morphology():
+    repository = V2Repository()
+    TrainingPipelineV2(repository).train("Отчёт лежит в офисе.")
+    service = V2HiveService(repository)
+
+    result = service.query(service.create()["hive"]["id"], "Где лежит отчёт?")
+    report = next(
+        token for token in result["query_frame"]["tokens"]
+        if token["lemma"] == "отчёт"
+    )
+
+    assert report["resolution_state"] == "KNOWN_ENTITY_ALIAS"
+    assert report["entity_id"]
+    assert report["grammatical_features"]["animacy"] == "inan"
+    assert report["grammatical_features"]["proper_name"] is False
+
+
 def test_how_question_resolves_to_observed_instrument():
     service, hive_id, result = _ask(
         "Рыбак ловит рыбу удочкой.",

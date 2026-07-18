@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Collection, Dict, List, Optional, Sequence
 
 from .models import ParsedToken
 from .relation_phrase_parser import RelationPhrase, RelationPhraseParser
@@ -189,9 +189,15 @@ class EntityMentionParser:
         self,
         tokens: Sequence[ParsedToken],
         relation_phrases: Sequence[RelationPhrase] = (),
+        *,
+        excluded_indices: Collection[int] = (),
     ) -> List[MentionDraft]:
         mentions: List[MentionDraft] = []
-        consumed: set[int] = set()
+        # Operators that open an unfilled semantic slot are not entity
+        # mentions.  They are passed in by the language pipeline rather than
+        # inferred from domain vocabulary, so this parser remains reusable for
+        # statements and typed questions alike.
+        consumed: set[int] = set(excluded_indices)
         relation_parser = RelationPhraseParser()
         for token in tokens:
             if token.index in consumed or token.pos not in NOUN_POS:

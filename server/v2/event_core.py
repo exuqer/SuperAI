@@ -53,6 +53,32 @@ class UniversalEventPipeline:
         self.mentions = EntityMentionParser()
         self.roles = UniversalRoleResolver()
 
+    def _canonical_display_name(
+        self,
+        lemma: str,
+        observed_surface: str,
+        features: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        """Produce a nominative display form independently of its mention.
+
+        An entity can first be seen in any case.  Its identity must retain a
+        canonical lexical form, while event participants continue to preserve
+        the observed surface needed for answer realization.
+        """
+        target_features: Dict[str, str] = {"case": "nomn"}
+        observed_features = dict(features or {})
+        if not observed_features and observed_surface:
+            observed_features = dict(
+                self.morphology.parse(observed_surface).features
+            )
+        number = observed_features.get("number")
+        if number:
+            target_features["number"] = str(number)
+        display = self.morphology.inflect(lemma, target_features) or lemma
+        if observed_surface[:1].isupper():
+            display = display[:1].upper() + display[1:]
+        return display
+
     def _scene_tokens(self, conn: Any, scene_id: int) -> tuple[str, List[ParsedToken]]:
         scene = conn.execute(
             "SELECT sentence_text FROM scenes WHERE cloud_id=?", (scene_id,)
@@ -104,6 +130,9 @@ class UniversalEventPipeline:
         alias: str,
         entity_kind: str = "entity",
     ) -> int:
+        # The entity record stores a canonical lexical label.  The alias and
+        # entity mention keep the exact observed inflected surface.
+        display_name = self._canonical_display_name(lemma, display_name)
         canonical = f"{entity_kind}:{lemma.casefold()}"
         cloud, _ = self.repository.get_or_create_cloud(
             conn,
@@ -748,10 +777,15 @@ class UniversalEventPipeline:
         conn.execute("DELETE FROM entity_mentions WHERE source_scene_id=?", (scene_id,))
         for draft in drafts:
             head = tokens[draft.head]
+            canonical_display_name = self._canonical_display_name(
+                draft.lemma,
+                head.surface,
+                draft.features,
+            )
             entity_id = self._ensure_entity(
                 conn,
                 draft.lemma,
-                head.surface,
+                canonical_display_name,
                 source_scene_id=scene_id,
                 lexeme_cloud_id=head.lexeme_cloud_id,
                 alias=head.surface,
@@ -1655,7 +1689,13 @@ class UniversalEventPipeline:
                 "surface": (
                     row["display_name"]
                     if row["mention_type"] == "apposition"
-                    else str(row["surface"]).casefold()
+                    else (
+                        str(row["surface"])
+                        if decode(
+                            row["grammatical_features_json"], {}
+                        ).get("proper_name")
+                        else str(row["surface"]).casefold()
+                    )
                 ),
                 "mention_surface": row["mention_surface"] or row["surface"],
                 "full_surface": row["mention_surface"] or row["surface"],
@@ -1673,8 +1713,12 @@ class UniversalEventPipeline:
                 "answer_surfaces": {
                     "short_name": row["display_name"],
                     "full_mention": row["mention_surface"] or row["surface"],
+                    "observed_surface": row["surface"],
+                    "canonical_lemma": row["canonical_lemma"] or row["lemma"],
                 },
                 "lemma": row["canonical_lemma"] or row["lemma"],
+                "canonical_lemma": row["canonical_lemma"] or row["lemma"],
+                "observed_surface": row["surface"],
                 "lexeme_cloud_id": (
                     int(row["lexeme_cloud_id"])
                     if row["lexeme_cloud_id"] is not None
