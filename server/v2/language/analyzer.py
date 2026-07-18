@@ -430,7 +430,10 @@ class UniversalLanguageAnalyzer:
             predicate_candidates[0] if predicate_candidates else None,
         )
         self._refine_question_case(tokens, mentions, predicate)
-        question = self.questions.parse(tokens, mentions) if detect_question else None
+        question_operators = (
+            self.questions.parse_all(tokens, mentions) if detect_question else []
+        )
+        question = question_operators[0] if question_operators else None
         phrases: List[Phrase] = [
             Phrase(
                 id=f"phrase-np-{index}",
@@ -493,6 +496,7 @@ class UniversalLanguageAnalyzer:
             question_operator=question,
             relation_phrases=[relation.as_dict() for relation in relations],
             diagnostics=diagnostics,
+            question_operators=question_operators,
         )
         envelope, acts = self.utterances.parse(
             text,

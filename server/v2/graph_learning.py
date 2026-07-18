@@ -269,8 +269,11 @@ class ObservationBuilder:
         return ObservationSignature(values)
 
     @staticmethod
-    def question_signature(analysis: Any) -> ObservationSignature:
-        question = analysis.question_operator
+    def question_signature(
+        analysis: Any,
+        question: Optional[Any] = None,
+    ) -> ObservationSignature:
+        question = question or analysis.question_operator
         if not question:
             return ObservationSignature({})
         token = analysis.tokens[question.token_indices[0]]

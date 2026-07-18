@@ -219,6 +219,56 @@ def test_question_function_reweights_homonyms_and_distinguishes_three_slots():
     assert "question_operator_function" in selected["evidence"]
 
 
+def test_coordinated_question_binds_every_requested_gap_in_one_event():
+    _, training, dialogue = services()
+    training.train(
+        "Механик дал роботу болт.",
+        independent_key="coordinated-gaps",
+    )
+    result = ask(dialogue, "Кто, кому и что дал?")
+
+    pattern = result["query_graph"]["event_pattern"]
+    assert [gap["surface"] for gap in pattern["target_gaps"]] == [
+        "Кто", "кому", "что",
+    ]
+    assert "target_gap" not in pattern
+    assert len(pattern["implicit_gaps"]) == 0
+    assert result["answer"]["surface"] == "Механик дал роботу болт."
+    assert [item["resolved_surface"] for item in result["selected_bindings"]] == [
+        "Механик", "роботу", "болт",
+    ]
+    assert result["answer"]["validation"]["all_requested_gaps_bound"]
+
+
+def test_follow_up_rotates_gap_within_the_selected_event():
+    _, training, dialogue = services()
+    training.train("Механик дал роботу болт.", independent_key="rotate-bolt")
+    training.train("Оператор дал дрону посылку.", independent_key="rotate-parcel")
+    hive_id = dialogue.create()["hive"]["id"]
+
+    first = dialogue.query(hive_id, "Что механик дал роботу?")
+    second = dialogue.query(hive_id, "А кто дал?")
+    third = dialogue.query(hive_id, "А что?")
+
+    assert first["answer"]["surface"] == "болт."
+    assert second["answer"]["surface"] == "Механик."
+    assert third["answer"]["surface"] == "болт."
+    assert second["query_graph"]["continuation_of"] == (
+        first["query_graph"]["query_graph_id"]
+    )
+    assert second["query_graph"]["trace"]["event_anchor_id"] == (
+        first["selected_binding"]["event_id"]
+    )
+    predicate = third["query_graph"]["event_pattern"]["predicate"]
+    assert predicate["origin"] == "INHERITED"
+    assert predicate["token_index"] is None
+    assert predicate["source_token_index"] is not None
+    assert {
+        node["head"]["lemma"]
+        for node in third["query_graph"]["event_pattern"]["known_nodes"]
+    } == {"механик", "робот"}
+
+
 def test_bare_what_keeps_case_hypotheses_and_separates_implicit_agreement_gap():
     _, training, dialogue = services()
     training.train(

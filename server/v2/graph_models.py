@@ -230,6 +230,12 @@ class MentionNode:
     preposition: str = ""
     entity_id: Optional[str] = None
     semantic_cluster_ids: Sequence[str] = ()
+    origin: str = "EXPLICIT_CURRENT"
+    source_query_graph_id: Optional[str] = None
+    source_gap_id: Optional[str] = None
+    source_binding_id: Optional[str] = None
+    replaceable: bool = False
+    context_confidence: float = 1.0
 
     @property
     def qualified_key(self) -> str:
@@ -253,6 +259,12 @@ class MentionNode:
             "preposition": self.preposition,
             "entity_id": self.entity_id,
             "semantic_cluster_ids": list(self.semantic_cluster_ids),
+            "origin": self.origin,
+            "source_query_graph_id": self.source_query_graph_id,
+            "source_gap_id": self.source_gap_id,
+            "source_binding_id": self.source_binding_id,
+            "replaceable": self.replaceable,
+            "context_confidence": _clamp(self.context_confidence),
             "qualified_key": self.qualified_key,
         }
 
@@ -262,8 +274,11 @@ class PredicateNode:
     lemma: str
     surface: str
     concept_id: str
-    token_index: int
+    token_index: Optional[int]
     features: Mapping[str, Any]
+    origin: str = "CURRENT"
+    source_token_index: Optional[int] = None
+    inherited_from_query_graph_id: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -272,6 +287,9 @@ class PredicateNode:
             "concept_id": self.concept_id,
             "token_index": self.token_index,
             "features": _plain(self.features),
+            "origin": self.origin,
+            "source_token_index": self.source_token_index,
+            "inherited_from_query_graph_id": self.inherited_from_query_graph_id,
         }
 
 
@@ -408,6 +426,7 @@ class QueryGraph:
     predicate: Optional[PredicateNode]
     known_nodes: Sequence[MentionNode]
     gap_node: GapNode
+    target_gaps: Sequence[GapNode] = ()
     required_edges: Sequence[Mapping[str, Any]] = ()
     exclusions: Sequence[Mapping[str, Any]] = ()
     status: GraphStatus = GraphStatus.READY
@@ -418,18 +437,22 @@ class QueryGraph:
     versions: ModelVersions = field(default_factory=ModelVersions)
 
     def as_dict(self) -> Dict[str, Any]:
+        target_gaps = tuple(self.target_gaps) or (self.gap_node,)
+        pattern: Dict[str, Any] = {
+            "predicate": self.predicate.as_dict() if self.predicate else None,
+            "known_nodes": [node.as_dict() for node in self.known_nodes],
+            "target_gaps": [gap.as_dict() for gap in target_gaps],
+            "implicit_gaps": [gap.as_dict() for gap in self.implicit_gaps],
+            "required_edges": _plain(self.required_edges),
+            # Legacy readers still consume this field.  It is meaningful only
+            # for a one-gap request.
+            "gap_node": self.gap_node.as_dict(),
+        }
+        if len(target_gaps) == 1:
+            pattern["target_gap"] = target_gaps[0].as_dict()
         return {
             "query_graph_id": self.id,
-            "event_pattern": {
-                "predicate": self.predicate.as_dict() if self.predicate else None,
-                "known_nodes": [node.as_dict() for node in self.known_nodes],
-                # gap_node is retained as a compatibility alias while target
-                # gap is the explicit contract for newly serialized graphs.
-                "gap_node": self.gap_node.as_dict(),
-                "target_gap": self.gap_node.as_dict(),
-                "implicit_gaps": [gap.as_dict() for gap in self.implicit_gaps],
-                "required_edges": _plain(self.required_edges),
-            },
+            "event_pattern": pattern,
             "exclusions": _plain(self.exclusions),
             "status": self.status.value,
             "continuation_of": self.continuation_of,
@@ -440,7 +463,7 @@ class QueryGraph:
 
     @property
     def target_gap(self) -> GapNode:
-        """The sole gap whose binding is returned as the answer."""
+        """Compatibility accessor for callers that only support one GAP."""
         return self.gap_node
 
 
@@ -627,6 +650,12 @@ def mention_node_from_dict(value: Mapping[str, Any]) -> MentionNode:
         preposition=str(value.get("preposition") or ""),
         entity_id=value.get("entity_id"),
         semantic_cluster_ids=tuple(value.get("semantic_cluster_ids") or ()),
+        origin=str(value.get("origin") or "EXPLICIT_CURRENT"),
+        source_query_graph_id=value.get("source_query_graph_id"),
+        source_gap_id=value.get("source_gap_id"),
+        source_binding_id=value.get("source_binding_id"),
+        replaceable=bool(value.get("replaceable", False)),
+        context_confidence=float(value.get("context_confidence") or 1.0),
     )
 
 
@@ -638,13 +667,21 @@ def query_graph_from_dict(value: Mapping[str, Any]) -> QueryGraph:
             lemma=str(predicate_value.get("lemma") or ""),
             surface=str(predicate_value.get("surface") or ""),
             concept_id=str(predicate_value.get("concept_id") or ""),
-            token_index=int(predicate_value.get("token_index") or 0),
+            token_index=predicate_value.get("token_index"),
             features=dict(predicate_value.get("features") or {}),
+            origin=str(predicate_value.get("origin") or "CURRENT"),
+            source_token_index=predicate_value.get("source_token_index"),
+            inherited_from_query_graph_id=predicate_value.get(
+                "inherited_from_query_graph_id"
+            ),
         )
         if predicate_value else None
     )
-    gap_value = pattern.get("target_gap") or pattern.get("gap_node") or {}
-    gap = GapNode(
+    gap_values = pattern.get("target_gaps") or [
+        pattern.get("target_gap") or pattern.get("gap_node") or {}
+    ]
+    def parse_gap(gap_value: Mapping[str, Any]) -> GapNode:
+        return GapNode(
         id=str(gap_value.get("node_id") or ""),
         gap_kind=GapKind(
             str(gap_value.get("gap_kind") or GapKind.WHOLE_EVENT.value)
@@ -663,7 +700,9 @@ def query_graph_from_dict(value: Mapping[str, Any]) -> QueryGraph:
             gap_value.get("morphology_hypotheses") or {}
         ),
         evidence=dict(gap_value.get("evidence") or {}),
-    )
+        )
+    target_gaps = tuple(parse_gap(item) for item in gap_values)
+    gap = target_gaps[0]
     implicit_gaps = tuple(
         GapNode(
             id=str(item.get("node_id") or ""),
@@ -693,6 +732,7 @@ def query_graph_from_dict(value: Mapping[str, Any]) -> QueryGraph:
             for item in pattern.get("known_nodes") or ()
         ),
         gap_node=gap,
+        target_gaps=target_gaps,
         required_edges=tuple(pattern.get("required_edges") or ()),
         exclusions=tuple(value.get("exclusions") or ()),
         status=GraphStatus(str(value.get("status") or GraphStatus.READY.value)),

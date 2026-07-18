@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import product
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .event_graph import EventGraphPipeline
@@ -50,8 +51,11 @@ class QueryGraphBuilder:
         self.constructions = ConstructionLearner()
 
     @staticmethod
-    def _default_gap_kind(analysis: Any) -> GapKind:
-        question = analysis.question_operator
+    def _default_gap_kind(
+        analysis: Any,
+        question: Optional[Any] = None,
+    ) -> GapKind:
+        question = question or analysis.question_operator
         if question and question.type_constraint_token_index is not None:
             question_index = question.token_indices[0]
             if (
@@ -98,6 +102,12 @@ class QueryGraphBuilder:
                 binding.resolved_features.get("preposition") or ""
             ),
             entity_id=binding.resolved_concept_id,
+            origin="RESOLVED_PREVIOUS_TARGET",
+            source_query_graph_id=binding.query_graph_id,
+            source_gap_id=binding.gap_node_id,
+            source_binding_id=binding.id,
+            replaceable=True,
+            context_confidence=binding.total_score,
         )
 
     def _known_nodes(
@@ -106,21 +116,20 @@ class QueryGraphBuilder:
         query_graph_id: str,
         gap_kind: GapKind,
     ) -> List[MentionNode]:
-        question_indices = set(
-            analysis.question_operator.token_indices
-            if analysis.question_operator else ()
+        questions = getattr(analysis, "question_operators", ()) or (
+            (analysis.question_operator,) if analysis.question_operator else ()
         )
+        question_indices = {
+            index for question in questions for index in question.token_indices
+        }
         result: List[MentionNode] = []
         for mention in analysis.mentions:
             # In a typed modifier question the noun remains known while only
             # its interrogative component becomes the gap.
             typed_head = (
-                analysis.question_operator is not None
-                and analysis.question_operator.type_constraint_token_index
-                is not None
-                and int(
-                    analysis.question_operator.type_constraint_token_index
-                ) in mention.token_indices
+                any(question.type_constraint_token_index is not None
+                    and int(question.type_constraint_token_index)
+                    in mention.token_indices for question in questions)
             )
             if typed_head and gap_kind == GapKind.RELATION_VALUE:
                 continue
@@ -213,6 +222,7 @@ class QueryGraphBuilder:
         analysis: Any,
         predicate: Optional[PredicateNode],
         graph_id: str,
+        questions: Sequence[Any] = (),
     ) -> tuple[GapNode, ...]:
         """Represent possible omitted agreement controllers separately.
 
@@ -221,6 +231,13 @@ class QueryGraphBuilder:
         implicit participant, not a nominative proof for ``что``.
         """
         if not predicate:
+            return ()
+        # ``кто`` explicitly reserves the agreeing nominative participant;
+        # adding a second hidden participant corrupts the configuration.
+        if any(
+            str(question.question_lemma).casefold() == "кто"
+            for question in questions
+        ):
             return ()
         features = dict(predicate.features)
         if str(features.get("tense") or "") != "past":
@@ -315,8 +332,23 @@ class QueryGraphBuilder:
             )
             return graph, analysis.as_dict()
 
-        inferred_gap_kind = self._default_gap_kind(analysis)
+        questions = tuple(getattr(analysis, "question_operators", ()) or ())
+        if not questions and analysis.question_operator:
+            questions = (analysis.question_operator,)
+        inferred_gap_kind = self._default_gap_kind(
+            analysis, questions[0] if questions else None
+        )
         predicate_token = analysis.predicate
+        is_continuation = bool(
+            previous_graph and (
+                not predicate_token
+                or (
+                    analysis.tokens
+                    and analysis.tokens[0].normalized.casefold() == "а"
+                    and bool(questions)
+                )
+            )
+        )
         inherited_predicate = previous_graph.predicate if previous_graph else None
         predicate = (
             PredicateNode(
@@ -329,14 +361,26 @@ class QueryGraphBuilder:
                 token_index=predicate_token.index,
                 features=dict(predicate_token.features),
             )
-            if predicate_token else inherited_predicate
+            if predicate_token and not is_continuation else (
+                replace(
+                    inherited_predicate,
+                    token_index=None,
+                    origin="INHERITED",
+                    source_token_index=(
+                        inherited_predicate.source_token_index
+                        if inherited_predicate.source_token_index is not None
+                        else inherited_predicate.token_index
+                    ),
+                    inherited_from_query_graph_id=previous_graph.id,
+                ) if inherited_predicate and previous_graph else None
+            )
         )
         known_nodes = self._known_nodes(
             analysis,
             graph_id,
             inferred_gap_kind,
         )
-        if previous_graph and not predicate_token and known_nodes:
+        if previous_graph and not predicate_token and known_nodes and not questions:
             # A bare noun after an answered question replaces the known node
             # while retaining the previous predicate and structural gap:
             # ``Где лежит помидор?`` -> ``Яблоко?``.  It is not a Boolean
@@ -365,8 +409,15 @@ class QueryGraphBuilder:
             )
             return graph, analysis.as_dict()
         inherited_binding = False
-        if not predicate_token and previous_graph:
-            inherited = list(previous_graph.known_nodes)
+        released_node: Optional[MentionNode] = None
+        if is_continuation and previous_graph:
+            inherited = [replace(
+                node,
+                origin="EXPLICIT_INHERITED",
+                source_query_graph_id=previous_graph.id,
+                replaceable=True,
+                context_confidence=0.92,
+            ) for node in previous_graph.known_nodes]
             if previous_binding:
                 inherited.append(
                     self._binding_as_mention(previous_binding, graph_id)
@@ -378,11 +429,32 @@ class QueryGraphBuilder:
             for node in inherited:
                 if (node.head_lemma, node.qualified_key) not in current_keys:
                     known_nodes.append(node)
+            # A new interrogative operator rotates the GAP inside the anchored
+            # event: release the inherited value whose morphology best fits it.
+            if questions and known_nodes:
+                signature = self.observations.question_signature(
+                    analysis, questions[0]
+                )
+                requested_cases = {
+                    key.removeprefix("morph:case:")
+                    for key in signature.values
+                    if key.startswith("morph:case:")
+                }
+                if requested_cases:
+                    def release_score(node: MentionNode) -> tuple[float, float]:
+                        node_case = str(node.features.get("case") or "")
+                        case_fit = 1.0 if node_case in requested_cases else 0.0
+                        return (case_fit, float(node.context_confidence))
+                    released_node = max(known_nodes, key=release_score)
+                    if str(released_node.features.get("case") or "") in requested_cases:
+                        known_nodes.remove(released_node)
         structural = self.observations.structural_signature(
             analysis,
             gap_kind=inferred_gap_kind,
         )
-        question_signature = self.observations.question_signature(analysis)
+        question_signature = self.observations.question_signature(
+            analysis, questions[0] if questions else None
+        )
         with self.repository.transaction() as conn:
             construction = self.constructions.best_match(
                 conn,
@@ -400,28 +472,34 @@ class QueryGraphBuilder:
                 question_signature,
                 construction,
             )
-        question = analysis.question_operator
-        gap = GapNode(
-            id=stable_id("gap", graph_id),
-            gap_kind=gap_kind,
-            question_signature=question_signature,
-            surface=question.surface if question else "",
-            token_indices=tuple(question.token_indices) if question else (),
-            attached_to_node_id=self._attached_node_id(
-                analysis,
-                known_nodes,
-            ),
-            compatible_slot_hypotheses=compatible_slots,
-            requested=True,
-            morphology_hypotheses=self._question_morphology_hypotheses(
-                question_signature
-            ),
-            evidence={
-                "question_surface": question.surface if question else "",
-                "requested": True,
-            },
+        question = questions[0] if questions else None
+        target_gaps: List[GapNode] = []
+        for index, operator in enumerate(questions or (None,)):
+            signature = self.observations.question_signature(analysis, operator)
+            current_kind = gap_kind if index == 0 else self._default_gap_kind(
+                analysis, operator
+            )
+            slots = compatible_slots if index == 0 else {}
+            target_gaps.append(GapNode(
+                id=stable_id("gap", graph_id, index),
+                gap_kind=current_kind,
+                question_signature=signature,
+                surface=operator.surface if operator else "",
+                token_indices=tuple(operator.token_indices) if operator else (),
+                attached_to_node_id=self._attached_node_id(analysis, known_nodes),
+                compatible_slot_hypotheses=slots,
+                requested=True,
+                morphology_hypotheses=self._question_morphology_hypotheses(signature),
+                evidence={
+                    "question_surface": operator.surface if operator else "",
+                    "requested": True,
+                    "operator_index": index,
+                },
+            ))
+        gap = target_gaps[0]
+        implicit_gaps = self._implicit_gaps(
+            analysis, predicate, graph_id, questions
         )
-        implicit_gaps = self._implicit_gaps(analysis, predicate, graph_id)
         required_edges: List[Dict[str, Any]] = []
         if inferred_gap_kind == GapKind.RELATION_VALUE and question:
             question_index = question.token_indices[0]
@@ -460,9 +538,10 @@ class QueryGraphBuilder:
             predicate=predicate,
             known_nodes=tuple(known_nodes),
             gap_node=gap,
+            target_gaps=tuple(target_gaps),
             required_edges=tuple(required_edges),
             status=status,
-            continuation_of=previous_graph.id if previous_graph and not predicate_token else None,
+            continuation_of=previous_graph.id if is_continuation else None,
             construction_ids=(construction.id,) if construction else (),
             implicit_gaps=implicit_gaps,
             trace={
@@ -482,11 +561,18 @@ class QueryGraphBuilder:
                     construction.as_dict() if construction else None
                 ),
                 "inherited_predicate": bool(
-                    previous_graph and not predicate_token
+                    is_continuation
                 ),
                 "inherited_previous_binding": inherited_binding,
+                "event_anchor_id": (
+                    previous_binding.event_id
+                    if previous_binding and is_continuation else None
+                ),
+                "released_previous_node": released_node.as_dict()
+                if released_node else None,
                 "memory_feedback_limited_to_existing_hypotheses": True,
                 "target_gap_requested": True,
+                "target_gap_count": len(target_gaps),
                 "implicit_gap_count": len(implicit_gaps),
                 "language_analysis": analysis.as_dict(),
             },
@@ -776,6 +862,134 @@ class GraphMatcher:
             {},
         )
 
+    def _search_multiple(
+        self,
+        graph: QueryGraph,
+        *,
+        limit: int,
+    ) -> Dict[str, Any]:
+        """Bind all requested gaps as one distinct participant configuration."""
+        accepted: List[CandidateBinding] = []
+        rejected: List[Dict[str, Any]] = []
+        configurations: List[tuple[float, List[CandidateBinding]]] = []
+        anchor_id = str(graph.trace.get("event_anchor_id") or "")
+        with self.repository.transaction() as conn:
+            where_anchor = " AND e.id=?" if anchor_id else ""
+            params: tuple[Any, ...] = (graph.predicate.concept_id,)
+            if anchor_id:
+                params += (anchor_id,)
+            params += (max(1, min(int(limit), 512)),)
+            rows = conn.execute(
+                """SELECT e.id FROM graph_events e
+                   JOIN knowledge_sources s ON s.id=e.source_id
+                   WHERE e.predicate_concept_id=? AND s.status='CONFIRMED'
+                     AND e.actuality='ACTUAL'""" + where_anchor +
+                " ORDER BY e.confidence DESC,e.created_at,e.id LIMIT ?",
+                params,
+            ).fetchall()
+            for row in rows:
+                event = EventGraphPipeline.load_event(conn, str(row["id"]))
+                matched, failure = self._match_known_nodes(graph.known_nodes, event)
+                if failure:
+                    rejected.append({"event_id": event.id, **failure})
+                    continue
+                assert matched is not None
+                unavailable = {item.id for item in matched}
+                alternatives: List[List[tuple[Any, float, float]]] = []
+                for gap in graph.target_gaps:
+                    choices: List[tuple[Any, float, float]] = []
+                    cases = {
+                        key.removeprefix("morph:case:")
+                        for key in gap.question_signature.values
+                        if key.startswith("morph:case:")
+                    }
+                    for participant in event.participants:
+                        if participant.id in unavailable:
+                            continue
+                        observed_case = str(
+                            participant.mention.features.get("case") or ""
+                        )
+                        if cases and observed_case and observed_case not in cases:
+                            continue
+                        slot, direct, _, _ = self._slot_scores(
+                            replace(graph, gap_node=gap), participant
+                        )
+                        case_fit = 1.0 if not cases or observed_case in cases else 0.0
+                        choices.append((participant, slot, case_fit))
+                    alternatives.append(choices)
+                if not all(alternatives):
+                    rejected.append({
+                        "event_id": event.id,
+                        "status": "REJECTED",
+                        "failed_constraint": "GAP_BINDING",
+                        "reason": "NOT_ALL_REQUESTED_GAPS_BOUND",
+                    })
+                    continue
+                best: Optional[List[CandidateBinding]] = None
+                best_score = -1.0
+                for combination in product(*alternatives):
+                    participants = [item[0] for item in combination]
+                    if len({participant.id for participant in participants}) != len(participants):
+                        continue
+                    bindings: List[CandidateBinding] = []
+                    for gap, (participant, slot, case_fit) in zip(
+                        graph.target_gaps, combination
+                    ):
+                        total = max(0.0, min(1.0,
+                            0.42 * self._known_node_score(graph.known_nodes, matched)
+                            + 0.22 * max(0.16, slot)
+                            + 0.16 * event.confidence + 0.20 * case_fit,
+                        ))
+                        bindings.append(CandidateBinding(
+                            id=stable_id("binding", graph.id, event.id, gap.id, participant.id),
+                            query_graph_id=graph.id,
+                            event_id=event.id,
+                            gap_node_id=gap.id,
+                            resolved_node_id=participant.id,
+                            resolved_concept_id=(participant.mention.entity_id or stable_id("entity", participant.mention.head_lemma)),
+                            resolved_lemma=participant.mention.head_lemma,
+                            resolved_surface=participant.mention.surface,
+                            resolved_features={
+                                **dict(participant.mention.features),
+                                "preposition": participant.mention.preposition,
+                            },
+                            structural_score=self._known_node_score(graph.known_nodes, matched),
+                            signature_score=max(0.16, slot),
+                            evidence_score=event.confidence,
+                            total_score=total,
+                            status=BindingStatus.ACCEPTED,
+                            evidence=({
+                                "gap_kind": gap.gap_kind.value,
+                                "configuration_binding": True,
+                                "supporting_event_ids": [event.id],
+                                "independent_source_count": 1,
+                            },),
+                        ))
+                    score = sum(binding.total_score for binding in bindings) / len(bindings)
+                    if score > best_score:
+                        best, best_score = bindings, score
+                if best:
+                    accepted.extend(best)
+                    configurations.append((best_score, best))
+        if not configurations:
+            return {"accepted": accepted, "rejected": rejected, "selected": None,
+                    "selected_bindings": [], "status": AnswerStatus.UNRESOLVED.value}
+        _, selected_bindings = max(configurations, key=lambda item: item[0])
+        selected_bindings = [replace(item, status=BindingStatus.SELECTED)
+                             for item in selected_bindings]
+        selected_ids = {item.id for item in selected_bindings}
+        accepted = [
+            replace(item, status=BindingStatus.SELECTED) if item.id in selected_ids else item
+            for item in accepted
+        ]
+        return {
+            "accepted": accepted,
+            "rejected": rejected,
+            "selected": selected_bindings[0],
+            "selected_bindings": selected_bindings,
+            "status": AnswerStatus.RESOLVED.value,
+        }
+
     def search(
         self,
         graph: QueryGraph,
@@ -789,9 +1003,17 @@ class GraphMatcher:
                 "selected": None,
                 "status": AnswerStatus.UNRESOLVED.value,
             }
+        if len(graph.target_gaps) > 1:
+            return self._search_multiple(graph, limit=limit)
         accepted: List[CandidateBinding] = []
         rejected: List[Dict[str, Any]] = []
         with self.repository.transaction() as conn:
+            anchor_id = str(graph.trace.get("event_anchor_id") or "")
+            where_anchor = " AND e.id=?" if anchor_id else ""
+            params: tuple[Any, ...] = (graph.predicate.concept_id,)
+            if anchor_id:
+                params += (anchor_id,)
+            params += (max(1, min(int(limit), 512)),)
             rows = conn.execute(
                 """SELECT e.id
                    FROM graph_events e
@@ -799,9 +1021,10 @@ class GraphMatcher:
                    WHERE e.predicate_concept_id=?
                      AND s.status='CONFIRMED'
                      AND e.actuality='ACTUAL'
+                   """ + where_anchor + """
                    ORDER BY e.confidence DESC,e.created_at,e.id
                    LIMIT ?""",
-                (graph.predicate.concept_id, max(1, min(int(limit), 512))),
+                params,
             ).fetchall()
             for row in rows:
                 event = EventGraphPipeline.load_event(conn, str(row["id"]))
@@ -1162,6 +1385,10 @@ class GraphResponsePlanner:
         event: Optional[Any] = None,
     ) -> Dict[str, Any]:
         selected = search.get("selected")
+        selected_bindings = [
+            item for item in search.get("selected_bindings", [])
+            if isinstance(item, CandidateBinding)
+        ]
         status = str(search.get("status") or AnswerStatus.UNRESOLVED.value)
         if status in {
             AnswerStatus.AMBIGUOUS.value,
@@ -1195,6 +1422,36 @@ class GraphResponsePlanner:
                     "valid": True,
                     "reason": "no admitted gap binding",
                 },
+            }
+        if len(graph.target_gaps) > 1:
+            bound_gap_ids = {item.gap_node_id for item in selected_bindings}
+            missing = [
+                gap.id for gap in graph.target_gaps if gap.id not in bound_gap_ids
+            ]
+            distinct = len({item.resolved_node_id for item in selected_bindings}) == len(selected_bindings)
+            full = self._punctuate(event.source_surface) if event else None
+            contains_every_binding = bool(full) and all(
+                item.resolved_surface.casefold() in full.casefold()
+                for item in selected_bindings
+            )
+            valid = not missing and distinct and full is not None and contains_every_binding
+            return {
+                "status": AnswerStatus.RESOLVED.value if valid else AnswerStatus.BUILD_FAILED.value,
+                "short_answer": full,
+                "full_answer": full,
+                "surface": full if valid else None,
+                "selected_bindings": [item.as_dict() for item in selected_bindings],
+                "selected_binding": selected.as_dict(),
+                "provenance": {"source_event_ids": [selected.event_id], "independent_source_count": 1},
+                "validation": {
+                    "valid": valid,
+                    "all_requested_gaps_bound": not missing,
+                    "bindings_are_distinct_when_required": distinct,
+                    "all_bindings_belong_to_same_event": len({item.event_id for item in selected_bindings}) == 1,
+                    "surface_contains_every_binding": contains_every_binding,
+                    "event_identity": event.id if event else None,
+                },
+                "versions": ModelVersions().as_dict(),
             }
         short = self._punctuate(self._realize_binding(graph, selected))
         full = self._punctuate(event.source_surface) if event else None

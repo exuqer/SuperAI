@@ -644,6 +644,7 @@ class LanguageAnalysis:
     question_operator: Optional[QuestionOperator]
     relation_phrases: List[Dict[str, Any]]
     diagnostics: List[Dict[str, Any]]
+    question_operators: List[QuestionOperator] = field(default_factory=list)
     utterance: Optional[UtteranceEnvelope] = None
     dialogue_acts: List[DialogueAct] = field(default_factory=list)
     clauses: List[Clause] = field(default_factory=list)
@@ -667,6 +668,9 @@ class LanguageAnalysis:
                 if self.question_operator
                 else None
             ),
+            "question_operators": [
+                operator.as_dict() for operator in self.question_operators
+            ],
             "relation_phrases": list(self.relation_phrases),
             "diagnostics": list(self.diagnostics),
             "utterance": self.utterance.as_dict() if self.utterance else None,

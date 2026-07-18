@@ -525,6 +525,11 @@ class GraphDialogueService:
         rejected = list(search.get("rejected") or [])
         graph_dict = graph.as_dict()
         selected_dict = selected.as_dict() if isinstance(selected, CandidateBinding) else None
+        selected_bindings = [
+            item for item in search.get("selected_bindings", [])
+            if isinstance(item, CandidateBinding)
+        ]
+        selected_bindings_dict = [item.as_dict() for item in selected_bindings]
         bindings_by_event: Dict[str, List[CandidateBinding]] = {}
         for binding in accepted:
             bindings_by_event.setdefault(binding.event_id, []).append(binding)
@@ -601,12 +606,14 @@ class GraphDialogueService:
                 item.event_id for item in accepted
             }),
             "selected_binding": selected_dict,
+            "selected_bindings": selected_bindings_dict,
             "response_plan": answer,
             "validation": answer.get("validation"),
         }
         next_state = {
             "query_graph": graph_dict,
             "selected_binding": selected_dict,
+            "selected_bindings": selected_bindings_dict,
             "candidate_bindings": [
                 item.as_dict() for item in accepted
             ],
@@ -661,6 +668,7 @@ class GraphDialogueService:
             "candidate_bindings": next_state["candidate_bindings"],
             "rejected_events": rejected,
             "selected_binding": selected_dict,
+            "selected_bindings": selected_bindings_dict,
             "answer": answer,
             "trace": trace,
             "hive": {
