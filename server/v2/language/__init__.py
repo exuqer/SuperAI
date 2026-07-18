@@ -2,23 +2,73 @@
 
 from .analyzer import UniversalLanguageAnalyzer
 from .models import (
+    Actuality,
+    Clause,
+    ClauseMode,
+    ClauseRelation,
+    ClauseRelationType,
+    CompletionStatus,
+    DialogueState,
+    DialogueAct,
+    DialogueActType,
+    EvidencePacket,
+    EvidenceStatus,
+    InterpretationHypothesis,
+    InterpretationStatus,
     LanguageAnalysis,
+    Modality,
     MorphAnalysis,
     ParsedToken,
     Phrase,
     PhraseGraph,
+    Polarity,
     QuestionOperator,
+    ResponsePlan,
+    ResponseType,
+    SpeakerCommitment,
+    UtteranceEnvelope,
 )
+from .clause_parser import ClauseParser
+from .evidence import EvidenceAggregator
+from .interpretation_engine import InterpretationConfig, InterpretationEngine
 from .noun_phrase_parser import EntityMentionParser, MentionDraft
+from .scope_parser import ScopeParser
+from .utterance_parser import DialogueActParser, UtteranceParser
 
 __all__ = [
+    "Actuality",
+    "Clause",
+    "ClauseMode",
+    "ClauseParser",
+    "ClauseRelation",
+    "ClauseRelationType",
+    "CompletionStatus",
+    "DialogueAct",
+    "DialogueActParser",
+    "DialogueActType",
+    "DialogueState",
     "EntityMentionParser",
+    "EvidenceAggregator",
+    "EvidencePacket",
+    "EvidenceStatus",
+    "InterpretationConfig",
+    "InterpretationEngine",
+    "InterpretationHypothesis",
+    "InterpretationStatus",
     "LanguageAnalysis",
     "MentionDraft",
+    "Modality",
     "MorphAnalysis",
     "ParsedToken",
     "Phrase",
     "PhraseGraph",
+    "Polarity",
     "QuestionOperator",
+    "ResponsePlan",
+    "ResponseType",
+    "ScopeParser",
+    "SpeakerCommitment",
     "UniversalLanguageAnalyzer",
+    "UtteranceEnvelope",
+    "UtteranceParser",
 ]

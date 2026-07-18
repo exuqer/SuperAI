@@ -590,6 +590,103 @@ class HiveAnalyticsService:
         }
         return {"run": self._run_summary(run), "query_components": query_components, "snapshots": snapshots, "events": events, "clusters": []}
 
+    @staticmethod
+    def _dialogue_report(conn: Any, conversation_id: str) -> Dict[str, Any]:
+        status_counts = {
+            str(row["interpretation_status"]): int(row["count"])
+            for row in conn.execute(
+                """SELECT interpretation_status,COUNT(*) AS count
+                   FROM utterances WHERE conversation_id=?
+                   GROUP BY interpretation_status""",
+                (conversation_id,),
+            )
+        } if conversation_id else {}
+        act_counts = {
+            str(row["act_type"]): int(row["count"])
+            for row in conn.execute(
+                """SELECT da.act_type,COUNT(*) AS count
+                   FROM dialogue_acts da
+                   JOIN utterances u ON u.id=da.utterance_id
+                   WHERE u.conversation_id=? GROUP BY da.act_type""",
+                (conversation_id,),
+            )
+        } if conversation_id else {}
+        evidence_groups = {
+            str(row["independent_group"]): int(row["count"])
+            for row in conn.execute(
+                """SELECT ie.independent_group,COUNT(*) AS count
+                   FROM interpretation_evidence ie
+                   JOIN interpretation_hypotheses ih
+                     ON ih.id=ie.target_hypothesis_id
+                   WHERE EXISTS (
+                     SELECT 1
+                     FROM utterances u
+                     LEFT JOIN dialogue_acts da ON da.utterance_id=u.id
+                     LEFT JOIN clauses c ON c.utterance_id=u.id
+                     WHERE u.conversation_id=?
+                       AND (
+                         ih.scope_id=u.id
+                         OR ih.scope_id LIKE u.id || ':%'
+                         OR ih.scope_id=da.id
+                         OR ih.scope_id=c.id
+                         OR ih.scope_id LIKE c.id || ':%'
+                       )
+                   )
+                   GROUP BY ie.independent_group""",
+                (conversation_id,),
+            )
+        } if conversation_id else {}
+        total = sum(status_counts.values())
+        ambiguous = status_counts.get("AMBIGUOUS", 0)
+        incomplete = status_counts.get("INCOMPLETE", 0)
+        conflicted = status_counts.get("CONFLICTED", 0)
+        staging = {
+            str(row["status"]): int(row["count"])
+            for row in conn.execute(
+                """SELECT status,COUNT(*) AS count FROM knowledge_staging
+                   WHERE conversation_id=? GROUP BY status""",
+                (conversation_id,),
+            )
+        } if conversation_id else {}
+        return {
+            "interpretation_statuses": status_counts,
+            "dialogue_acts": act_counts,
+            "evidence_groups": evidence_groups,
+            "ambiguity_rate": round(ambiguous / total, 6) if total else 0.0,
+            "incomplete_rate": round(incomplete / total, 6) if total else 0.0,
+            "conflict_rate": round(conflicted / total, 6) if total else 0.0,
+            "pending_clarifications": int(conn.execute(
+                """SELECT COUNT(*) FROM dialogue_pending_questions
+                   WHERE conversation_id=? AND status='PENDING'""",
+                (conversation_id,),
+            ).fetchone()[0]) if conversation_id else 0,
+            "active_commitments": int(conn.execute(
+                """SELECT COUNT(*) FROM speaker_commitments
+                   WHERE conversation_id=? AND status='ACTIVE'""",
+                (conversation_id,),
+            ).fetchone()[0]) if conversation_id else 0,
+            "corrections": int(conn.execute(
+                """SELECT COUNT(*) FROM dialogue_acts da
+                   JOIN utterances u ON u.id=da.utterance_id
+                   WHERE u.conversation_id=? AND da.act_type='CORRECTION'""",
+                (conversation_id,),
+            ).fetchone()[0]) if conversation_id else 0,
+            "knowledge_staging": staging,
+            "memory_contamination_rate": (
+                round(
+                    int(staging.get("COMMITTED", 0) and conn.execute(
+                        """SELECT COUNT(*) FROM knowledge_staging
+                           WHERE conversation_id=? AND status='COMMITTED'
+                             AND interpretation_status<>'STABLE'""",
+                        (conversation_id,),
+                    ).fetchone()[0])
+                    / max(1, staging.get("COMMITTED", 0)),
+                    6,
+                )
+                if staging.get("COMMITTED", 0) else 0.0
+            ),
+        }
+
     def get(
         self, hive_id: str, run_id: Optional[str] = None, compare_run_id: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -629,4 +726,8 @@ class HiveAnalyticsService:
                 "runs": displayed_runs,
                 "primary": primary,
                 "comparison": comparison,
+                "dialogue_v2_5": self._dialogue_report(
+                    conn,
+                    str(hive.get("conversation_id") or ""),
+                ),
             }

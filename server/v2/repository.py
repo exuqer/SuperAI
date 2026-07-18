@@ -340,6 +340,15 @@ class V2Repository:
     def clear(self) -> None:
         with self.transaction() as conn:
             for table in (
+                "derived_answers", "response_plans",
+                "clause_event_projections",
+                "knowledge_dependencies", "knowledge_retractions",
+                "knowledge_admission_decisions", "knowledge_staging",
+                "knowledge_batches", "language_patterns",
+                "speaker_commitments", "dialogue_pending_questions",
+                "dialogue_focus_items", "dialogue_topics", "dialogue_states",
+                "interpretation_evidence", "interpretation_hypotheses",
+                "clause_relations", "clauses", "dialogue_acts", "utterances",
                 "hive_cell_matches", "hive_resonance_events", "hive_query_decisions",
                 "hive_messages", "hive_cell_components", "hive_cells", "hives",
                 "accepted_candidates", "rejected_candidates", "pre_candidates", "scene_matches",

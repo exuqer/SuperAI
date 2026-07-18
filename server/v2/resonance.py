@@ -356,7 +356,9 @@ class LexicalCandidateResolver:
         key = int(lemma_cloud_id) if lemma_cloud_id else cloud_id
         rows = conn.execute("""SELECT DISTINCT s.cloud_id, s.sentence_text, c.mass FROM scenes s
             JOIN scene_components sc ON sc.scene_cloud_id=s.cloud_id JOIN clouds c ON c.id=s.cloud_id
-            WHERE sc.word_form_cloud_id=? OR sc.lexeme_cloud_id=? ORDER BY c.mass DESC, s.cloud_id LIMIT 8""", (cloud_id, key)).fetchall()
+            WHERE (sc.word_form_cloud_id=? OR sc.lexeme_cloud_id=?)
+              AND s.knowledge_status<>'RETRACTED'
+            ORDER BY c.mass DESC, s.cloud_id LIMIT 8""", (cloud_id, key)).fetchall()
         return [{"scene_cloud_id": int(row["cloud_id"]), "text": row["sentence_text"], "support_score": round(min(1.0, .55 + float(row["mass"]) / 10), 4)} for row in rows]
 
     @staticmethod

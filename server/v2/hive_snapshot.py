@@ -158,7 +158,9 @@ class HiveSnapshotProjector:
                        hp.x, hp.y
                 FROM scenes s JOIN hive_cells hc ON hc.source_scene_cloud_id=s.cloud_id
                 JOIN cloud_placements hp ON hp.id=hc.hive_placement_id
-                WHERE hc.hive_id=? AND s.cloud_id IN ({marks}) ORDER BY hc.created_at, s.cloud_id""",
+                WHERE hc.hive_id=? AND s.cloud_id IN ({marks})
+                  AND s.knowledge_status<>'RETRACTED'
+                ORDER BY hc.created_at, s.cloud_id""",
             (hive_id, *cell_by_scene),
         ).fetchall()
         result = []

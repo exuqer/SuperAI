@@ -15,7 +15,11 @@ class ConceptRelationTrainer:
     confidence = .95
 
     def classify_scene(self, conn: Any, scene_id: int) -> Optional[Dict[str, Any]]:
-        scene = conn.execute("SELECT sentence_text FROM scenes WHERE cloud_id=?", (scene_id,)).fetchone()
+        scene = conn.execute(
+            """SELECT sentence_text FROM scenes
+               WHERE cloud_id=? AND knowledge_status<>'RETRACTED'""",
+            (scene_id,),
+        ).fetchone()
         if not scene:
             return None
         rows = conn.execute(
@@ -62,7 +66,8 @@ class ConceptRelationTrainer:
                 status, direct, depth, evidence_count, source_type, created_at, updated_at)
                VALUES (?, 'IS_A', ?, ?, ?, 'STABLE', 1, 1, 0, 'CLASSIFICATION_DEFINITION', ?, ?)
                ON CONFLICT(relation_type, subject_lexeme_cloud_id, object_lexeme_cloud_id) DO UPDATE SET
-                 confidence=MAX(concept_relations.confidence, excluded.confidence), updated_at=excluded.updated_at""",
+                 confidence=MAX(concept_relations.confidence, excluded.confidence),
+                 status='STABLE', updated_at=excluded.updated_at""",
             (relation_id, subject_id, object_id, self.confidence, now, now),
         )
         relation = conn.execute(
@@ -86,15 +91,27 @@ class ConceptRelationTrainer:
                 (evidence_id, relation_id, scene_id, observation_id, self.confidence, self.confidence,
                  encode({"subject_lexeme_cloud_id": subject_id, "object_lexeme_cloud_id": object_id}), now),
             )
+        else:
+            conn.execute(
+                """UPDATE concept_relation_evidence
+                   SET status='STABLE',confidence=?,weight=?
+                   WHERE concept_relation_id=? AND source_scene_id=?""",
+                (self.confidence, self.confidence, relation_id, scene_id),
+            )
         count = int(conn.execute(
-            "SELECT COUNT(*) FROM concept_relation_evidence WHERE concept_relation_id=?", (relation_id,)
+            """SELECT COUNT(*) FROM concept_relation_evidence
+               WHERE concept_relation_id=? AND status<>'RETRACTED'""",
+            (relation_id,),
         ).fetchone()[0])
         conn.execute("UPDATE concept_relations SET evidence_count=?, updated_at=? WHERE id=?", (count, now, relation_id))
         return {"id": relation_id, "relation_type": "IS_A", **classification, "confidence": self.confidence, "evidence_scene_ids": [f"scene-{scene_id}"]}
 
     def rebuild(self, conn: Any) -> Dict[str, Any]:
         count = 0
-        for row in conn.execute("SELECT cloud_id FROM scenes ORDER BY cloud_id").fetchall():
+        for row in conn.execute(
+            """SELECT cloud_id FROM scenes
+               WHERE knowledge_status<>'RETRACTED' ORDER BY cloud_id"""
+        ).fetchall():
             observation = conn.execute(
                 "SELECT id FROM training_observations WHERE scene_cloud_id=? ORDER BY id LIMIT 1", (row["cloud_id"],)
             ).fetchone()

@@ -115,6 +115,106 @@ def test_how_question_resolves_to_observed_instrument():
     assert answer["full_surface_answer"] == "Рыбак ловит рыбу удочкой."
 
 
+def test_definition_question_uses_entity_type_relation_and_keeps_answer_derived():
+    TrainingPipelineV2().train("Робот Искра находится в мастерской.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    definition = service.query(hive_id, "Кто такой Искра?")
+
+    assert definition["query_frame"]["query_type"] == "definition_question"
+    assert definition["query_frame"]["requested_role"] == "entity_type"
+    assert definition["query_frame"]["requested_slot"] == "type_or_definition"
+    assert definition["query_frame"]["answer_slot_type"] == "relation"
+    assert definition["query_frame"]["roles"]["entity"]["entity_id"]
+    assert definition["query_frame"]["roles"]["entity"]["resolution_state"] == "KNOWN_ENTITY_ALIAS"
+
+    answer = service.vibration_run(hive_id, 3)["answer"]
+
+    assert answer["full_surface_answer"] == "Искра — робот."
+    assert answer["provenance"]["source_type"] == "assistant_derived_answer"
+    assert answer["provenance"]["source_relation_ids"]
+    assert answer["provenance"]["independent_fact"] is False
+    with V2Repository().transaction() as conn:
+        stored = conn.execute(
+            """SELECT memory_class,source_type,knowledge_status,independent_evidence,
+                      eligible_for_fact_retrieval,provenance_json
+               FROM hive_dialogue_scenes WHERE hive_id=? ORDER BY created_at DESC LIMIT 1""",
+            (hive_id,),
+        ).fetchone()
+    assert stored["memory_class"] == "ASSISTANT_DERIVED"
+    assert stored["source_type"] == "assistant_derived_answer"
+    assert stored["knowledge_status"] == "DERIVED"
+    assert stored["independent_evidence"] == 0
+    assert stored["eligible_for_fact_retrieval"] == 0
+    assert "relation_extraction" in stored["provenance_json"]
+
+    action = service.query(hive_id, "Что делает Искра?")
+    assert all("dialogue-scene" not in source for candidate in action["candidates"] for source in candidate["sources"])
+    assert service.vibration_run(hive_id, 3)["answer"]["surface_answer"] == "Находится в мастерской."
+
+
+def test_definition_question_supports_drone_alias_and_complete_action_phrase():
+    TrainingPipelineV2().train("Дрон Сокол летит к ангару.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    service.query(hive_id, "Сокол — это кто?")
+    assert service.vibration_run(hive_id, 3)["answer"]["full_surface_answer"] == "Сокол — дрон."
+
+    action = service.query(hive_id, "Что делает Сокол?")
+    assert action["candidates"][0]["predicate_phrase_completeness"] == 1.0
+    assert service.vibration_run(hive_id, 3)["answer"]["surface_answer"] == "Летит к ангару."
+
+
+def test_derived_short_dialogue_answer_is_not_fact_evidence_for_action_query():
+    TrainingPipelineV2().train("Насос качает воду из резервуара.")
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+    query_scenes = QuerySceneService()
+    message_id = f"message-{uuid.uuid4().hex[:12]}"
+    frame = query_scenes.parse("Насос качает.")["query_frame"]
+    with V2Repository().transaction() as conn:
+        conn.execute(
+            "INSERT INTO hive_messages(id,hive_id,turn_index,role,text,parsed_json,created_at) VALUES(?,?,?,?,?,?,?)",
+            (message_id, hive_id, 1, "assistant", "Насос качает.", "{}", "2026-01-01T00:00:00+00:00"),
+        )
+        query_scenes._store_dialogue_scene(
+            conn, hive_id, message_id, "assistant", "Насос качает.", frame,
+        )
+        stored = conn.execute(
+            "SELECT completion_status,eligible_for_fact_retrieval FROM hive_dialogue_scenes WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+    assert stored["completion_status"] == "SEMANTICALLY_INCOMPLETE"
+    assert stored["eligible_for_fact_retrieval"] == 0
+
+    result = service.query(hive_id, "Что делает насос?")
+    assert all(message_id not in source for candidate in result["candidates"] for source in candidate["sources"])
+    assert service.vibration_run(hive_id, 3)["answer"]["surface_answer"] == "Качает воду из резервуара."
+
+
+def test_user_assertion_is_stored_as_independent_dialogue_memory():
+    service = V2HiveService()
+    hive_id = service.create()["hive"]["id"]
+
+    service.query(hive_id, "Инженер проверяет генератор.")
+
+    with V2Repository().transaction() as conn:
+        stored = conn.execute(
+            """SELECT memory_class,source_type,independent_evidence,
+                      eligible_for_fact_retrieval FROM hive_dialogue_scenes
+               WHERE hive_id=? ORDER BY created_at DESC LIMIT 1""",
+            (hive_id,),
+        ).fetchone()
+    assert dict(stored) == {
+        "memory_class": "USER_ASSERTION",
+        "source_type": "user_assertion",
+        "independent_evidence": 1,
+        "eligible_for_fact_retrieval": 1,
+    }
+
+
 def test_polar_question_returns_supported_contradicted_or_unknown_answer():
     TrainingPipelineV2().train("Кот ест рыбу.")
     service = V2HiveService()
@@ -481,3 +581,69 @@ def test_query_activation_tiers_have_fixed_boundaries():
     assert [(scene["physics"]["activation"], scene["physics"]["relevance_tier"]) for scene in scenes] == [
         (1.0, "DIRECT"), (.75, "RELATED"), (.30, "PARTIAL"), (.05, "BACKGROUND"),
     ]
+
+
+def test_action_question_recovers_predicate_phrase_instead_of_searching_for_doing():
+    service, hive_id, result = _ask(
+        "Врач осматривает пациента.",
+        "Что делает врач?",
+    )
+
+    frame = result["query_frame"]
+    assert frame["query_type"] == "action_question"
+    assert frame["requested_role"] == "action"
+    assert frame["requested_slot"] == "predicate_phrase"
+    assert frame["answer_slot_type"] == "predicate_phrase"
+    assert frame["roles"]["action"]["status"] == "empty"
+    assert frame["action_question"]["removed_predicate"]["lemma"] == "делать"
+    assert result["memory_scenes"][0]["anchor_validation"]["answer_extraction"] == "predicate"
+    assert result["memory_scenes"][0]["anchor_validation"]["placeholder_predicate_removed"] is True
+
+    answer = service.vibration_run(hive_id, 3)["answer"]
+    assert answer["surface_answer"] == "Осматривает пациента."
+    assert answer["full_surface_answer"] == "Врач осматривает пациента."
+
+
+def test_action_question_matches_a_named_entity_through_its_type():
+    service, hive_id, result = _ask(
+        "Дрон Сокол летит над полем.",
+        "Что делает дрон?",
+    )
+
+    scene = result["memory_scenes"][0]
+    assert scene["scores"]["agent_match"] == .88
+    assert scene["role_match_details"]["agent"]["match_type"] in {"entity_type", "is_a"}
+    assert scene["anchor_validation"]["status"] == "PASSED"
+    assert result["query_frame"]["retrieval_stages"][0]["predicate_ignored"] == "делать"
+
+    answer = service.vibration_run(hive_id, 3)["answer"]
+    assert answer["surface_answer"] == "Летит над полем."
+    assert answer["full_surface_answer"] == "Дрон Сокол летит над полем."
+
+
+def test_action_question_keeps_doing_when_it_is_the_memory_predicate():
+    service, hive_id, result = _ask(
+        "Мастер делает деревянный стол.",
+        "Что делает мастер?",
+    )
+
+    assert result["query_frame"]["action_question"]["removed_predicate"]["lemma"] == "делать"
+    assert result["candidates"][0]["predicate_lemma"] == "делать"
+    assert service.vibration_run(hive_id, 3)["answer"]["surface_answer"] == (
+        "Делает деревянный стол."
+    )
+
+
+def test_action_question_recognizes_supported_question_forms_and_question_operator_override():
+    service = QuerySceneService()
+    for text in (
+        "Что делал врач?",
+        "Что будет делать врач?",
+        "Что врач делает?",
+        "Чем занимается врач?",
+        "Что происходит с врачом?",
+    ):
+        frame = service.parse(text)["query_frame"]
+        assert frame["query_type"] == "action_question"
+        assert frame["tokens"][0]["semantic_part_of_speech"] == "QUESTION_OPERATOR"
+        assert frame["question_operator"]["operator_type"] == "ACTION_QUERY"

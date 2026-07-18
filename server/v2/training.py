@@ -14,6 +14,7 @@ from .unknown_search import StructuralIndexService
 from .semantic_fog import SemanticFogService
 from .concept_relations import ConceptRelationTrainer
 from .event_core import UniversalEventPipeline
+from .knowledge_admission import KnowledgeAdmissionService
 
 
 ROLE_VALUES = {
@@ -321,8 +322,173 @@ class TrainingPipelineV2:
         self.semantic_fog = SemanticFogService(self.repository)
         self.concept_relations = ConceptRelationTrainer()
         self.universal_events = UniversalEventPipeline(self.repository, self.morphology)
+        self.knowledge = KnowledgeAdmissionService(self.repository)
 
-    def train(self, text: str, source_type: str = "training") -> Dict[str, Any]:
+    def stage(
+        self,
+        text: str,
+        source_type: str = "training",
+        *,
+        source_key: str = "",
+        conversation_id: str = "",
+        speaker_role: str = "",
+    ) -> Dict[str, Any]:
+        return self.knowledge.stage(
+            text,
+            source_type=source_type,
+            source_key=source_key,
+            conversation_id=conversation_id,
+            speaker_role=speaker_role,
+        )
+
+    def commit(
+        self,
+        staging_id: str,
+        *,
+        manual_validation: bool = False,
+    ) -> Dict[str, Any]:
+        training_result: Dict[str, Any] = {}
+
+        def materialize(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+            nonlocal training_result
+            training_result, objects = self._materialize_staged_row(row)
+            return objects
+
+        result = self.knowledge.commit(
+            staging_id,
+            materializer=materialize,
+            manual_validation=manual_validation,
+        )
+        if training_result:
+            result["training"] = training_result
+        return result
+
+    def _materialize_staged_row(
+        self,
+        row: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        interpretation = row.get("interpretation") or {}
+        clauses = interpretation.get("clauses") or []
+        selected_hypotheses = (
+            interpretation.get("interpretation_hypotheses") or []
+        )
+        source_interpretation_ids: Dict[int, str] = {}
+        for clause in clauses:
+            clause_id = clause.get("id")
+            sentence_index = int(clause.get("sentence_index", 0))
+            selected = next(
+                (
+                    hypothesis
+                    for hypothesis in selected_hypotheses
+                    if hypothesis.get("scope_id") == clause_id
+                    and hypothesis.get("selected")
+                    and hypothesis.get("hypothesis_type") == "predicate"
+                ),
+                None,
+            )
+            if selected and sentence_index not in source_interpretation_ids:
+                source_interpretation_ids[sentence_index] = str(
+                    selected["id"]
+                )
+        training_result = self.train(
+            str(row["raw_text"]),
+            source_type=str(row["source_type"]),
+            source_interpretation_ids=source_interpretation_ids,
+        )
+        objects = [
+            {
+                "type": "scene",
+                "id": str(scene["scene_cloud_id"]),
+                "scene_cloud_id": int(scene["scene_cloud_id"]),
+                "created": bool(scene.get("created")),
+                "source_interpretation_id": (
+                    source_interpretation_ids.get(sentence_index)
+                ),
+            }
+            for sentence_index, scene in enumerate(
+                training_result.get("scenes", [])
+            )
+        ]
+        for scene in training_result.get("scenes", []):
+            objects.extend({
+                "type": "concept_evidence",
+                "id": str(evidence["id"]),
+                "concept_id": evidence.get("concept_id"),
+                "source_scene_id": evidence.get("source_scene_id"),
+            } for evidence in scene.get("concept_evidence", []))
+            projection = scene.get("scene_concept_projection")
+            if projection:
+                objects.append({
+                    "type": "scene_concept_projection",
+                    "id": str(projection["id"]),
+                    "source_scene_id": scene["scene_cloud_id"],
+                    "action_concept_id": projection.get(
+                        "action_concept_id"
+                    ),
+                })
+        if clauses and training_result.get("scenes"):
+            with self.repository.transaction() as conn:
+                for sentence_index, scene in enumerate(
+                    training_result["scenes"]
+                ):
+                    sentence_clauses = [
+                        clause for clause in clauses
+                        if int(clause.get("sentence_index", 0))
+                        == sentence_index
+                    ]
+                    projections = (
+                        self.universal_events.materialize_clause_events(
+                            conn,
+                            sentence_clauses,
+                            scene_id=int(scene["scene_cloud_id"]),
+                        )
+                    )
+                    objects.extend({
+                        "type": "clause_event_projection",
+                        "id": projection["id"],
+                        "source_clause_id": projection[
+                            "source_clause_id"
+                        ],
+                    } for projection in projections)
+        return training_result, objects
+
+    def preview_batch(
+        self,
+        sources: Sequence[Dict[str, Any]],
+        *,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self.knowledge.preview_batch(sources, config=config)
+
+    def commit_batch(self, batch_id: str) -> Dict[str, Any]:
+        return self.knowledge.commit_batch(
+            batch_id,
+            materializer=lambda row: self._materialize_staged_row(
+                dict(row)
+            )[1],
+        )
+
+    def rollback_batch(self, batch_id: str) -> Dict[str, Any]:
+        return self.knowledge.rollback_batch(batch_id)
+
+    def retract(
+        self,
+        staging_id: str,
+        *,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        return self.knowledge.retract(staging_id, reason=reason)
+
+    def reprocess(self, staging_id: str) -> Dict[str, Any]:
+        return self.knowledge.reprocess(staging_id)
+
+    def train(
+        self,
+        text: str,
+        source_type: str = "training",
+        *,
+        source_interpretation_ids: Optional[Dict[int, str]] = None,
+    ) -> Dict[str, Any]:
         tokenization = tokenize_hierarchical(text)
         run_id = f"train-{uuid.uuid4().hex}"
         with self.repository.transaction() as conn:
@@ -343,6 +509,19 @@ class TrainingPipelineV2:
                 scene_id = int(scene_result["scene_cloud_id"])
                 universal = self.universal_events.materialize_scene(conn, scene_id)
                 scene_result.update(universal)
+            for sentence_index, scene_result in enumerate(scene_results):
+                source_interpretation_id = (
+                    source_interpretation_ids or {}
+                ).get(sentence_index)
+                if source_interpretation_id:
+                    conn.execute(
+                        """UPDATE scenes SET source_interpretation_id=?
+                           WHERE cloud_id=?""",
+                        (
+                            source_interpretation_id,
+                            int(scene_result["scene_cloud_id"]),
+                        ),
+                    )
             semantic_backfill = self.semantic_fog.backfill(conn, int(global_space["id"]))
             success = bool(scene_results)
             conn.execute(
@@ -377,7 +556,10 @@ class TrainingPipelineV2:
     def rebuild_semantic_projections(self) -> Dict[str, int]:
         with self.repository.transaction() as conn:
             projected = 0
-            for row in conn.execute("SELECT cloud_id FROM scenes ORDER BY cloud_id").fetchall():
+            for row in conn.execute(
+                """SELECT cloud_id FROM scenes
+                   WHERE knowledge_status<>'RETRACTED' ORDER BY cloud_id"""
+            ).fetchall():
                 result = self.universal_events.materialize_scene(conn, int(row["cloud_id"]))
                 if result.get("scene_concept_projection"):
                     projected += 1
@@ -396,7 +578,10 @@ class TrainingPipelineV2:
 
     def _migrate_existing_scenes(self, conn: Any) -> None:
         rows = conn.execute(
-            "SELECT cloud_id FROM scenes WHERE parser_version <> ? ORDER BY cloud_id",
+            """SELECT cloud_id FROM scenes
+               WHERE parser_version <> ?
+                 AND knowledge_status<>'RETRACTED'
+               ORDER BY cloud_id""",
             (self.parser_version,),
         ).fetchall()
         for row in rows:

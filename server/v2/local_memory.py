@@ -339,13 +339,18 @@ class V2LocalMemoryService:
                    JOIN clouds c ON c.id = p.cloud_id
                    JOIN scene_components sc ON sc.scene_cloud_id=c.id
                    WHERE s.space_type = 'global_field' AND c.cloud_type = 'scene'
+                     AND EXISTS (
+                       SELECT 1 FROM scenes source_scene
+                       WHERE source_scene.cloud_id=c.id
+                         AND source_scene.knowledge_status<>'RETRACTED'
+                     )
                      AND sc.lexeme_cloud_id IN ({marks})
                    ORDER BY c.mass DESC, c.id DESC LIMIT ?""",
                 (*lexeme_ids, max(32, self.config.max_sources * 8)),
             ).fetchall()
         for row in scene_rows:
             components = conn.execute(
-                """SELECT lexeme_cloud_id, grammatical_role
+                """SELECT lexeme_cloud_id, word_form_cloud_id, grammatical_role
                    FROM scene_components WHERE scene_cloud_id = ?""",
                 (row["cloud_id"],),
             ).fetchall()
@@ -355,6 +360,7 @@ class V2LocalMemoryService:
             ):
                 continue
             matched = 0.0
+            surface_matched = 0
             for query in query_components:
                 aliases = ROLE_ALIASES.get(str(query.get("expected_role") or ""), {str(query.get("expected_role") or "")})
                 compatible = [
@@ -369,16 +375,26 @@ class V2LocalMemoryService:
                     for component in compatible
                 )
                 matched += role_score
+                if query.get("word_form_cloud_id") and any(
+                    component["word_form_cloud_id"] is not None
+                    and int(component["word_form_cloud_id"])
+                    == int(query["word_form_cloud_id"])
+                    for component in compatible
+                ):
+                    surface_matched += 1
             overlap = matched / max(1, len(query_components))
+            surface_overlap = surface_matched / max(1, len(query_components))
             if overlap <= 0:
                 continue
             score = clamp(
                 overlap * 0.85
                 + min(1.0, float(row["mass"]) / 10.0) * 0.05
                 + float(row["stability"]) * 0.10
+                + surface_overlap * 0.05
             )
             candidate = dict(row)
             candidate["_query_overlap"] = overlap
+            candidate["_surface_overlap"] = surface_overlap
             ranked.append((score, candidate))
 
         if not ranked:
@@ -512,7 +528,7 @@ class V2LocalMemoryService:
                 (id, hive_id, dominant_cloud_id, hive_placement_id, source_cloud_id,
                  source_placement_id, source_space_id, source_scene_cloud_id,
                  stored_strength, retention, local_activation, metadata_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, .95, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, .95, ?, ?, ?)""",
                 (
                     cell_id,
                     hive["id"],
@@ -522,6 +538,7 @@ class V2LocalMemoryService:
                     source["placement_id"],
                     source["space_id"],
                     source["cloud_id"] if source_cloud and source_cloud["cloud_type"] == "scene" else None,
+                    clamp(max(0.75, source["fitness"])),
                     clamp(max(0.75, source["fitness"])),
                     encode({"negation": parsed["negation"], "message": parsed["original_text"]}),
                     now,

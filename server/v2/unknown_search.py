@@ -169,7 +169,16 @@ class UnknownTokenSearchService:
                 exact = conn.execute("SELECT 1 FROM word_forms WHERE normalized_form=?", (token["normalized"],)).fetchone()
                 if exact:
                     continue
-                search = self._new_search(hive_id, token["surface"], int(token.get("index", 0)), role, state.get("query_scene", {}).get("id", ""))
+                search = self._new_search(
+                    hive_id,
+                    token["surface"],
+                    int(
+                        token.get("index")
+                        if token.get("index") is not None else 0
+                    ),
+                    role,
+                    state.get("query_scene", {}).get("id", ""),
+                )
                 search.update({"query_text": state.get("query_frame", {}).get("source_text", ""), "conversation_id": state.get("conversation_id", ""), "message_id": state.get("message_id", ""), "query_frame_id": state.get("query_frame", {}).get("id", ""), "created_for_surface": token.get("surface", "")})
                 self._advance(conn, search, one_step=False)
                 self._apply_bridge_to_working_hive(conn, hive_id, search, state)
@@ -302,7 +311,9 @@ class UnknownTokenSearchService:
         for structural in search["structural_candidates"][:MAX_CONTEXT_CANDIDATES]:
             scenes = conn.execute(
                 """SELECT s.cloud_id, s.sentence_text, sc.grammatical_role FROM scene_components sc
-                JOIN scenes s ON s.cloud_id=sc.scene_cloud_id WHERE sc.lexeme_cloud_id=? LIMIT ?""",
+                JOIN scenes s ON s.cloud_id=sc.scene_cloud_id
+                WHERE sc.lexeme_cloud_id=?
+                  AND s.knowledge_status<>'RETRACTED' LIMIT ?""",
                 (structural["candidate_cloud_id"], MAX_SCENES_PER_CANDIDATE),
             ).fetchall()
             if structural.get("status") == "REJECTED":

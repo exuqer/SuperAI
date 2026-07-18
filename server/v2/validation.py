@@ -89,6 +89,24 @@ class ModelInvariantValidator:
                 WHERE p.space_id <> h.space_id""")
             check("hive_source_not_local", """SELECT hc.id FROM hive_cells hc
                 WHERE hc.source_placement_id = hc.hive_placement_id""")
+            check("retracted_scene_has_active_concept_evidence", """
+                SELECT ce.id FROM concept_evidence ce
+                JOIN scenes s ON s.cloud_id=ce.source_scene_id
+                WHERE s.knowledge_status='RETRACTED'
+                  AND ce.status='ACTIVE'""")
+            check("retracted_scene_has_active_relation_evidence", """
+                SELECT cre.id FROM concept_relation_evidence cre
+                JOIN scenes s ON s.cloud_id=cre.source_scene_id
+                WHERE s.knowledge_status='RETRACTED'
+                  AND cre.status<>'RETRACTED'""")
+            check("retracted_scene_has_projection", """
+                SELECT projection.id FROM scene_concept_projections projection
+                JOIN scenes s ON s.cloud_id=projection.scene_id
+                WHERE s.knowledge_status='RETRACTED'""")
+            check("retracted_scene_has_semantic_evidence", """
+                SELECT evidence.id FROM semantic_evidence evidence
+                JOIN scenes s ON s.cloud_id=evidence.source_scene_cloud_id
+                WHERE s.knowledge_status='RETRACTED'""")
             check("hive_composition_sum", """SELECT cell_id, SUM(composition_share) total
                 FROM hive_cell_components GROUP BY cell_id HAVING total < .999 OR total > 1.001""")
             checks += 1

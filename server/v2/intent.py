@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional
 
+from .language.models import DialogueActType
+from .language.utterance_parser import DialogueActParser
+
 
 GREETING_WORDS = {"привет", "здравствуй", "здравствуйте", "добрый день", "доброе утро", "добрый вечер"}
 SMALL_TALK_PATTERNS = {
@@ -19,9 +22,14 @@ QUESTION_WORDS = {"кто", "кого", "кому", "что", "где", "куд�
 class IntentClassifier:
     """Small deterministic classifier for the supported Russian dialogue intents."""
 
+    def __init__(self) -> None:
+        self.dialogue_acts = DialogueActParser()
+
     def classify(self, text: str) -> Dict[str, Any]:
         source = str(text or "").strip()
         normalized = re.sub(r"\s+", " ", source.casefold()).strip(" .!?,;:")
+        dialogue_acts = self.dialogue_acts.parse(source)
+        act_types = {act.act_type for act in dialogue_acts}
         greeting = next((item for item in GREETING_WORDS if re.search(rf"(?:^|\s){re.escape(item)}(?:$|\s|[!?,.])", source.casefold())), None)
         small_talk_surface: Optional[str] = None
         small_talk_type: Optional[str] = None
@@ -33,7 +41,11 @@ class IntentClassifier:
                 break
         location = self._location(source)
         words = re.findall(r"[\w-]+", normalized, flags=re.UNICODE)
-        has_scene_question = any(word in QUESTION_WORDS for word in words)
+        has_question_operator = any(word in QUESTION_WORDS for word in words)
+        has_scene_question = (
+            has_question_operator
+            or DialogueActType.QUESTION in act_types
+        )
         has_question_mark = source.rstrip().endswith("?")
         if greeting and small_talk_type:
             intent = "GREETING_WITH_SMALL_TALK"
@@ -46,15 +58,24 @@ class IntentClassifier:
         else:
             if len(words) == 1:
                 intent = "STRUCTURAL_PROBE" if len(words[0]) <= 3 else "LEXICAL_PROBE"
-            elif any(word in {"сделай", "покажи", "найди", "добавь", "удали", "запусти"} for word in words):
+            elif (
+                DialogueActType.COMMAND in act_types
+                or any(word in {"сделай", "покажи", "найди", "добавь", "удали", "запусти"} for word in words)
+            ):
                 intent = "COMMAND"
             elif words:
                 intent = "SCENE_STATEMENT"
             else:
                 intent = "UNKNOWN"
-        result: Dict[str, Any] = {"intent": intent, "source_text": source}
+        result: Dict[str, Any] = {
+            "intent": intent,
+            "source_text": source,
+            "dialogue_acts": [act.as_dict() for act in dialogue_acts],
+        }
         if intent == "SCENE_QUESTION":
-            result["question_kind"] = "role" if has_scene_question else "polar"
+            result["question_kind"] = (
+                "role" if has_question_operator else "polar"
+            )
         if greeting:
             result["greeting"] = {"surface": greeting.capitalize() if greeting == "привет" else greeting}
         if small_talk_type:

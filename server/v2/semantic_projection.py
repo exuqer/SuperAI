@@ -50,6 +50,13 @@ class SemanticProjectionService:
         return dict(row) if row else None
 
     def project_scene(self, conn: Any, scene_id: int) -> Optional[Dict[str, Any]]:
+        scene = conn.execute(
+            """SELECT 1 FROM scenes
+               WHERE cloud_id=? AND knowledge_status<>'RETRACTED'""",
+            (scene_id,),
+        ).fetchone()
+        if not scene:
+            return None
         event = UniversalEventPipeline.load_event(conn, scene_id)
         if not event:
             return None
@@ -105,7 +112,10 @@ class SemanticProjectionService:
             "DELETE FROM scene_concept_projections WHERE source_type='manual_seed'"
         )
         projected = 0
-        for row in conn.execute("SELECT cloud_id FROM scenes ORDER BY cloud_id").fetchall():
+        for row in conn.execute(
+            """SELECT cloud_id FROM scenes
+               WHERE knowledge_status<>'RETRACTED' ORDER BY cloud_id"""
+        ).fetchall():
             if self.project_scene(conn, int(row["cloud_id"])):
                 projected += 1
         return {

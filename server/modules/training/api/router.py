@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
-from server.modules.training.api.dto import TrainRequest
+from server.modules.training.api.dto import (
+    BatchPreviewRequest,
+    BatchReferenceRequest,
+    CommitRequest,
+    ReprocessRequest,
+    RetractionRequest,
+    StageRequest,
+    TrainRequest,
+)
 from server.modules.training.application.services import TrainingService
 
 
@@ -23,3 +31,87 @@ async def train(
     service: TrainingService = Depends(get_training_service),
 ) -> dict[str, Any]:
     return service.train(request.text)
+
+
+@router.post("/stage")
+async def stage(
+    request: StageRequest,
+    service: TrainingService = Depends(get_training_service),
+) -> dict[str, Any]:
+    return service.stage(
+        request.text,
+        source_type=request.source_type,
+        source_key=request.source_key,
+        conversation_id=request.conversation_id,
+        speaker_role=request.speaker_role,
+    )
+
+
+@router.post("/commit")
+async def commit(
+    request: CommitRequest,
+    service: TrainingService = Depends(get_training_service),
+) -> dict[str, Any]:
+    try:
+        return service.commit(
+            request.staging_id,
+            manual_validation=request.manual_validation,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="staging item not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/retract")
+async def retract(
+    request: RetractionRequest,
+    service: TrainingService = Depends(get_training_service),
+) -> dict[str, Any]:
+    try:
+        return service.retract(request.staging_id, request.reason)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="staging item not found") from error
+
+
+@router.post("/reprocess")
+async def reprocess(
+    request: ReprocessRequest,
+    service: TrainingService = Depends(get_training_service),
+) -> dict[str, Any]:
+    try:
+        return service.reprocess(request.staging_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="staging item not found") from error
+
+
+@router.post("/batches/preview")
+async def preview_batch(
+    request: BatchPreviewRequest,
+    service: TrainingService = Depends(get_training_service),
+) -> dict[str, Any]:
+    return service.preview_batch(request.sources, request.config)
+
+
+@router.post("/batches/commit")
+async def commit_batch(
+    request: BatchReferenceRequest,
+    service: TrainingService = Depends(get_training_service),
+) -> dict[str, Any]:
+    try:
+        return service.commit_batch(request.batch_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="batch not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/batches/rollback")
+async def rollback_batch(
+    request: BatchReferenceRequest,
+    service: TrainingService = Depends(get_training_service),
+) -> dict[str, Any]:
+    try:
+        return service.rollback_batch(request.batch_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="batch not found") from error

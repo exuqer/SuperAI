@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Sequence
 from server.tokenizer import tokenize_hierarchical
 
 from .diagnostics import MORPH_ANALYSIS_AMBIGUITY
+from .clause_parser import ClauseParser
+from .interpretation_engine import InterpretationEngine
 from .models import (
     LanguageAnalysis,
     MorphAnalysis,
@@ -17,6 +19,7 @@ from .models import (
 from .noun_phrase_parser import ADJECTIVE_POS, NOUN_POS, EntityMentionParser
 from .question_operator_parser import QuestionOperatorParser
 from .relation_phrase_parser import RelationPhraseParser
+from .utterance_parser import UtteranceParser
 
 
 PREDICATE_POS = {"VERB", "INFN", "PRTS", "GRND"}
@@ -50,6 +53,9 @@ class UniversalLanguageAnalyzer:
         self.noun_phrases = EntityMentionParser()
         self.relation_phrases = RelationPhraseParser()
         self.questions = QuestionOperatorParser()
+        self.utterances = UtteranceParser()
+        self.clauses = ClauseParser()
+        self.interpretations = InterpretationEngine()
 
     @staticmethod
     def _agreement(left: MorphAnalysis, right: MorphAnalysis) -> bool:
@@ -168,13 +174,14 @@ class UniversalLanguageAnalyzer:
                 ):
                     score += .22
                     evidence.append("proper_name_marker")
+                analysis.evidence = list(evidence)
                 scored.append((score, analysis, evidence))
             _, winner, winner_evidence = max(
                 scored,
                 key=lambda item: (item[0], item[1].confidence),
             )
             winner.selected = True
-            winner.evidence = winner_evidence
+            winner.evidence = list(winner_evidence)
             selected.append(winner)
         return selected
 
@@ -184,6 +191,15 @@ class UniversalLanguageAnalyzer:
         *,
         token_metadata: Optional[Dict[int, Dict[str, Any]]] = None,
         detect_question: bool = True,
+        conversation_id: str = "",
+        turn_index: int = 0,
+        speaker_role: str = "user",
+        source_type: str = "dialogue",
+        utterance_id: str = "",
+        received_at: str = "",
+        reference_candidates: Optional[
+            Dict[int, Sequence[Dict[str, Any]]]
+        ] = None,
     ) -> LanguageAnalysis:
         surfaces = tokenize_hierarchical(text).all_tokens
         variants = [self._variants(token.text) for token in surfaces]
@@ -196,7 +212,11 @@ class UniversalLanguageAnalyzer:
                 normalized=surface.normalized.casefold(),
                 lemma=winner.lemma,
                 pos=winner.pos,
-                features=dict(winner.features),
+                features={
+                    **dict(winner.features),
+                    "sentence_index": surface.sentence_index,
+                    "token_index_in_sentence": surface.token_index_in_sentence,
+                },
                 lexeme_cloud_id=metadata.get(index, {}).get("lexeme_cloud_id"),
                 word_form_cloud_id=metadata.get(index, {}).get("word_form_cloud_id"),
                 grammatical_role=str(
@@ -271,7 +291,7 @@ class UniversalLanguageAnalyzer:
                         "surface": token.surface,
                         "resolution": "contextual_agreement",
                     })
-        return LanguageAnalysis(
+        analysis = LanguageAnalysis(
             tokens=tokens,
             mentions=mentions,
             phrase_graph=PhraseGraph(phrases, dependencies),
@@ -279,4 +299,30 @@ class UniversalLanguageAnalyzer:
             question_operator=question,
             relation_phrases=[relation.as_dict() for relation in relations],
             diagnostics=diagnostics,
+        )
+        envelope, acts = self.utterances.parse(
+            text,
+            conversation_id=conversation_id,
+            turn_index=turn_index,
+            speaker_role=speaker_role,
+            source_type=source_type,
+            utterance_id=utterance_id,
+            received_at=received_at,
+            tokens=tokens,
+        )
+        clauses, clause_relations = self.clauses.parse(
+            text,
+            tokens,
+            acts,
+            utterance_id=envelope.id,
+            speaker=speaker_role,
+            mentions=mentions,
+        )
+        analysis.utterance = envelope
+        analysis.dialogue_acts = acts
+        analysis.clauses = clauses
+        analysis.clause_relations = clause_relations
+        return self.interpretations.interpret(
+            analysis,
+            reference_candidates=reference_candidates,
         )

@@ -152,6 +152,167 @@ class HiveExportService:
                 "action_variants": action_variants,
                 "scene_concept_projections": scene_projections,
             }
+            conversation_id = str(hive_payload.get("conversation_id") or "")
+            utterances = [
+                self._json_row(row) for row in conn.execute(
+                    """SELECT * FROM utterances
+                       WHERE conversation_id=?
+                       ORDER BY turn_index,id""",
+                    (conversation_id,),
+                )
+            ] if conversation_id else []
+            utterance_ids = [item["id"] for item in utterances]
+            if utterance_ids:
+                placeholders = ",".join("?" for _ in utterance_ids)
+                dialogue_acts = [
+                    self._json_row(row) for row in conn.execute(
+                        f"""SELECT * FROM dialogue_acts
+                            WHERE utterance_id IN ({placeholders})
+                            ORDER BY utterance_id,token_start,id""",
+                        utterance_ids,
+                    )
+                ]
+                clauses = [
+                    self._json_row(row) for row in conn.execute(
+                        f"""SELECT * FROM clauses
+                            WHERE utterance_id IN ({placeholders})
+                            ORDER BY utterance_id,sentence_index,token_start""",
+                        utterance_ids,
+                    )
+                ]
+                clause_relations = [
+                    self._json_row(row) for row in conn.execute(
+                        f"""SELECT cr.* FROM clause_relations cr
+                            JOIN clauses c
+                              ON c.id=cr.source_clause_id
+                            WHERE c.utterance_id IN ({placeholders})
+                            ORDER BY c.utterance_id,cr.id""",
+                        utterance_ids,
+                    )
+                ]
+                interpretation_hypotheses = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT DISTINCT ih.*
+                           FROM interpretation_hypotheses ih
+                           WHERE EXISTS (
+                             SELECT 1
+                             FROM utterances u
+                             LEFT JOIN dialogue_acts da
+                               ON da.utterance_id=u.id
+                             LEFT JOIN clauses c
+                               ON c.utterance_id=u.id
+                             WHERE u.conversation_id=?
+                               AND (
+                                 ih.scope_id=u.id
+                                 OR ih.scope_id LIKE u.id || ':%'
+                                 OR ih.scope_id=da.id
+                                 OR ih.scope_id=c.id
+                                 OR ih.scope_id LIKE c.id || ':%'
+                               )
+                           )
+                           ORDER BY ih.scope_type,ih.scope_id,
+                                    ih.hypothesis_type,ih.id""",
+                        (conversation_id,),
+                    )
+                ]
+                interpretation_evidence = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT DISTINCT ie.*
+                           FROM interpretation_evidence ie
+                           JOIN interpretation_hypotheses ih
+                             ON ih.id=ie.target_hypothesis_id
+                           WHERE EXISTS (
+                             SELECT 1
+                             FROM utterances u
+                             LEFT JOIN dialogue_acts da
+                               ON da.utterance_id=u.id
+                             LEFT JOIN clauses c
+                               ON c.utterance_id=u.id
+                             WHERE u.conversation_id=?
+                               AND (
+                                 ih.scope_id=u.id
+                                 OR ih.scope_id LIKE u.id || ':%'
+                                 OR ih.scope_id=da.id
+                                 OR ih.scope_id=c.id
+                                 OR ih.scope_id LIKE c.id || ':%'
+                               )
+                           )
+                           ORDER BY ie.scope_type,ie.scope_id,
+                                    ie.independent_group,ie.id""",
+                        (conversation_id,),
+                    )
+                ]
+            else:
+                dialogue_acts = []
+                clauses = []
+                clause_relations = []
+                interpretation_hypotheses = []
+                interpretation_evidence = []
+            dialogue_state = conn.execute(
+                "SELECT * FROM dialogue_states WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchone() if conversation_id else None
+            payload["dialogue_v2_5"] = {
+                "interpretation_version": "dialogue-v2.5",
+                "utterances": utterances,
+                "dialogue_acts": dialogue_acts,
+                "clauses": clauses,
+                "clause_relations": clause_relations,
+                "interpretation_hypotheses": interpretation_hypotheses,
+                "interpretation_evidence": interpretation_evidence,
+                "state": (
+                    self._json_row(dialogue_state)
+                    if dialogue_state else None
+                ),
+                "speaker_commitments": [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT * FROM speaker_commitments
+                           WHERE conversation_id=?
+                           ORDER BY created_at,id""",
+                        (conversation_id,),
+                    )
+                ] if conversation_id else [],
+                "response_plans": [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT * FROM response_plans
+                           WHERE conversation_id=?
+                           ORDER BY created_at,id""",
+                        (conversation_id,),
+                    )
+                ] if conversation_id else [],
+                "derived_answers": [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT * FROM derived_answers
+                           WHERE conversation_id=?
+                           ORDER BY created_at,id""",
+                        (conversation_id,),
+                    )
+                ] if conversation_id else [],
+                "topics": [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT * FROM dialogue_topics
+                           WHERE conversation_id=?
+                           ORDER BY last_active_turn,id""",
+                        (conversation_id,),
+                    )
+                ] if conversation_id else [],
+                "pending_questions": [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT * FROM dialogue_pending_questions
+                           WHERE conversation_id=?
+                           ORDER BY created_at,id""",
+                        (conversation_id,),
+                    )
+                ] if conversation_id else [],
+                "knowledge_staging": [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT * FROM knowledge_staging
+                           WHERE conversation_id=?
+                           ORDER BY created_at,id""",
+                        (conversation_id,),
+                    )
+                ] if conversation_id else [],
+            }
             if detail != "compact":
                 payload["stats"] = {
                     "nodes": len(nodes),

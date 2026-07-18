@@ -105,7 +105,10 @@ class UniversalKnowledgeRebuilder:
 
     def _materialize_all(self, conn: Any) -> Dict[str, int]:
         processed = 0
-        for row in conn.execute("SELECT cloud_id FROM scenes ORDER BY cloud_id").fetchall():
+        for row in conn.execute(
+            """SELECT cloud_id FROM scenes
+               WHERE knowledge_status<>'RETRACTED' ORDER BY cloud_id"""
+        ).fetchall():
             self.pipeline.materialize_scene(conn, int(row["cloud_id"]))
             processed += 1
         return {

@@ -75,7 +75,9 @@ class TaxonomyResolver:
         marks = ",".join("?" for _ in relation_ids)
         rows = self.conn.execute(
             f"""SELECT DISTINCT source_scene_id FROM concept_relation_evidence
-                WHERE concept_relation_id IN ({marks}) AND source_scene_id IS NOT NULL
+                WHERE concept_relation_id IN ({marks})
+                  AND status<>'RETRACTED'
+                  AND source_scene_id IS NOT NULL
                 ORDER BY source_scene_id""",
             relation_ids,
         ).fetchall()

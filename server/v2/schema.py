@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 10
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -145,6 +146,154 @@ def _migrate_concept_relation_constraints(conn: sqlite3.Connection) -> None:
             ON concept_relations(subject_lexeme_cloud_id, relation_type, object_lexeme_cloud_id);
         """
     )
+
+
+def _migrate_query_role_hypothesis_constraints(conn: sqlite3.Connection) -> None:
+    if not _needs_constraint_migration(
+        conn,
+        "query_role_hypotheses",
+        "'entity_type'",
+    ):
+        return
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS query_role_hypotheses__v10;
+        CREATE TABLE query_role_hypotheses__v10 (
+            id TEXT PRIMARY KEY,
+            query_frame_id TEXT NOT NULL,
+            semantic_role TEXT NOT NULL CHECK(semantic_role IN
+                ('action','entity','entity_type','agent','patient','theme','object','experiencer','recipient','source',
+                 'destination','location','instrument','material','cause','result','purpose',
+                 'time','attribute','quantity','owner','possessed','manner')),
+            grammatical_slot TEXT,
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+            selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(query_frame_id) REFERENCES query_frames(id) ON DELETE CASCADE
+        );
+        INSERT INTO query_role_hypotheses__v10
+            SELECT id,query_frame_id,semantic_role,grammatical_slot,confidence,
+                   selected,evidence_json
+            FROM query_role_hypotheses;
+        DROP TABLE query_role_hypotheses;
+        ALTER TABLE query_role_hypotheses__v10 RENAME TO query_role_hypotheses;
+        """
+    )
+
+
+def _backfill_v25_scenes(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """SELECT s.cloud_id,s.sentence_text,s.canonical_text,s.parser_version,
+                  e.id AS event_id,e.predicate_lemma,e.predicate_surface,
+                  e.polarity,e.modality
+           FROM scenes s LEFT JOIN events e ON e.source_scene_id=s.cloud_id
+           WHERE s.source_interpretation_id IS NULL
+           ORDER BY s.cloud_id"""
+    ).fetchall()
+    for row in rows:
+        (
+            scene_id_raw,
+            sentence_text,
+            canonical_text,
+            parser_version,
+            event_id,
+            predicate_lemma,
+            predicate_surface,
+            polarity,
+            modality,
+        ) = row
+        scene_id = int(scene_id_raw)
+        utterance_id = f"utterance-backfill-scene-{scene_id}"
+        clause_id = f"clause-backfill-scene-{scene_id}"
+        hypothesis_id = f"interpretation-backfill-scene-{scene_id}"
+        evidence_id = f"evidence-backfill-scene-{scene_id}"
+        predicate_hypotheses = (
+            [{
+                "lemma": predicate_lemma,
+                "surface": predicate_surface,
+                "confidence": 0.82,
+                "selected": True,
+                "evidence": ["legacy_confirmed_event"],
+            }]
+            if predicate_lemma else []
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO utterances
+               (id,conversation_id,turn_index,speaker_role,raw_text,
+                normalized_text,received_at,language,source_type,
+                parser_version,interpretation_status,message_id)
+               VALUES(?,'',0,'source',?,?,CURRENT_TIMESTAMP,'ru',
+                      'legacy_scene',?,'STABLE',NULL)""",
+            (
+                utterance_id,
+                sentence_text,
+                canonical_text,
+                parser_version,
+            ),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO clauses
+               (id,utterance_id,sentence_index,parent_clause_id,token_start,
+                token_end,clause_type,relation_to_parent,
+                predicate_hypotheses_json,mode,actuality,evidence_status,
+                polarity,negation_scope_json,modality,completion_status,
+                temporal_anchor_json,speaker,quoted_speaker,surface,
+                evidence_json,alternatives_json,participants_json)
+               VALUES(?,?,0,NULL,0,0,'MAIN',NULL,?,'ASSERTION','ACTUAL',
+                      'OBSERVED',?,NULL,?,'UNKNOWN',NULL,'source',NULL,?,
+                      '[]','[]','[]')""",
+            (
+                clause_id,
+                utterance_id,
+                json.dumps(predicate_hypotheses, ensure_ascii=False),
+                str(polarity or "positive").upper(),
+                modality,
+                sentence_text,
+            ),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO interpretation_hypotheses
+               (id,scope_type,scope_id,hypothesis_type,value_json,status,
+                support_by_group_json,support,penalties_json,constraints_json,
+                unresolved_slots_json,stability_cycles,leader_margin,selected,
+                parser_version)
+               VALUES(?,'clause',?,'legacy_scene',?,'CONFIRMED',
+                      '{"source":0.82}',.82,'[]','[]','[]',2,.82,1,?)""",
+            (
+                hypothesis_id,
+                clause_id,
+                json.dumps(
+                    {
+                        "scene_id": scene_id,
+                        "event_id": event_id,
+                    },
+                    ensure_ascii=False,
+                ),
+                parser_version,
+            ),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO interpretation_evidence
+               (id,origin,target_hypothesis_id,value_json,support,penalty,
+                evidence_type,independent_group,scope_type,scope_id,
+                source_token_start,source_token_end,source_object_id,
+                parser_version)
+               VALUES(?,'schema_backfill',?,? ,.82,0,'legacy_confirmed_scene',
+                      'source','clause',?,NULL,NULL,?,?)""",
+            (
+                evidence_id,
+                hypothesis_id,
+                json.dumps({"scene_id": scene_id}),
+                clause_id,
+                str(scene_id),
+                parser_version,
+            ),
+        )
+        conn.execute(
+            """UPDATE scenes SET source_interpretation_id=?
+               WHERE cloud_id=? AND source_interpretation_id IS NULL""",
+            (hypothesis_id, scene_id),
+        )
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -794,7 +943,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             query_frame_id TEXT NOT NULL,
             semantic_role TEXT NOT NULL CHECK(semantic_role IN
-                ('agent','patient','theme','object','experiencer','recipient','source',
+                ('action','entity','entity_type','agent','patient','theme','object','experiencer','recipient','source',
                  'destination','location','instrument','material','cause','result','purpose',
                  'time','attribute','quantity','owner','possessed','manner')),
             grammatical_slot TEXT,
@@ -1023,6 +1172,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             source_role TEXT NOT NULL CHECK(source_role IN ('user', 'assistant')),
             source_text TEXT NOT NULL,
             roles_json TEXT NOT NULL DEFAULT '{}',
+            memory_class TEXT NOT NULL DEFAULT 'USER_ASSERTION',
+            source_type TEXT NOT NULL DEFAULT 'user_assertion',
+            knowledge_status TEXT NOT NULL DEFAULT 'OBSERVED',
+            independent_evidence INTEGER NOT NULL DEFAULT 1 CHECK(independent_evidence IN (0,1)),
+            eligible_for_fact_retrieval INTEGER NOT NULL DEFAULT 1 CHECK(eligible_for_fact_retrieval IN (0,1)),
+            derived_from_json TEXT NOT NULL DEFAULT '[]',
+            root_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            completion_status TEXT NOT NULL DEFAULT 'COMPLETE',
+            missing_supported_roles_json TEXT NOT NULL DEFAULT '[]',
             activation REAL NOT NULL DEFAULT 1 CHECK(activation BETWEEN 0 AND 1),
             retention REAL NOT NULL DEFAULT 1 CHECK(retention BETWEEN 0 AND 1),
             created_at TEXT NOT NULL,
@@ -1078,6 +1237,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _migrate_concept_relation_constraints(conn)
+    _migrate_query_role_hypothesis_constraints(conn)
     _add_column_if_missing(conn, "concept_relation_evidence", "concept_relation_id", "TEXT")
     _add_column_if_missing(conn, "concept_relation_evidence", "source_training_observation_id", "INTEGER")
     _add_column_if_missing(conn, "concept_relation_evidence", "evidence_type", "TEXT")
@@ -1250,6 +1410,452 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS utterances (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL DEFAULT '',
+            turn_index INTEGER NOT NULL DEFAULT 0,
+            speaker_role TEXT NOT NULL,
+            raw_text TEXT NOT NULL,
+            normalized_text TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            language TEXT NOT NULL DEFAULT 'ru',
+            source_type TEXT NOT NULL DEFAULT 'dialogue',
+            parser_version TEXT NOT NULL,
+            interpretation_status TEXT NOT NULL,
+            message_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS utterance_conversation_idx
+            ON utterances(conversation_id, turn_index);
+        CREATE INDEX IF NOT EXISTS utterance_parser_status_idx
+            ON utterances(parser_version, interpretation_status);
+        CREATE UNIQUE INDEX IF NOT EXISTS utterance_message_idx
+            ON utterances(message_id) WHERE message_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS dialogue_acts (
+            id TEXT PRIMARY KEY,
+            utterance_id TEXT NOT NULL,
+            act_type TEXT NOT NULL,
+            token_start INTEGER NOT NULL,
+            token_end INTEGER NOT NULL,
+            target_act_id TEXT,
+            addressee TEXT,
+            confidence REAL NOT NULL DEFAULT 0.5,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            alternatives_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY(utterance_id) REFERENCES utterances(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_act_id) REFERENCES dialogue_acts(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS dialogue_act_utterance_idx
+            ON dialogue_acts(utterance_id, token_start);
+        CREATE INDEX IF NOT EXISTS dialogue_act_type_idx
+            ON dialogue_acts(act_type, utterance_id);
+
+        CREATE TABLE IF NOT EXISTS clauses (
+            id TEXT PRIMARY KEY,
+            utterance_id TEXT NOT NULL,
+            sentence_index INTEGER NOT NULL,
+            parent_clause_id TEXT,
+            token_start INTEGER NOT NULL,
+            token_end INTEGER NOT NULL,
+            clause_type TEXT NOT NULL,
+            relation_to_parent TEXT,
+            predicate_hypotheses_json TEXT NOT NULL DEFAULT '[]',
+            mode TEXT NOT NULL,
+            actuality TEXT NOT NULL,
+            evidence_status TEXT NOT NULL,
+            polarity TEXT NOT NULL,
+            negation_scope_json TEXT,
+            modality TEXT,
+            completion_status TEXT NOT NULL,
+            temporal_anchor_json TEXT,
+            speaker TEXT NOT NULL,
+            quoted_speaker TEXT,
+            surface TEXT NOT NULL DEFAULT '',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            alternatives_json TEXT NOT NULL DEFAULT '[]',
+            participants_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY(utterance_id) REFERENCES utterances(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_clause_id) REFERENCES clauses(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS clause_utterance_idx
+            ON clauses(utterance_id, sentence_index, token_start);
+        CREATE INDEX IF NOT EXISTS clause_mode_actuality_idx
+            ON clauses(mode, actuality, evidence_status);
+
+        CREATE TABLE IF NOT EXISTS clause_relations (
+            id TEXT PRIMARY KEY,
+            source_clause_id TEXT NOT NULL,
+            target_clause_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0.5,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY(source_clause_id) REFERENCES clauses(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_clause_id) REFERENCES clauses(id) ON DELETE CASCADE,
+            UNIQUE(source_clause_id, target_clause_id, relation_type)
+        );
+        CREATE INDEX IF NOT EXISTS clause_relation_target_idx
+            ON clause_relations(target_clause_id, relation_type);
+
+        CREATE TABLE IF NOT EXISTS interpretation_hypotheses (
+            id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            hypothesis_type TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            support_by_group_json TEXT NOT NULL DEFAULT '{}',
+            support REAL NOT NULL DEFAULT 0,
+            penalties_json TEXT NOT NULL DEFAULT '[]',
+            constraints_json TEXT NOT NULL DEFAULT '[]',
+            unresolved_slots_json TEXT NOT NULL DEFAULT '[]',
+            stability_cycles INTEGER NOT NULL DEFAULT 0,
+            leader_margin REAL NOT NULL DEFAULT 0,
+            selected INTEGER NOT NULL DEFAULT 0,
+            parser_version TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS interpretation_hypothesis_scope_idx
+            ON interpretation_hypotheses(scope_type, scope_id, hypothesis_type);
+        CREATE INDEX IF NOT EXISTS interpretation_hypothesis_status_idx
+            ON interpretation_hypotheses(status, selected, parser_version);
+
+        CREATE TABLE IF NOT EXISTS interpretation_evidence (
+            id TEXT PRIMARY KEY,
+            origin TEXT NOT NULL,
+            target_hypothesis_id TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            support REAL NOT NULL DEFAULT 0,
+            penalty REAL NOT NULL DEFAULT 0,
+            evidence_type TEXT NOT NULL,
+            independent_group TEXT NOT NULL,
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            source_token_start INTEGER,
+            source_token_end INTEGER,
+            source_object_id TEXT,
+            parser_version TEXT NOT NULL,
+            FOREIGN KEY(target_hypothesis_id)
+                REFERENCES interpretation_hypotheses(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS interpretation_evidence_target_idx
+            ON interpretation_evidence(target_hypothesis_id, independent_group);
+        CREATE INDEX IF NOT EXISTS interpretation_evidence_source_idx
+            ON interpretation_evidence(source_object_id, parser_version);
+        CREATE UNIQUE INDEX IF NOT EXISTS interpretation_evidence_dedupe_idx
+            ON interpretation_evidence(
+                origin,scope_type,scope_id,target_hypothesis_id,evidence_type,
+                COALESCE(source_token_start,-1),
+                COALESCE(source_token_end,-1),parser_version
+            );
+
+        CREATE TABLE IF NOT EXISTS dialogue_states (
+            conversation_id TEXT PRIMARY KEY,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS dialogue_topics (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            topic_json TEXT NOT NULL DEFAULT '{}',
+            last_active_turn INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS dialogue_topic_conversation_idx
+            ON dialogue_topics(conversation_id, status, last_active_turn);
+
+        CREATE TABLE IF NOT EXISTS dialogue_focus_items (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            focus_rank INTEGER NOT NULL,
+            role TEXT,
+            value_json TEXT NOT NULL DEFAULT '{}',
+            activation REAL NOT NULL DEFAULT 0,
+            inertia REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS dialogue_focus_conversation_idx
+            ON dialogue_focus_items(conversation_id, status, focus_rank);
+
+        CREATE TABLE IF NOT EXISTS dialogue_pending_questions (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            query_frame_id TEXT,
+            requested_role TEXT,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS pending_question_conversation_idx
+            ON dialogue_pending_questions(conversation_id, status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS speaker_commitments (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            speaker_role TEXT NOT NULL,
+            source_utterance_id TEXT NOT NULL,
+            source_clause_id TEXT NOT NULL,
+            interpretation_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            supersedes_commitment_id TEXT,
+            content_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(source_utterance_id)
+                REFERENCES utterances(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_clause_id)
+                REFERENCES clauses(id) ON DELETE CASCADE,
+            FOREIGN KEY(supersedes_commitment_id)
+                REFERENCES speaker_commitments(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS speaker_commitment_conversation_idx
+            ON speaker_commitments(conversation_id, speaker_role, status);
+
+        CREATE TABLE IF NOT EXISTS knowledge_staging (
+            id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            source_key TEXT,
+            raw_text TEXT NOT NULL,
+            normalized_text TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            independent_source_key TEXT NOT NULL,
+            conversation_id TEXT,
+            speaker_role TEXT,
+            parser_version TEXT NOT NULL,
+            interpretation_status TEXT NOT NULL,
+            interpretation_json TEXT NOT NULL DEFAULT '{}',
+            validation_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'STAGED',
+            supersedes_staging_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(supersedes_staging_id)
+                REFERENCES knowledge_staging(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS knowledge_staging_status_idx
+            ON knowledge_staging(status, parser_version, created_at);
+        CREATE INDEX IF NOT EXISTS knowledge_staging_source_idx
+            ON knowledge_staging(source_hash, independent_source_key);
+
+        CREATE TABLE IF NOT EXISTS knowledge_admission_decisions (
+            id TEXT PRIMARY KEY,
+            staging_id TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            structural_valid INTEGER NOT NULL DEFAULT 0,
+            factuality_valid INTEGER NOT NULL DEFAULT 0,
+            source_valid INTEGER NOT NULL DEFAULT 0,
+            independent_source_count INTEGER NOT NULL DEFAULT 0,
+            reasons_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            materialized_objects_json TEXT NOT NULL DEFAULT '[]',
+            parser_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(staging_id)
+                REFERENCES knowledge_staging(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS knowledge_admission_staging_idx
+            ON knowledge_admission_decisions(staging_id, decision);
+
+        CREATE TABLE IF NOT EXISTS knowledge_retractions (
+            id TEXT PRIMARY KEY,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            previous_status TEXT,
+            new_status TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS knowledge_retraction_target_idx
+            ON knowledge_retractions(target_type, target_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS knowledge_dependencies (
+            id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            dependent_type TEXT NOT NULL,
+            dependent_id TEXT NOT NULL,
+            dependency_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_type, source_id, dependent_type, dependent_id,
+                   dependency_type)
+        );
+        CREATE INDEX IF NOT EXISTS knowledge_dependency_source_idx
+            ON knowledge_dependencies(source_type, source_id, status);
+        CREATE INDEX IF NOT EXISTS knowledge_dependency_target_idx
+            ON knowledge_dependencies(dependent_type, dependent_id, status);
+
+        CREATE TABLE IF NOT EXISTS language_patterns (
+            id TEXT PRIMARY KEY,
+            pattern_type TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OBSERVED',
+            observation_count INTEGER NOT NULL DEFAULT 1,
+            independent_source_count INTEGER NOT NULL DEFAULT 1,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            parser_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(pattern_type, signature, parser_version)
+        );
+        CREATE INDEX IF NOT EXISTS language_pattern_status_idx
+            ON language_patterns(status, pattern_type, observation_count);
+
+        CREATE TABLE IF NOT EXISTS response_plans (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT,
+            source_utterance_id TEXT,
+            response_type TEXT NOT NULL,
+            target_act_id TEXT,
+            focus_role TEXT,
+            plan_json TEXT NOT NULL,
+            reverse_validation_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'PLANNED',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS response_plan_conversation_idx
+            ON response_plans(conversation_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS derived_answers (
+            id TEXT PRIMARY KEY,
+            response_plan_id TEXT NOT NULL,
+            conversation_id TEXT,
+            surface_text TEXT NOT NULL,
+            full_surface_text TEXT,
+            source_evidence_json TEXT NOT NULL DEFAULT '[]',
+            independent_source_count INTEGER NOT NULL DEFAULT 0,
+            attribution_json TEXT,
+            status TEXT NOT NULL DEFAULT 'DERIVED_ANSWER',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(response_plan_id)
+                REFERENCES response_plans(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_batches (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            preview_json TEXT NOT NULL DEFAULT '{}',
+            metrics_before_json TEXT NOT NULL DEFAULT '{}',
+            metrics_after_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS clause_event_projections (
+            id TEXT PRIMARY KEY,
+            source_clause_id TEXT NOT NULL,
+            source_scene_id INTEGER,
+            confirmed_event_id TEXT,
+            event_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'PROVISIONAL',
+            parser_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(source_clause_id) REFERENCES clauses(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_scene_id) REFERENCES scenes(cloud_id) ON DELETE SET NULL,
+            FOREIGN KEY(confirmed_event_id) REFERENCES events(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS clause_event_projection_clause_idx
+            ON clause_event_projections(source_clause_id, status);
+        """
+    )
+    _add_column_if_missing(
+        conn,
+        "scenes",
+        "source_interpretation_id",
+        "TEXT",
+    )
+    _add_column_if_missing(
+        conn,
+        "scenes",
+        "admission_decision_id",
+        "TEXT",
+    )
+    _add_column_if_missing(
+        conn,
+        "scenes",
+        "knowledge_status",
+        "TEXT NOT NULL DEFAULT 'LEGACY_CONFIRMED'",
+    )
+    _add_column_if_missing(
+        conn,
+        "events",
+        "source_clause_id",
+        "TEXT",
+    )
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "memory_class", "TEXT NOT NULL DEFAULT 'USER_ASSERTION'")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "source_type", "TEXT NOT NULL DEFAULT 'user_assertion'")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "knowledge_status", "TEXT NOT NULL DEFAULT 'OBSERVED'")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "independent_evidence", "INTEGER NOT NULL DEFAULT 1")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "eligible_for_fact_retrieval", "INTEGER NOT NULL DEFAULT 1")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "derived_from_json", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "root_evidence_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "provenance_json", "TEXT NOT NULL DEFAULT '{}'")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "completion_status", "TEXT NOT NULL DEFAULT 'COMPLETE'")
+    _add_column_if_missing(conn, "hive_dialogue_scenes", "missing_supported_roles_json", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(
+        conn,
+        "events",
+        "actuality",
+        "TEXT NOT NULL DEFAULT 'ACTUAL'",
+    )
+    _add_column_if_missing(
+        conn,
+        "events",
+        "evidence_status",
+        "TEXT NOT NULL DEFAULT 'OBSERVED'",
+    )
+    _add_column_if_missing(
+        conn,
+        "events",
+        "negation_scope_json",
+        "TEXT",
+    )
+    _add_column_if_missing(
+        conn,
+        "events",
+        "completion_status",
+        "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+    )
+    _add_column_if_missing(
+        conn,
+        "events",
+        "temporal_anchor_json",
+        "TEXT",
+    )
+    _add_column_if_missing(
+        conn,
+        "events",
+        "attribution_json",
+        "TEXT",
+    )
+    _add_column_if_missing(
+        conn,
+        "events",
+        "admission_decision_id",
+        "TEXT",
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS scene_interpretation_idx "
+        "ON scenes(knowledge_status, source_interpretation_id, "
+        "admission_decision_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS event_clause_idx "
+        "ON events(source_clause_id, actuality, evidence_status)"
+    )
+    _backfill_v25_scenes(conn)
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),

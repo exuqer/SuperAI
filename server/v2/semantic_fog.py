@@ -24,6 +24,38 @@ class SemanticFogService:
 
     def backfill(self, conn: Any, global_space_id: int) -> Dict[str, int]:
         """Idempotently rebuild evidence and affected fog projections."""
+        stale_retracted_evidence = conn.execute(
+            """SELECT 1
+               FROM semantic_evidence evidence
+               LEFT JOIN scenes source_scene
+                 ON source_scene.cloud_id=evidence.source_scene_cloud_id
+               LEFT JOIN scenes compared_scene
+                 ON compared_scene.cloud_id=CAST(
+                    json_extract(
+                        evidence.evidence_json,
+                        '$.compared_scene_cloud_id'
+                    ) AS INTEGER
+                 )
+               WHERE source_scene.knowledge_status='RETRACTED'
+                  OR compared_scene.knowledge_status='RETRACTED'
+               LIMIT 1"""
+        ).fetchone()
+        if stale_retracted_evidence:
+            concept_ids = [
+                int(row["concept_cloud_id"])
+                for row in conn.execute(
+                    "SELECT concept_cloud_id FROM concept_fog_registry"
+                )
+            ]
+            if concept_ids:
+                marks = ",".join("?" for _ in concept_ids)
+                conn.execute(
+                    f"DELETE FROM clouds WHERE id IN ({marks})",
+                    concept_ids,
+                )
+            conn.execute("DELETE FROM semantic_evidence")
+            conn.execute("DELETE FROM semantic_backfill_state")
+
         versions = conn.execute(
             "SELECT DISTINCT semantic_extractor_version FROM semantic_backfill_state"
         ).fetchall()
@@ -42,7 +74,10 @@ class SemanticFogService:
             marks = ",".join("?" for _ in concept_ids)
             conn.execute(f"DELETE FROM clouds WHERE id IN ({marks})", concept_ids)
 
-        scenes = conn.execute("SELECT cloud_id FROM scenes ORDER BY cloud_id").fetchall()
+        scenes = conn.execute(
+            """SELECT cloud_id FROM scenes
+               WHERE knowledge_status<>'RETRACTED' ORDER BY cloud_id"""
+        ).fetchall()
         affected: set[Tuple[int, int]] = set()
         for scene in scenes:
             affected.update(self._evidence_for_scene(conn, int(scene["cloud_id"])))
@@ -169,6 +204,10 @@ class SemanticFogService:
             """SELECT sc.scene_cloud_id, sc.grammatical_role, sc.lexeme_cloud_id
             FROM scene_components sc
             WHERE sc.scene_cloud_id < ? AND sc.lexeme_cloud_id IS NOT NULL
+              AND sc.scene_cloud_id IN (
+                SELECT cloud_id FROM scenes
+                WHERE knowledge_status<>'RETRACTED'
+              )
               AND sc.scene_cloud_id IN (
                 SELECT scene_cloud_id FROM scene_components
                 WHERE grammatical_role='predicate' AND lexeme_cloud_id=?

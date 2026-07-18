@@ -11,6 +11,37 @@ class TrainRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
 
+class StageRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    source_type: str = "training"
+    source_key: str = ""
+    conversation_id: str = ""
+    speaker_role: str = ""
+
+
+class CommitRequest(BaseModel):
+    staging_id: str = Field(..., min_length=1)
+    manual_validation: bool = False
+
+
+class RetractionRequest(BaseModel):
+    staging_id: str = Field(..., min_length=1)
+    reason: str = ""
+
+
+class ReprocessRequest(BaseModel):
+    staging_id: str = Field(..., min_length=1)
+
+
+class BatchPreviewRequest(BaseModel):
+    sources: list[dict] = Field(..., min_length=1)
+    config: dict = Field(default_factory=dict)
+
+
+class BatchReferenceRequest(BaseModel):
+    batch_id: str = Field(..., min_length=1)
+
+
 class TrainResponse(BaseModel):
     """Training response."""
     training_run_id: str

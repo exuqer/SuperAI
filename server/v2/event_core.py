@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .language import (
     EntityMentionParser,
@@ -641,8 +641,14 @@ class UniversalEventPipeline:
                FROM action_variants av
                JOIN action_concepts ac ON ac.id=av.action_concept_id
                WHERE av.lemma=? AND av.source_type<>'manual_seed'
+                 AND av.weight>0
+                 AND ac.status IN ('PROBABLE','STABLE')
+                 AND EXISTS (
+                    SELECT 1 FROM scenes
+                    WHERE cloud_id=? AND knowledge_status<>'RETRACTED'
+                 )
                ORDER BY av.weight DESC LIMIT 1""",
-            (predicate_lemma,),
+            (predicate_lemma, scene_id),
         ).fetchone()
         if not variant:
             return None
@@ -688,7 +694,25 @@ class UniversalEventPipeline:
             "confidence": float(variant["weight"]),
         }
 
-    def materialize_scene(self, conn: Any, scene_id: int) -> Dict[str, Any]:
+    def materialize_scene(
+        self,
+        conn: Any,
+        scene_id: int,
+        clause_interpretation: Optional[Mapping[str, Any]] = None,
+        admission_decision_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        source_status = conn.execute(
+            "SELECT knowledge_status FROM scenes WHERE cloud_id=?",
+            (scene_id,),
+        ).fetchone()
+        if (
+            not source_status
+            or str(source_status["knowledge_status"]) == "RETRACTED"
+        ):
+            return {
+                "scene_cloud_id": scene_id,
+                "status": "SKIPPED_RETRACTED",
+            }
         source_text, tokens = self._scene_tokens(conn, scene_id)
         previous_event = conn.execute(
             "SELECT construction_id FROM events WHERE source_scene_id=?",
@@ -921,19 +945,45 @@ class UniversalEventPipeline:
         )
         event_id = stable_id("event", scene_id)
         now = utcnow()
+        clause = dict(clause_interpretation or {})
+        event_polarity = str(
+            clause.get("polarity")
+            or (
+                "NEGATIVE"
+                if any(token.normalized == "не" for token in tokens)
+                else "POSITIVE"
+            )
+        ).casefold()
+        event_modality = str(clause.get("modality") or "fact").casefold()
         conn.execute(
             """INSERT INTO events
                (id,source_scene_id,predicate_lemma,predicate_surface,
                 predicate_lexeme_cloud_id,construction_id,polarity,modality,
-                confidence,parser_version,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?, 'fact',.82,?,?,?)
+                confidence,parser_version,created_at,updated_at,source_clause_id,
+                actuality,evidence_status,negation_scope_json,
+                completion_status,temporal_anchor_json,attribution_json,
+                admission_decision_id)
+               VALUES(?,?,?,?,?,?,?,?,.82,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(source_scene_id) DO UPDATE SET
                  predicate_lemma=excluded.predicate_lemma,
                  predicate_surface=excluded.predicate_surface,
                  predicate_lexeme_cloud_id=excluded.predicate_lexeme_cloud_id,
                  construction_id=excluded.construction_id,
-                 polarity=excluded.polarity,confidence=excluded.confidence,
-                 parser_version=excluded.parser_version,updated_at=excluded.updated_at""",
+                 polarity=excluded.polarity,modality=excluded.modality,
+                 confidence=excluded.confidence,
+                 parser_version=excluded.parser_version,
+                 source_clause_id=COALESCE(
+                   excluded.source_clause_id,events.source_clause_id),
+                 actuality=excluded.actuality,
+                 evidence_status=excluded.evidence_status,
+                 negation_scope_json=excluded.negation_scope_json,
+                 completion_status=excluded.completion_status,
+                 temporal_anchor_json=excluded.temporal_anchor_json,
+                 attribution_json=excluded.attribution_json,
+                 admission_decision_id=COALESCE(
+                   excluded.admission_decision_id,
+                   events.admission_decision_id),
+                 updated_at=excluded.updated_at""",
             (
                 event_id,
                 scene_id,
@@ -941,10 +991,24 @@ class UniversalEventPipeline:
                 predicate.surface,
                 predicate.lexeme_cloud_id,
                 construction["id"],
-                "negative" if any(token.normalized == "не" for token in tokens) else "positive",
+                event_polarity,
+                event_modality,
                 PARSER_VERSION,
                 now,
                 now,
+                clause.get("id"),
+                clause.get("actuality") or "ACTUAL",
+                clause.get("evidence_status") or "OBSERVED",
+                encode(clause.get("negation_scope"))
+                if clause.get("negation_scope") else None,
+                clause.get("completion_status") or "UNKNOWN",
+                encode(clause.get("temporal_anchor"))
+                if clause.get("temporal_anchor") else None,
+                encode({
+                    "speaker": clause.get("speaker"),
+                    "quoted_speaker": clause.get("quoted_speaker"),
+                }) if clause else None,
+                admission_decision_id,
             ),
         )
         stored_event = conn.execute(
@@ -1350,8 +1414,29 @@ class UniversalEventPipeline:
                 },
                 "participants": participants,
                 "modifiers": modifiers,
-                "polarity": "negative" if any(token.normalized == "не" for token in tokens) else "positive",
-                "modality": "fact",
+                "source_clause_id": clause.get("id"),
+                "polarity": event_polarity,
+                "modality": event_modality,
+                "actuality": clause.get("actuality") or "ACTUAL",
+                "evidence_status": (
+                    clause.get("evidence_status") or "OBSERVED"
+                ),
+                "negation_scope": deepcopy(
+                    clause.get("negation_scope")
+                ),
+                "completion_status": (
+                    clause.get("completion_status") or "UNKNOWN"
+                ),
+                "temporal_anchor": deepcopy(
+                    clause.get("temporal_anchor")
+                ),
+                "attribution": (
+                    {
+                        "speaker": clause.get("speaker"),
+                        "quoted_speaker": clause.get("quoted_speaker"),
+                    }
+                    if clause else None
+                ),
                 "construction_id": construction["id"],
             },
             "entity_mentions": mention_rows,
@@ -1422,6 +1507,102 @@ class UniversalEventPipeline:
             "observation_type": observation_type,
             "morphological_evidence": morphological_links,
         }
+
+    def materialize_clause_events(
+        self,
+        conn: Any,
+        clauses: Sequence[Mapping[str, Any]],
+        *,
+        scene_id: Optional[int] = None,
+        admission_decision_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        projections: List[Dict[str, Any]] = []
+        confirmed_event_id: Optional[str] = None
+        confirmed_clause_id: Optional[str] = None
+        if scene_id is not None and clauses:
+            factual = next(
+                (
+                    clause for clause in clauses
+                    if clause.get("actuality") == "ACTUAL"
+                    and clause.get("mode") in {
+                        "ASSERTION",
+                        "DEFINITION",
+                        "REPORTED_SPEECH",
+                    }
+                ),
+                None,
+            )
+            if factual:
+                confirmed_clause_id = str(factual.get("id") or "") or None
+                materialized = self.materialize_scene(
+                    conn,
+                    scene_id,
+                    factual,
+                    admission_decision_id,
+                )
+                confirmed_event_id = str(
+                    materialized.get("event", {}).get("id") or ""
+                ) or None
+        now = utcnow()
+        for clause in clauses:
+            predicates = clause.get("predicate_hypotheses") or []
+            selected = next(
+                (item for item in predicates if item.get("selected")),
+                predicates[0] if predicates else {},
+            )
+            projection = {
+                "id": stable_id(
+                    "clause-event",
+                    clause.get("id"),
+                    selected.get("lemma"),
+                ),
+                "source_clause_id": clause.get("id"),
+                "source_scene_id": scene_id,
+                "predicate": deepcopy(selected),
+                "participants": deepcopy(clause.get("participants") or []),
+                "mode": clause.get("mode"),
+                "actuality": clause.get("actuality"),
+                "evidence_status": clause.get("evidence_status"),
+                "polarity": clause.get("polarity"),
+                "negation_scope": deepcopy(clause.get("negation_scope")),
+                "modality": clause.get("modality"),
+                "completion_status": clause.get("completion_status"),
+                "temporal_anchor": deepcopy(clause.get("temporal_anchor")),
+                "attribution": {
+                    "speaker": clause.get("speaker"),
+                    "quoted_speaker": clause.get("quoted_speaker"),
+                },
+                "confirmed_event_id": (
+                    confirmed_event_id
+                    if clause.get("id") == confirmed_clause_id
+                    else None
+                ),
+                "status": (
+                    "CONFIRMED"
+                    if clause.get("id") == confirmed_clause_id
+                    and confirmed_event_id
+                    else "PROVISIONAL"
+                ),
+            }
+            conn.execute(
+                """INSERT OR REPLACE INTO clause_event_projections
+                   (id,source_clause_id,source_scene_id,confirmed_event_id,
+                    event_json,status,parser_version,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    projection["id"],
+                    projection["source_clause_id"],
+                    scene_id,
+                    projection["confirmed_event_id"],
+                    encode(projection),
+                    projection["status"],
+                    PARSER_VERSION,
+                    now,
+                    now,
+                ),
+            )
+            projections.append(projection)
+        return projections
 
     @staticmethod
     def load_event(conn: Any, scene_id: int) -> Optional[Dict[str, Any]]:
@@ -1533,8 +1714,16 @@ class UniversalEventPipeline:
             },
             "participants": participants,
             "modifiers": modifiers,
+            "source_clause_id": event["source_clause_id"],
             "polarity": event["polarity"],
             "modality": event["modality"],
+            "actuality": event["actuality"],
+            "evidence_status": event["evidence_status"],
+            "negation_scope": decode(event["negation_scope_json"], None),
+            "completion_status": event["completion_status"],
+            "temporal_anchor": decode(event["temporal_anchor_json"], None),
+            "attribution": decode(event["attribution_json"], None),
+            "admission_decision_id": event["admission_decision_id"],
             "confidence": float(event["confidence"]),
             "construction_id": event["construction_id"],
             "parser_version": event["parser_version"],
