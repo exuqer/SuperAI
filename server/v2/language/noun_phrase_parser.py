@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Collection, Dict, List, Optional, Sequence
 
 from .models import ParsedToken
+from .diagnostics import SENTENCE_BOUNDARY_CROSSING
 from .relation_phrase_parser import RelationPhrase, RelationPhraseParser
 
 
@@ -28,11 +29,12 @@ class MentionDraft:
     type_token: Optional[int] = None
     owner_token: Optional[int] = None
     relation_type: Optional[str] = None
-    relation_function: Optional[str] = None
+    relation_signature: Optional[str] = None
     modifier_token_indices: List[int] = field(default_factory=list)
     owner_modifier_token_indices: List[int] = field(default_factory=list)
     confidence: float = .82
     evidence: List[str] = field(default_factory=list)
+    sentence_indices: List[int] = field(default_factory=list)
 
     @property
     def mention_type(self) -> str:
@@ -52,6 +54,7 @@ class MentionDraft:
             "token_start": self.start,
             "token_end": self.end,
             "token_indices": list(self.token_indices),
+            "sentence_indices": list(self.sentence_indices),
             "mention_type": self.mention_type,
             "surface": self.surface,
             "normalized_surface": self.normalized_surface,
@@ -91,7 +94,7 @@ class MentionDraft:
             ),
             "preposition": self.preposition,
             "relation_type": self.relation_type,
-            "relation_function": self.relation_function,
+            "relation_signature": self.relation_signature,
             "grammatical_features": dict(self.features),
             "confidence": self.confidence,
             "evidence": list(self.evidence),
@@ -111,6 +114,46 @@ class EntityMentionParser:
         "через", "под", "над", "между", "около", "возле", "рядом", "после",
         "до", "перед", "по", "о", "об",
     }
+
+    def __init__(self) -> None:
+        # The analyzer copies these into its public diagnostic stream after
+        # every parse.  They make a rejected cross-sentence attachment
+        # observable without ever materializing the damaged mention.
+        self.last_diagnostics: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _sentence_index(token: ParsedToken) -> int:
+        return int(token.features.get("sentence_index", 0))
+
+    def _same_sentence(
+        self,
+        tokens: Sequence[ParsedToken],
+        left_index: int,
+        right_index: int,
+    ) -> bool:
+        return self._sentence_index(tokens[left_index]) == self._sentence_index(
+            tokens[right_index]
+        )
+
+    def _boundary_diagnostic(
+        self,
+        tokens: Sequence[ParsedToken],
+        left_index: int,
+        right_index: int,
+        construction: str,
+    ) -> None:
+        left_sentence = self._sentence_index(tokens[left_index])
+        right_sentence = self._sentence_index(tokens[right_index])
+        event = {
+            "code": SENTENCE_BOUNDARY_CROSSING,
+            "construction": construction,
+            "token_start": min(left_index, right_index),
+            "token_end": max(left_index, right_index),
+            "sentence_indices": [left_sentence, right_sentence],
+            "resolution": "split_and_rebuild_mentions",
+        }
+        if event not in self.last_diagnostics:
+            self.last_diagnostics.append(event)
 
     @staticmethod
     def _agrees(
@@ -146,6 +189,12 @@ class EntityMentionParser:
         cursor = head_index - 1
         while cursor >= 0 and cursor not in consumed:
             token = tokens[cursor]
+            if not self._same_sentence(tokens, cursor, head_index):
+                if token.pos in ADJECTIVE_POS:
+                    self._boundary_diagnostic(
+                        tokens, cursor, head_index, "left_modifier"
+                    )
+                break
             if (
                 token.pos in ADJECTIVE_POS
                 and self._agrees(token, tokens[head_index])
@@ -169,8 +218,22 @@ class EntityMentionParser:
             and cursor not in consumed
             and tokens[cursor].pos in ADJECTIVE_POS
         ):
+            if not self._same_sentence(tokens, head_index, cursor):
+                self._boundary_diagnostic(
+                    tokens, head_index, cursor, "genitive_modifier"
+                )
+                return [], None
             modifiers.append(cursor)
             cursor += 1
+        if (
+            cursor < len(tokens)
+            and not self._same_sentence(tokens, head_index, cursor)
+        ):
+            if tokens[cursor].pos in NOUN_POS:
+                self._boundary_diagnostic(
+                    tokens, head_index, cursor, "genitive_tail"
+                )
+            return [], None
         if (
             cursor < len(tokens)
             and cursor not in consumed
@@ -192,6 +255,7 @@ class EntityMentionParser:
         *,
         excluded_indices: Collection[int] = (),
     ) -> List[MentionDraft]:
+        self.last_diagnostics = []
         mentions: List[MentionDraft] = []
         # Operators that open an unfilled semantic slot are not entity
         # mentions.  They are passed in by the language pipeline rather than
@@ -237,7 +301,13 @@ class EntityMentionParser:
                         or following.grammatical_case == token.grammatical_case
                     )
                 )
-                if is_proper_apposition:
+                if is_proper_apposition and not self._same_sentence(
+                    tokens, token.index, following.index
+                ):
+                    self._boundary_diagnostic(
+                        tokens, token.index, following.index, "apposition"
+                    )
+                elif is_proper_apposition:
                     end = following.index
                     head = following.index
                     type_token = token.index
@@ -262,19 +332,30 @@ class EntityMentionParser:
                 else head_token
             )
             attribute_indices = list(modifiers)
-            relation = relation_parser.governing(relation_phrases, start)
+            sentence_index = self._sentence_index(tokens[start])
+            relation = relation_parser.governing(
+                relation_phrases,
+                start,
+                sentence_index=sentence_index,
+            )
             preposition = ""
             relation_type = None
-            relation_function = None
+            relation_signature = None
             if relation:
                 preposition = relation.surface
                 relation_type = relation.relation_type
-                relation_function = relation.grammatical_function
+                relation_signature = relation.structural_signature
                 evidence.append("compound_relation_operator")
             else:
                 cursor = start - 1
                 while cursor >= 0 and start - cursor <= 3:
                     candidate = tokens[cursor]
+                    if not self._same_sentence(tokens, cursor, start):
+                        if candidate.normalized in self.prepositions:
+                            self._boundary_diagnostic(
+                                tokens, cursor, start, "preposition"
+                            )
+                        break
                     if candidate.normalized in self.prepositions:
                         preposition = candidate.normalized
                         break
@@ -295,11 +376,12 @@ class EntityMentionParser:
                 type_token=type_token,
                 owner_token=owner_token,
                 relation_type=relation_type,
-                relation_function=relation_function,
+                relation_signature=relation_signature,
                 modifier_token_indices=attribute_indices,
                 owner_modifier_token_indices=owner_modifier_indices,
                 confidence=.96 if type_token is not None else .88 if modifiers else .82,
                 evidence=evidence,
+                sentence_indices=[sentence_index],
             ))
             consumed.update(indices)
         return mentions

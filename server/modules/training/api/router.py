@@ -30,7 +30,12 @@ async def train(
     request: TrainRequest,
     service: TrainingService = Depends(get_training_service),
 ) -> dict[str, Any]:
-    return service.train(request.text)
+    return service.pipeline.train(
+        request.text,
+        source_type=request.source_type,
+        independent_key=request.independent_key,
+        domain_key=request.domain_key,
+    )
 
 
 @router.post("/stage")
@@ -41,9 +46,8 @@ async def stage(
     return service.stage(
         request.text,
         source_type=request.source_type,
-        source_key=request.source_key,
-        conversation_id=request.conversation_id,
-        speaker_role=request.speaker_role,
+        independent_key=request.independent_key,
+        domain_key=request.domain_key,
     )
 
 
@@ -54,7 +58,7 @@ async def commit(
 ) -> dict[str, Any]:
     try:
         return service.commit(
-            request.staging_id,
+            request.source_id,
             manual_validation=request.manual_validation,
         )
     except KeyError as error:
@@ -69,7 +73,7 @@ async def retract(
     service: TrainingService = Depends(get_training_service),
 ) -> dict[str, Any]:
     try:
-        return service.retract(request.staging_id, request.reason)
+        return service.retract(request.source_id, request.reason)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="staging item not found") from error
 
@@ -80,7 +84,7 @@ async def reprocess(
     service: TrainingService = Depends(get_training_service),
 ) -> dict[str, Any]:
     try:
-        return service.reprocess(request.staging_id)
+        return service.reprocess(request.source_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="staging item not found") from error
 
@@ -90,7 +94,10 @@ async def preview_batch(
     request: BatchPreviewRequest,
     service: TrainingService = Depends(get_training_service),
 ) -> dict[str, Any]:
-    return service.preview_batch(request.sources, request.config)
+    try:
+        return service.preview_batch(request.sources, request.config)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.post("/batches/commit")
@@ -115,3 +122,5 @@ async def rollback_batch(
         return service.rollback_batch(request.batch_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="batch not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error

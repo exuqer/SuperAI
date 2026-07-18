@@ -1,14 +1,4 @@
-/** File download utilities. */
-
-export function downloadJson(data: unknown, filename: string): void {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
-}
+/** File download utilities for non-JSON artifacts. */
 
 export function downloadText(text: string, filename: string, mimeType = 'text/plain'): void {
   const blob = new Blob([text], { type: mimeType });

@@ -14,8 +14,10 @@ TOKEN_OR_PUNCT_RE = re.compile(
 # Punctuation tokens to filter out
 PUNCT_TOKENS = {".", ",", "!", "?", ";", ":"}
 
-# Sentence splitting regex
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+# Sentence boundaries must be found in the source text, before whitespace is
+# normalized.  A newline is a boundary in its own right; terminal punctuation
+# closes a sentence even when the next sentence starts immediately after it.
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s+|(?=[^\s.!?]))|\n+")
 
 
 @dataclass
@@ -103,11 +105,15 @@ def canonical_token(token: str) -> str:
 
 def split_sentences(text: str) -> List[str]:
     """Split text into sentences."""
-    normalized = normalize_text(text)
-    if not normalized:
+    source = str(text or "")
+    if not source.strip():
         return []
-    chunks = [chunk.strip() for chunk in SENTENCE_SPLIT_RE.split(normalized) if chunk.strip()]
-    return chunks or [normalized]
+    chunks = [
+        chunk.strip()
+        for chunk in SENTENCE_SPLIT_RE.split(source)
+        if chunk.strip()
+    ]
+    return chunks or [normalize_text(source)]
 
 
 def tokenize(text: str) -> List[str]:

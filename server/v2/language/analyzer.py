@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from server.tokenizer import tokenize_hierarchical
 
-from .diagnostics import MORPH_ANALYSIS_AMBIGUITY
+from .diagnostics import MORPH_ANALYSIS_AMBIGUITY, SENTENCE_BOUNDARY_CROSSING
 from .clause_parser import ClauseParser
-from .interpretation_engine import InterpretationEngine
 from .models import (
+    InterpretationStatus,
     LanguageAnalysis,
     MorphAnalysis,
     ParsedToken,
@@ -55,7 +55,6 @@ class UniversalLanguageAnalyzer:
         self.questions = QuestionOperatorParser()
         self.utterances = UtteranceParser()
         self.clauses = ClauseParser()
-        self.interpretations = InterpretationEngine()
 
     @staticmethod
     def _agreement(left: MorphAnalysis, right: MorphAnalysis) -> bool:
@@ -185,6 +184,159 @@ class UniversalLanguageAnalyzer:
             selected.append(winner)
         return selected
 
+    def _select_question_operator_morphology(
+        self,
+        tokens: Sequence[ParsedToken],
+    ) -> None:
+        """Apply question-function evidence without assigning a semantic role.
+
+        Russian homonyms such as ``что`` and ``когда`` are usually ranked as a
+        conjunction by an isolated morphology analyzer.  In an interrogative
+        position that choice erases the case or adverbial evidence required by
+        the gap matcher.  Re-rank only among observable interrogative forms and
+        keep every original hypothesis for late fixation.
+        """
+        for token in tokens:
+            is_question_form = (
+                token.lemma in self.questions.QUESTION_LEMMAS
+                or token.normalized in self.questions.QUESTION_LEMMAS
+                or token.lemma == self.questions.TYPED_QUESTION_LEMMA
+                or any(
+                    hypothesis.lemma == self.questions.TYPED_QUESTION_LEMMA
+                    for hypothesis in token.analyses
+                )
+            )
+            if not is_question_form:
+                continue
+            candidates = [
+                hypothesis
+                for hypothesis in token.analyses
+                if (
+                    hypothesis.pos in {"NPRO", "ADVB", "PRED", "NUMR", "ADJF"}
+                    and (
+                        hypothesis.lemma in self.questions.QUESTION_LEMMAS
+                        or hypothesis.lemma
+                        == self.questions.TYPED_QUESTION_LEMMA
+                        or token.normalized in self.questions.QUESTION_LEMMAS
+                    )
+                )
+            ]
+            if not candidates:
+                continue
+            following = next(
+                (
+                    item for item in tokens[token.index + 1:]
+                    if item.pos != "PNCT"
+                ),
+                None,
+            )
+            numeric_candidates = [
+                hypothesis for hypothesis in candidates
+                if hypothesis.pos == "NUMR"
+            ]
+            pool = (
+                numeric_candidates
+                if numeric_candidates
+                and following is not None
+                and following.pos in NOUN_POS
+                else candidates
+            )
+            winner = max(pool, key=lambda item: item.confidence)
+            for hypothesis in token.analyses:
+                hypothesis.selected = hypothesis is winner
+            if "question_operator_function" not in winner.evidence:
+                winner.evidence.append("question_operator_function")
+            token.lemma = winner.lemma
+            token.pos = winner.pos
+            token.features = {
+                **dict(winner.features),
+                "sentence_index": token.features.get("sentence_index", 0),
+                "token_index_in_sentence": token.features.get(
+                    "token_index_in_sentence",
+                    token.index,
+                ),
+            }
+
+    @staticmethod
+    def _refine_question_case(
+        tokens: Sequence[ParsedToken],
+        mentions: Sequence[Any],
+        predicate: Optional[ParsedToken],
+    ) -> None:
+        """Use only explicit agreement to narrow a question-word case.
+
+        A past-tense verb can agree with an omitted participant.  Therefore a
+        bare ``Что разрезал?`` must retain both nominative and accusative
+        analyses: masculine agreement is not evidence that ``что`` is the
+        nominative participant.  An explicit agreeing nominative mention is
+        the one local observation that can safely prefer accusative here.
+        """
+        if predicate is None:
+            return
+        question = next(
+            (
+                token for token in tokens
+                if any(
+                    hypothesis.selected
+                    and "question_operator_function" in hypothesis.evidence
+                    for hypothesis in token.analyses
+                )
+            ),
+            None,
+        )
+        if question is None or question.pos != "NPRO":
+            return
+        case_candidates = {
+            str(hypothesis.features.get("case")): hypothesis
+            for hypothesis in question.analyses
+            if (
+                hypothesis.pos == "NPRO"
+                and hypothesis.features.get("case") in {"nomn", "accs"}
+            )
+        }
+        if set(case_candidates) != {"nomn", "accs"}:
+            return
+        other_agrees = False
+        for mention in mentions:
+            head = tokens[mention.head]
+            if head.features.get("case") != "nomn":
+                continue
+            comparable = [
+                feature for feature in ("number", "gender")
+                if head.features.get(feature)
+                and predicate.features.get(feature)
+            ]
+            if comparable and all(
+                head.features[feature] == predicate.features[feature]
+                for feature in comparable
+            ):
+                other_agrees = True
+                break
+        if not other_agrees:
+            # Keep the morphology parser's original selection.  Both variants
+            # remain available downstream as competing gap hypotheses.
+            return
+        target_case = "accs"
+        winner = case_candidates[target_case]
+        for hypothesis in question.analyses:
+            hypothesis.selected = hypothesis is winner
+        winner.evidence = list(dict.fromkeys([
+            *winner.evidence,
+            "question_operator_function",
+            "predicate_agreement_competition",
+            "explicit_nominative_competitor",
+        ]))
+        question.lemma = winner.lemma
+        question.pos = winner.pos
+        question.features = {
+            **dict(winner.features),
+            "sentence_index": question.features.get("sentence_index", 0),
+            "token_index_in_sentence": question.features.get(
+                "token_index_in_sentence",
+                question.index,
+            ),
+        }
+
     def analyze(
         self,
         text: str,
@@ -219,16 +371,18 @@ class UniversalLanguageAnalyzer:
                 },
                 lexeme_cloud_id=metadata.get(index, {}).get("lexeme_cloud_id"),
                 word_form_cloud_id=metadata.get(index, {}).get("word_form_cloud_id"),
-                grammatical_role=str(
-                    metadata.get(index, {}).get("grammatical_role") or "unknown"
+                parser_annotation=str(
+                    metadata.get(index, {}).get("parser_annotation") or "unknown"
                 ),
                 analyses=list(variants[index]),
             )
             for index, (surface, winner) in enumerate(zip(surfaces, winners))
         ]
+        if detect_question:
+            self._select_question_operator_morphology(tokens)
         relations = self.relation_phrases.parse(tokens)
         question_operator_indices = (
-            self.questions.role_operator_indices(tokens)
+            self.questions.gap_operator_indices(tokens)
             if detect_question
             else set()
         )
@@ -237,14 +391,45 @@ class UniversalLanguageAnalyzer:
             relations,
             excluded_indices=question_operator_indices,
         )
+        diagnostics: List[Dict[str, Any]] = [
+            *self.relation_phrases.last_diagnostics,
+            *self.noun_phrases.last_diagnostics,
+        ]
+        valid_mentions = []
+        for mention in mentions:
+            sentence_indices = sorted({
+                int(tokens[index].features.get("sentence_index", 0))
+                for index in mention.token_indices
+            })
+            if len(sentence_indices) != 1:
+                diagnostics.append({
+                    "code": SENTENCE_BOUNDARY_CROSSING,
+                    "construction": "mention",
+                    "token_start": mention.start,
+                    "token_end": mention.end,
+                    "sentence_indices": sentence_indices,
+                    "resolution": "discard_corrupted_mention",
+                })
+                continue
+            mention.sentence_indices = sentence_indices
+            valid_mentions.append(mention)
+        mentions = valid_mentions
+        predicate_candidates = [
+            token for token in tokens if token.pos in PREDICATE_POS
+        ]
         predicate = next(
             (
-                token for token in tokens
-                if token.grammatical_role == "predicate"
-                or token.pos in PREDICATE_POS
+                token for token in predicate_candidates
+                if token.pos in {"PRTS", "PRTF"}
+                and any(
+                    candidate.lemma == "быть"
+                    for candidate in predicate_candidates
+                    if candidate.index < token.index
+                )
             ),
-            None,
+            predicate_candidates[0] if predicate_candidates else None,
         )
+        self._refine_question_case(tokens, mentions, predicate)
         question = self.questions.parse(tokens, mentions) if detect_question else None
         phrases: List[Phrase] = [
             Phrase(
@@ -260,6 +445,7 @@ class UniversalLanguageAnalyzer:
                     "preposition": mention.preposition,
                     "attributes": list(mention.attributes),
                     "relation_type": mention.relation_type,
+                    "sentence_indices": list(mention.sentence_indices),
                 },
             )
             for index, mention in enumerate(mentions)
@@ -283,7 +469,6 @@ class UniversalLanguageAnalyzer:
                     "relation": "argument",
                     "target": f"phrase-np-{index}",
                 })
-        diagnostics: List[Dict[str, Any]] = []
         for token in tokens:
             if len(token.analyses) > 1:
                 ordered = sorted(
@@ -331,7 +516,17 @@ class UniversalLanguageAnalyzer:
         analysis.dialogue_acts = acts
         analysis.clauses = clauses
         analysis.clause_relations = clause_relations
-        return self.interpretations.interpret(
-            analysis,
-            reference_candidates=reference_candidates,
+        analysis.interpretation_status = (
+            InterpretationStatus.STABLE
+            if clauses and (predicate is not None or question is not None)
+            else InterpretationStatus.INCOMPLETE
         )
+        analysis.interpretation_trace = {
+            "pipeline": "role_free_observations",
+            "morphological_hypotheses_preserved": True,
+            "reference_candidate_count": sum(
+                len(candidates)
+                for candidates in (reference_candidates or {}).values()
+            ),
+        }
+        return analysis

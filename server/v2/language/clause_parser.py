@@ -347,62 +347,16 @@ class ClauseParser:
             if mention_start < start or mention_end > end:
                 continue
             features = dict(getattr(mention, "features", {}) or {})
-            grammatical_case = features.get("case")
             preposition = str(
                 getattr(mention, "preposition", "") or ""
             ).casefold()
-            relation_function = getattr(
-                mention,
-                "relation_function",
-                None,
-            )
-            if relation_function:
-                role = str(relation_function)
-                confidence = 0.94
-                evidence = ["compound_relation_operator"]
-            elif preposition in {"в", "во", "на", "под"}:
-                role = (
-                    "destination"
-                    if grammatical_case == "accs"
-                    else "location"
-                )
-                confidence = 0.9
-                evidence = ["preposition_case_government"]
-            elif preposition in {"из", "от"} or (
-                preposition in {"с", "со"}
-                and grammatical_case == "gent"
-            ):
-                role = "source"
-                confidence = 0.9
-                evidence = ["preposition_case_government"]
-            elif preposition in {"к", "ко"}:
-                role = "destination"
-                confidence = 0.9
-                evidence = ["preposition_case_government"]
-            elif preposition in {"с", "со"} and grammatical_case == "ablt":
-                role = "instrument"
-                confidence = 0.76
-                evidence = ["preposition_case_government"]
-            elif grammatical_case == "nomn":
-                role = "agent"
-                confidence = 0.82
-                evidence = ["nominative_case"]
-            elif grammatical_case == "datv":
-                role = "recipient"
-                confidence = 0.78
-                evidence = ["dative_case"]
-            elif grammatical_case == "ablt":
-                role = "instrument"
-                confidence = 0.72
-                evidence = ["instrumental_case"]
-            elif grammatical_case in {"loct", "loc2"}:
-                role = "location"
-                confidence = 0.82
-                evidence = ["locative_case"]
-            else:
-                role = "object"
-                confidence = 0.72
-                evidence = ["grammatical_case"]
+            signature = {
+                f"morph:{key}:{value}": 0.82
+                for key, value in features.items()
+                if key in {"case", "number", "gender", "animacy"} and value
+            }
+            if preposition:
+                signature[f"preposition:{preposition}"] = 0.92
             result.append({
                 "mention_id": getattr(mention, "id", None),
                 "token_start": mention_start,
@@ -410,12 +364,8 @@ class ClauseParser:
                 "surface": getattr(mention, "surface", ""),
                 "lemma": getattr(mention, "lemma", ""),
                 "preposition": preposition,
-                "role_hypotheses": [{
-                    "role": role,
-                    "confidence": confidence,
-                    "selected": False,
-                    "evidence": evidence,
-                }],
+                "observation_signature": signature,
+                "slot_hypotheses": [],
             })
         return result
 

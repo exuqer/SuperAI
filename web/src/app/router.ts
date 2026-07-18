@@ -11,14 +11,17 @@ const router = createRouter({
       component: () => import('@/pages/ChatPage.vue'),
     },
     {
+      path: '/space',
+      name: 'universe',
+      component: () => import('@/pages/UniversePage.vue'),
+    },
+    {
       path: '/field',
-      name: 'training',
-      component: () => import('@/pages/TrainingPage.vue'),
+      redirect: { name: 'universe' },
     },
     {
       path: '/analytics',
-      name: 'analytics',
-      component: () => import('@/pages/AnalyticsPage.vue'),
+      redirect: { name: 'universe' },
     },
   ],
 });

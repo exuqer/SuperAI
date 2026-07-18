@@ -15,6 +15,5 @@ export function useHiveExport() {
     jsonValue,
     loadJson: hiveStore.loadJson,
     copyJson: hiveStore.copyJson,
-    downloadJson: hiveStore.downloadJson,
   };
 }

@@ -1,15 +1,65 @@
-# Model Invariants
+# Model Invariants V2.7
 
-- Structural component indices are unique per parent.
-- Word structures contain exactly one component per character position.
-- A cloud may have many placements; a placement belongs to one space.
-- Word form, lexeme and concept clouds are distinct.
-- Scene components are unique by token index and always have a role and confidence.
-- Hive component shares sum to one and hive coordinates are not copied from global placements.
-- A stable semantic fog has one `concept` owner and one isolated `concept_space`.
-- Semantic backfill is idempotent and never changes global or hive coordinates.
-- A scene is admitted as an answer candidate only when the requested role exists and every required anchor scores at least `0.45`.
-- A role question operator reserves an unfilled semantic slot and is never included in an entity mention.
-- Resolving a known entity adds identity metadata but never overwrites the token's morphological features.
-- Canonical entity lemma, observed surface and realized answer surface are stored separately.
-- A short answer validates its resolved slot; a full answer validates every fixed role it realizes.
+1. Вычислительное ядро знает только типы узлов, структурные связи, наблюдения,
+   обучаемые кластеры и gap.
+2. Участник события не имеет обязательного человекочитаемого типа.
+3. Падеж, предлог, позиция, согласование и семантический кластер являются
+   независимыми признаками, а не готовым решением.
+4. `ObservationSignature` принимает только версионированные пространства
+   наблюдений: `morph`, `position`, `agreement`, `construction`,
+   `entity_cluster`, `preposition`, `question`, `shape`, `voice`, `context`.
+5. Два участника одного события не могут получить один выбранный локальный слот.
+6. Первый пример создаёт только `CANDIDATE`; устойчивость требует повторений и
+   разнообразия доменов.
+7. Принадлежность участника к слотам остаётся мягкой: выбранная и конкурирующие
+   гипотезы сохраняются вместе с evidence.
+8. Слот нельзя объединить только по падежу, позиции или кластеру сущности:
+   совместимость штрафуется без нескольких независимых пространств признаков.
+9. `display_label` не читается поиском, ранжированием, binding или генерацией.
+10. QueryGraph содержит известные узлы, обязательные компоненты, структурный gap
+    и исключения; вопрос не проецируется в именованный тип участника.
+11. Строгий допуск выполняется до мягкого ранжирования: фактуальность,
+    полярность, предикат, известные узлы, обязательные компоненты, отношения,
+    совместимость слотов, исключения.
+12. Память может усиливать только гипотезу, существовавшую до поиска.
+13. `ещё` повторяет прежний gap и накапливает канонические исключения.
+14. Новый gap продолжения наследует предикат, известные узлы и предыдущее
+    подтверждённое binding только из той же диалоговой темы.
+15. Каноническое значение и наблюдённая словоформа хранятся раздельно.
+16. Ответ валидируется против QueryGraph, события, binding и исключений.
+17. Вопросы, гипотезы, условия и ответы системы не материализуются как
+    независимые факты мира.
+18. Число независимых источников не увеличивается при генерации ответа.
+19. Retraction исключает источник из поиска и пересчитывает зависимые кластеры.
+20. Все события, запросы и ответы сохраняют версии схемы, слотов, конструкций,
+    кластеров, QueryGraph и генерации.
+21. `STAGED` не может понизить уже подтверждённый источник, а `RETRACTED` не
+    восстанавливается без явного reprocess.
+22. Batch commit/rollback работает только по сохранённому членству указанного
+    `batch_id`.
+23. Идентичность сохраняемого QueryGraph включает hive и номер хода; одинаковый
+    текст в разных диалогах не перезаписывает чужой граф.
+24. База без `schema_version = 27` считается несовместимой и пересоздаётся;
+    legacy-таблицы и backfill не сохраняются.
+25. Mention, Phrase и Participant не пересекают границы предложений:
+    `len(mention.sentence_indices) == 1`. Точка и перенос строки закрывают
+    незавершённую фразу до построения упоминаний.
+26. Событие хранит собственные `source_surface`, `token_start`, `token_end` и
+    `sentence_index`; `full_answer` может использовать только span выбранного
+    события, но не полный текст batch-источника.
+27. Для `EVENT_PROPERTY` генерация включает сохранённый предлог участника. При
+    эллиптическом продолжении с новым известным узлом предыдущие известные узлы
+    заменяются, а не накапливаются.
+28. У QueryGraph есть ровно один `target_gap` (`requested=true`) и ноль или
+    больше `implicit_gaps` (`requested=false`). Согласование прошедшего времени
+    может быть evidence implicit gap, но не является доказательством падежа
+    вопросительного target gap.
+29. Омонимичные вопросительные формы сохраняют конкурирующие морфологические
+    гипотезы до поиска. Binding учитывает morphology conflict и conflict с
+    requested gap; при малом отрыве и ненадёжной структуре возвращается
+    `AMBIGUOUS_BINDING`.
+30. Trace хранит событие однократно, а bindings и participant signatures
+    вложенными в него. Независимые источники и события считаются по уникальным
+    идентификаторам, а не по числу участников.
+31. Утверждения utterance о `conversation_id` и `turn_index` передаются в
+    анализатор из актуального состояния диалога до разбора.

@@ -46,25 +46,6 @@ class ScopeParser:
                 return MODAL_LEMMAS[normalized]
         return None
 
-    @staticmethod
-    def _participant_role(
-        tokens: Sequence[ParsedToken],
-        target_index: int,
-        predicate_index: Optional[int],
-    ) -> str:
-        target = tokens[target_index]
-        grammatical_case = target.features.get("case")
-        if predicate_index is None or target_index < predicate_index:
-            if grammatical_case in {None, "nomn"}:
-                return "agent"
-        if grammatical_case == "datv":
-            return "recipient"
-        if grammatical_case == "ablt":
-            return "instrument"
-        if grammatical_case in {"loct", "loc2"}:
-            return "location"
-        return "object"
-
     def parse_negation(
         self,
         tokens: Sequence[ParsedToken],
@@ -119,15 +100,26 @@ class ScopeParser:
                 target_value = target.lemma
                 evidence = "negation_before_attribute"
             elif target.pos in PARTICIPANT_POS:
-                role = self._participant_role(tokens, target_index, predicate_index)
                 scope_type = "PARTICIPANT" if (
                     predicate_index is not None and target_index < predicate_index
-                ) else "ROLE_VALUE"
+                ) else "PARTICIPANT_VALUE"
                 target_value = {
-                    "role": role,
                     "lemma": target.lemma,
                     "surface": target.surface,
                     "token_index": token_offset + target_index,
+                    "observation_signature": {
+                        **({
+                            f"morph:case:{target.features['case']}": 0.9,
+                        } if target.features.get("case") else {}),
+                        (
+                            "position:before_predicate"
+                            if (
+                                predicate_index is not None
+                                and target_index < predicate_index
+                            )
+                            else "position:after_predicate"
+                        ): 0.8,
+                    },
                 }
                 evidence = (
                     "preverbal_participant_negation"
@@ -150,7 +142,7 @@ class ScopeParser:
                 "confidence": 0.96 if scope_type != "CLAUSE" else 0.72,
                 "evidence": [evidence],
             }
-            if scope_type == "ROLE_VALUE":
+            if scope_type == "PARTICIPANT_VALUE":
                 alternative_index = next(
                     (
                         index for index in range(target_index + 1, len(tokens))
@@ -161,7 +153,6 @@ class ScopeParser:
                 if alternative_index is not None and alternative_index + 1 < len(tokens):
                     alternative = tokens[alternative_index + 1]
                     scope["asserted_alternative"] = {
-                        "role": target_value["role"],
                         "lemma": alternative.lemma,
                         "surface": alternative.surface,
                         "token_index": token_offset + alternative_index + 1,

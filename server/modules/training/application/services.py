@@ -5,17 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 from server.modules.model.infrastructure.repository import ModelRepository
-from server.v2.training import TrainingPipelineV2
+from server.v2.graph_service import GraphTrainingService
 
 
 class TrainingService:
     def __init__(self, repository: ModelRepository | None = None) -> None:
-        self.pipeline = TrainingPipelineV2(repository or ModelRepository())
+        self.pipeline = GraphTrainingService(repository or ModelRepository())
 
     def train(self, text: str) -> dict[str, Any]:
         return self.pipeline.train(text)
 
     def stage(self, text: str, **options: Any) -> dict[str, Any]:
+        if "source_key" in options and "independent_key" not in options:
+            options["independent_key"] = options.pop("source_key")
         return self.pipeline.stage(text, **options)
 
     def commit(
@@ -49,4 +51,4 @@ class TrainingService:
         return self.pipeline.rollback_batch(batch_id)
 
 
-TrainingPipeline = TrainingPipelineV2
+TrainingPipeline = GraphTrainingService

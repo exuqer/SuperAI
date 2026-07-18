@@ -1,4 +1,4 @@
-"""Canonical SQLite storage for the Cloud / Space / Placement model."""
+"""Canonical SQLite storage for the V2.7 event graph."""
 
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ def get_connection() -> Iterator[sqlite3.Connection]:
 
 
 def init_db() -> None:
-    from server.v2.schema import ensure_schema
+    from server.v2.graph_schema import ensure_graph_schema
 
     with get_connection() as conn:
-        ensure_schema(conn)
+        ensure_graph_schema(conn)
         conn.commit()

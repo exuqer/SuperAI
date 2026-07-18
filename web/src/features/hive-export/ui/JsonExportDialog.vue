@@ -17,8 +17,7 @@
           <option value="formatted">Форматированный</option>
           <option value="raw">Сырой</option>
         </select>
-        <button class="secondary" @click="copyJson(jsonMode)">Копировать</button>
-        <button class="secondary" @click="downloadJson">Скачать</button>
+        <button class="secondary" @click="copyJson(jsonMode)">Копировать JSON</button>
       </div>
       <pre>{{ jsonText }}</pre>
     </div>
@@ -37,7 +36,6 @@ const {
   jsonValue,
   loadJson,
   copyJson,
-  downloadJson,
 } = useHiveExport();
 
 const jsonText = computed(() =>

@@ -1,4 +1,4 @@
-"""Question operators are parsed separately from semantic role selection."""
+"""Question operators reserve structural gaps without semantic labels."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ class QuestionOperatorParser:
     }
     TYPED_QUESTION_LEMMA = "какой"
 
-    def role_operator_indices(
+    def gap_operator_indices(
         self,
         tokens: Sequence[ParsedToken],
     ) -> Set[int]:
@@ -46,7 +46,7 @@ class QuestionOperatorParser:
         question = next(
             (
                 token for token in tokens
-                if token.index in self.role_operator_indices(tokens)
+                if token.index in self.gap_operator_indices(tokens)
                 or token.lemma == self.TYPED_QUESTION_LEMMA
             ),
             None,
@@ -55,7 +55,7 @@ class QuestionOperatorParser:
             return None
         if question.lemma != self.TYPED_QUESTION_LEMMA:
             return QuestionOperator(
-                operator_type="ROLE_QUERY",
+                operator_type="EVENT_ATTACHMENT",
                 surface=question.surface,
                 token_indices=[question.index],
                 question_lemma=question.lemma,
@@ -83,7 +83,7 @@ class QuestionOperatorParser:
         )
         surface = " ".join(tokens[index].surface for index in indices)
         return QuestionOperator(
-            operator_type="TYPED_ROLE_QUERY",
+            operator_type="NODE_COMPONENT",
             surface=surface,
             token_indices=indices,
             question_lemma=question.lemma,

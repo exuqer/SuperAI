@@ -117,7 +117,6 @@ export function useChatStore() {
     runReasoningStep: hiveStore.runReasoningStep,
     loadJson: hiveStore.loadJson,
     copyJson: hiveStore.copyJson,
-    downloadJson: hiveStore.downloadJson,
     resetHive: hiveStore.resetHive,
     restoreHive: hiveStore.restoreHive,
     applyState: hiveStore.applyState,

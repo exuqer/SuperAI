@@ -1,59 +1,68 @@
-# SuperAI V2
+# SuperAI V2.7
 
-Cloud / Space / Placement модель с идемпотентным обучением, локальной физикой сцен и изолированной памятью улья.
+Локальная русскоязычная система событийных графов с обучаемыми слотами
+участников. Рабочий контур не использует заранее названные типы участников:
+он хранит наблюдаемые сигнатуры, формирует локальные слоты предикатов и отвечает
+на вопросы связыванием `GAP` в `QueryGraph`.
 
 ## Запуск
 
-```powershell
-python -m pip install -e ".[dev]"
-python -m uvicorn server.server:app --reload
-cd web
-npm install
-npm run dev:frontend
+```bash
+python3 -m pip install -e ".[dev]"
+python3 -m uvicorn server.server:app --reload
 ```
 
-Backend: `http://127.0.0.1:8000`. Frontend: `http://127.0.0.1:5173`.
+Backend: `http://127.0.0.1:8000`.
+
+## Основной цикл
+
+```text
+текст
+→ top-K морфологических гипотез
+→ именные группы
+→ событие и неназванные участники
+→ разреженные наблюдаемые сигнатуры
+→ локальные слоты и конструкции
+→ QueryGraph с GAP
+→ строгий графовый допуск
+→ CandidateBinding
+→ проверенный ответ и provenance
+```
+
+Человекочитаемые `display_label` у кластеров являются только аналитическими
+подписями. Поиск и выбор ответа их не читают.
 
 ## API
 
-- `POST /api/v2/training/learn`
-- `GET /api/v2/field`
-- `GET /api/v2/stats`
-- `DELETE /api/v2/model`
-- `GET /api/v2/spaces/{id}`
-- `POST /api/v2/spaces/{id}/physics/tick`
-- `GET /api/v2/placements/{id}`
-- `GET /api/v2/clouds/{id}`
-- `GET /api/v2/clouds/{id}/structure`
-- `GET /api/v2/scenes/{id}`
-- `POST /api/v2/hives`
-- `POST /api/v2/hives/{id}/query`
+- `POST /api/v2/training/learn` — проверить фактуальность и обучить событие.
+- `POST /api/v2/training/stage` — сохранить источник без материализации факта.
+- `POST /api/v2/training/commit` — допустить staged-источник.
+- `POST /api/v2/training/retract` — отозвать источник и ослабить зависимости.
+- `POST /api/v2/training/batches/*` — изолированно preview/commit/rollback
+  группы источников.
+- `POST /api/v2/hives` — создать устойчивое состояние диалога.
+- `POST /api/v2/hives/query/parse` — построить `QueryGraph` без поиска.
+- `POST /api/v2/hives/{id}/query` — выполнить допуск, binding и генерацию.
+- `GET /api/v2/hives/{id}/trace` — получить полную трассу решения.
+- `GET /api/v2/hives/{id}/bindings` — получить допущенные и отклонённые связи.
 
-Иерархия морфологии и генерации поверхности:
+Подробные контракты приведены в [API_V2.md](API_V2.md), архитектура — в
+[ARCHITECTURE_V2.md](ARCHITECTURE_V2.md).
 
-- `GET /api/v2/hives/{id}/hierarchy`
-- `POST /api/v2/hives/{id}/cells/{cell_id}/expand`
-- `POST /api/v2/hives/{id}/subspaces/{subspace_id}/collapse`
-- `POST /api/v2/hives/{id}/generate`
-- `GET /api/v2/hives/{id}/generation-candidates`
-- `GET /api/v2/hives/{id}/generation-candidates/{candidate_id}`
-- `POST /api/v2/hives/{id}/generation-candidates/{candidate_id}/select`
-- `POST /api/v2/hives/{id}/validate-surface`
+## Проверка
 
-Морфология хранится нормализованно в `word_form_features`, `cloud_compositions` и
-`morph_pattern_data`. Временные варианты поверхности находятся только в
-`hive_generation_candidates`; ручной выбор переводит вариант в статус `SELECTED`.
-Старый reasoning JSON остаётся совместимым (`schema_version: 2`), а текущий экспорт
-дополнен разделами `subspaces`, `generation_candidates`, `sentence_plan`,
-`selected_surface`, `reverse_validation` и `morphology_trace`.
+```bash
+python3 -m pytest -q
+```
 
-Текущая схема хранилища — v4. Аддитивная миграция сохраняет V2-данные, добавляет
-морфологические типы, типизированные семантические свидетельства и реестр туманностей.
-При запуске приложения существующие сцены идемпотентно проходят семантический backfill;
-глобальные координаты при этом не изменяются. Перенос данных из V1 не поддерживается.
+Диагностическая регрессия проверяет активные/пассивные конструкции, свободный
+порядок слов, события с тремя участниками, разные виды gap, обязательные
+компоненты упоминаний, продолжения, морфологию ответа из пассива, batch
+изоляцию, антихардкод, полярность, retraction, восстановление диалога после
+перезапуска и независимость от `display_label`.
 
-Продолжения с `ещё`, формами `другой` и конструкцией `кроме` проходят отдельную стадию
-`CONTEXT_INHERITANCE`. Для сопоставления ролей используется единая шкала: точная форма
-`1.00`, лемма `0.95`, устойчивое понятие `0.85`, связанное понятие `0.65`, общая
-категория `0.45`. Сцена становится кандидатом ответа только после проверки всех
-обязательных опорных ролей; отклонённые результаты остаются видимыми в трассировке.
+## Хранилище
+
+Используется свежая схема V2.7 в `.superai/state.sqlite`. Миграция и backfill
+старой ролевой схемы намеренно отсутствуют: при переходе на V2.7 база
+пересоздаётся.

@@ -553,7 +553,7 @@ class ParsedToken:
     features: Dict[str, Any]
     lexeme_cloud_id: Optional[int] = None
     word_form_cloud_id: Optional[int] = None
-    grammatical_role: str = "unknown"
+    parser_annotation: str = "unknown"
     analyses: List[MorphAnalysis] = field(default_factory=list)
 
     @property
@@ -570,7 +570,7 @@ class ParsedToken:
             "grammatical_features": dict(self.features),
             "lexeme_cloud_id": self.lexeme_cloud_id,
             "word_form_cloud_id": self.word_form_cloud_id,
-            "scene_role": self.grammatical_role,
+            "parser_annotation": self.parser_annotation,
             "morphological_analyses": [
                 analysis.as_dict() for analysis in self.analyses
             ],
@@ -621,7 +621,7 @@ class QuestionOperator:
     question_lemma: str
     grammatical_features: Dict[str, Any]
     type_constraint_token_index: Optional[int] = None
-    requested_slot_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    compatible_slot_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -631,7 +631,7 @@ class QuestionOperator:
             "question_lemma": self.question_lemma,
             "grammatical_features": dict(self.grammatical_features),
             "type_constraint_token_index": self.type_constraint_token_index,
-            "requested_slot_hypotheses": list(self.requested_slot_hypotheses),
+            "compatible_slot_hypotheses": list(self.compatible_slot_hypotheses),
         }
 
 

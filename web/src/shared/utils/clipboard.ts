@@ -22,6 +22,15 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
+export function copyJsonToClipboard(
+  data: unknown,
+  formatted = true,
+): Promise<boolean> {
+  return copyToClipboard(
+    JSON.stringify(data, null, formatted ? 2 : undefined) ?? 'null',
+  );
+}
+
 export async function readFromClipboard(): Promise<string | null> {
   try {
     return await navigator.clipboard.readText();

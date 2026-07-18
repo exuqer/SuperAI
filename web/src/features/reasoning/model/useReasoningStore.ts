@@ -27,6 +27,5 @@ export function useReasoningStore() {
     runReasoningStep: hiveStore.runReasoningStep,
     loadJson: hiveStore.loadJson,
     copyJson: hiveStore.copyJson,
-    downloadJson: hiveStore.downloadJson,
   };
 }

@@ -4,6 +4,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { api } from '@/shared/api/client';
 import { storage } from '@/shared/storage';
+import { copyJsonToClipboard } from '@/shared/utils/clipboard';
 import type {
   HiveV2,
   HiveCellV2,
@@ -523,28 +524,15 @@ export const useHiveStore = defineStore('hive', () => {
       await openJson(mode);
     }
     try {
-      const text = jsonFormat.value === 'raw'
-        ? JSON.stringify(jsonValue.value)
-        : JSON.stringify(jsonValue.value, null, 2);
-      await navigator.clipboard.writeText(text);
-      copyStatus.value = 'Скопировано';
+      const copied = await copyJsonToClipboard(
+        jsonValue.value,
+        jsonFormat.value === 'formatted',
+      );
+      copyStatus.value = copied ? 'Скопировано' : 'Ошибка копирования';
       setTimeout(() => { copyStatus.value = '' }, 1500);
     } catch {
       copyStatus.value = 'Ошибка копирования';
     }
-  }
-
-  function downloadJson() {
-    const text = jsonFormat.value === 'raw'
-      ? JSON.stringify(jsonValue.value)
-      : JSON.stringify(jsonValue.value, null, 2);
-    const blob = new Blob([text], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `hive-${hive.value?.id || 'export'}-${jsonMode.value}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
   }
 
   async function resetHive() {
@@ -748,7 +736,6 @@ export const useHiveStore = defineStore('hive', () => {
     loadJson,
     openJson,
     copyJson,
-    downloadJson,
     resetHive,
     restoreHive,
     applyState,

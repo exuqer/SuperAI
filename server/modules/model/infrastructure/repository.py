@@ -1,7 +1,7 @@
-"""Model repository compatibility alias."""
+"""V2.7 graph repository exposed to the application layer."""
 
-from server.v2.repository import V2Repository
+from server.v2.graph_repository import GraphRepository
 
 
-class ModelRepository(V2Repository):
+class ModelRepository(GraphRepository):
     pass
