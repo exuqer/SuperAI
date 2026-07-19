@@ -14,8 +14,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+import numpy as np
+
 from server.core.settings import settings
 
+from .acceleration import AccelerationRuntime, runtime as acceleration_runtime
 from .graph_repository import GraphRepository, decode, encode, stable_id, utcnow
 
 
@@ -235,8 +238,92 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
             fields["structural:source_cooccurrence"].append(sample)
         return fields
 
+    @staticmethod
+    def build_sparse_matrix(
+        samples: Sequence[Mapping[str, Any]],
+        runtime: AccelerationRuntime,
+    ) -> tuple[Any, tuple[str, ...], Any]:
+        """Return deterministic CSR/CSC semantic evidence without densifying.
+
+        Control features remain available to morphology but deliberately never
+        enter discovery.  The explicit size check also guards future callers
+        from accidentally calling ``toarray`` on a large corpus.
+        """
+        semantic = sorted({
+            str(key)
+            for sample in samples
+            for key, value in decode(sample["context_vector_json"], {}).items()
+            if float(value) > 0 and _feature_family(str(key)) == "semantic_structural"
+        } | ({"structural:source_cooccurrence"} if samples else set()))
+        if not runtime.use("scipy"):
+            return None, tuple(semantic), ()
+        estimated_bytes = len(samples) * len(semantic) * 4
+        if estimated_bytes > 64 * 1024 * 1024:
+            runtime.fallback("scipy", "dense discovery estimate exceeds 64 MiB")
+        positions = {name: index for index, name in enumerate(semantic)}
+        rows: list[int] = []
+        columns: list[int] = []
+        values: list[float] = []
+        for row_index, sample in enumerate(samples):
+            vector = decode(sample["context_vector_json"], {})
+            for name, value in vector.items():
+                if name in positions and float(value) > 0:
+                    rows.append(row_index)
+                    columns.append(positions[name])
+                    values.append(float(value))
+            if "structural:source_cooccurrence" in positions:
+                rows.append(row_index)
+                columns.append(positions["structural:source_cooccurrence"])
+                values.append(1.0)
+        matrix = runtime.scipy.sparse.csr_matrix(
+            (np.asarray(values, dtype=np.float32), (rows, columns)),
+            shape=(len(samples), len(semantic)),
+            dtype=np.float32,
+        )
+        return matrix, tuple(semantic), matrix.tocsc()
+
+    @staticmethod
+    def shadow_candidates(
+        samples: Sequence[Mapping[str, Any]],
+        runtime: AccelerationRuntime,
+    ) -> list[dict[str, Any]]:
+        """Produce non-admitting SVD/KMeans candidate metadata when available."""
+        matrix, features, _ = SparseResidualDiscoverer.build_sparse_matrix(samples, runtime)
+        if matrix is None or not runtime.use("sklearn"):
+            return []
+        if matrix.shape[0] < 3 or matrix.shape[1] < 2:
+            return []
+        components = min(8, matrix.shape[0] - 1, matrix.shape[1] - 1)
+        if components < 1:
+            return []
+        try:
+            decomposition = runtime.sklearn.decomposition.TruncatedSVD(
+                n_components=components, random_state=1729, n_iter=7,
+            )
+            reduced = decomposition.fit_transform(matrix)
+            # Candidate clouds are capped and only annotate discovery; they
+            # cannot change a dimension lifecycle or GraphMatcher admission.
+            clusters = min(4, len(samples))
+            labels = runtime.sklearn.cluster.MiniBatchKMeans(
+                n_clusters=clusters, n_init=1, random_state=1729,
+                reassignment_ratio=0,
+            ).fit_predict(reduced)
+        except Exception as exc:
+            runtime.fallback("sklearn", exc)
+            return []
+        return [
+            {"kind": "svd_kmeans", "component": index, "feature": features[index],
+             "cluster": int(labels[index % len(labels)])}
+            for index in range(min(components, len(features)))
+        ]
+
     def propose_candidates(self, conn: Any, universe_id: str) -> list[str]:
         samples = self.collect_samples(conn, universe_id)
+        # Native results are deliberately shadow-only: the existing field
+        # discoverer remains the sole source that can advance a dimension.
+        shadow_candidates = self.shadow_candidates(
+            samples, getattr(self, "runtime", acceleration_runtime)
+        )
         fields = self.build_residuals(samples)
         candidates = sorted(
             (
@@ -403,6 +490,36 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
             self._write_dimension_cloud(conn, dimension_id, field, values, stability, now)
         self._write_relations(conn, universe_id, candidates)
         self._enforce_capacity(conn, universe_id)
+        # Library-generated components remain *candidate* metadata.  They
+        # have neither projections nor lifecycle authority, so they cannot
+        # bypass support/stability/holdout checks or affect GraphMatcher.
+        for shadow in shadow_candidates:
+            feature = "sklearn:{kind}:{component}:{cluster}:{feature}".format(**shadow)
+            dimension_id = stable_id("dimension", universe_id, feature)
+            dimension_ids.append(dimension_id)
+            conn.execute(
+                """INSERT INTO latent_dimensions
+                   (id,canonical_dimension_id,universe_id,owner_scope,
+                    representation_type,basis_json,status,created_at,last_updated_at)
+                   VALUES(?,?,?,'universe','subspace',?,'candidate',?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     basis_json=excluded.basis_json,status='candidate',
+                     last_updated_at=excluded.last_updated_at""",
+                (
+                    dimension_id,
+                    stable_id("canonical-dimension", universe_id, feature),
+                    universe_id,
+                    encode({
+                        "backend": "sklearn",
+                        "shadow": True,
+                        "feature_family": "semantic_structural",
+                        "residual_feature": feature,
+                        **shadow,
+                    }),
+                    now,
+                    now,
+                ),
+            )
         return dimension_ids
 
     def update_existing(
@@ -559,10 +676,17 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
         self, conn: Any, dimension_id: str, field: str, values: Sequence[Mapping[str, Any]], now: str
     ) -> None:
         entity_values: dict[str, list[float]] = defaultdict(list)
+        occurrence_rows = []
         for sample in values:
             membership = _clamp(self._feature_value(sample, field))
             entity_values[str(sample["entity_id"])].append(membership)
-            conn.execute(
+            occurrence_rows.append((
+                stable_id("projection", dimension_id, "occurrence", sample["id"]), dimension_id,
+                sample["id"], sample["context_id"], encode([membership]), membership,
+                1.0 - membership, 0.75, now,
+            ))
+        if occurrence_rows:
+            conn.executemany(
                 """INSERT INTO projections
                    (id,dimension_id,source_type,source_id,context_id,coordinates_json,
                     membership,distance_to_core,confidence,calculated_at)
@@ -570,13 +694,18 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
                    ON CONFLICT(id) DO UPDATE SET
                      coordinates_json=excluded.coordinates_json,membership=excluded.membership,
                      distance_to_core=excluded.distance_to_core,calculated_at=excluded.calculated_at""",
-                (stable_id("projection", dimension_id, "occurrence", sample["id"]), dimension_id,
-                 sample["id"], sample["context_id"], encode([membership]), membership,
-                 1.0 - membership, 0.75, now),
+                occurrence_rows,
             )
+        entity_rows = []
         for entity_id, memberships in entity_values.items():
             membership = sum(memberships) / len(memberships)
-            conn.execute(
+            entity_rows.append((
+                stable_id("projection", dimension_id, "entity", entity_id), dimension_id,
+                entity_id, encode([round(membership, 6)]), membership,
+                1.0 - membership, 0.8, now,
+            ))
+        if entity_rows:
+            conn.executemany(
                 """INSERT INTO projections
                    (id,dimension_id,source_type,source_id,context_id,coordinates_json,
                     membership,distance_to_core,confidence,calculated_at)
@@ -584,9 +713,7 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
                    ON CONFLICT(id) DO UPDATE SET
                      coordinates_json=excluded.coordinates_json,membership=excluded.membership,
                      distance_to_core=excluded.distance_to_core,calculated_at=excluded.calculated_at""",
-                (stable_id("projection", dimension_id, "entity", entity_id), dimension_id,
-                 entity_id, encode([round(membership, 6)]), membership, 1.0 - membership,
-                 0.8, now),
+                entity_rows,
             )
 
     def _write_dimension_cloud(
@@ -689,9 +816,13 @@ def _record_event(conn: Any, universe_id: str, event_type: str, subject_id: str,
 class UniverseService:
     """Persistence, discovery and query facade for all dynamic universes."""
 
-    def __init__(self, repository: Optional[GraphRepository] = None) -> None:
+    def __init__(self, repository: Optional[GraphRepository] = None, *, runtime: Optional[AccelerationRuntime] = None) -> None:
         self.repository = repository or GraphRepository()
+        self.acceleration = runtime or acceleration_runtime
         self.discoverer: DimensionDiscoverer = SparseResidualDiscoverer()
+        # The discoverer is intentionally stateless except for this optional
+        # runtime, so tests and experiments can inject an isolated instance.
+        self.discoverer.runtime = self.acceleration  # type: ignore[attr-defined]
         self._ensure_universes()
 
     def _ensure_universes(self) -> None:
@@ -932,6 +1063,10 @@ class UniverseService:
                 if discover_dimensions:
                     self._refresh_clouds(conn, "abstractions")
                 self._refresh_statistics(conn, "abstractions")
+            # A source transaction changes both projection memberships and
+            # vertical edges.  Increment each revision exactly once only
+            # after all materialisation work has succeeded.
+            self.repository.bump_revisions(conn)
         return {"source_id": source_id, "ingested": True, "universes": sorted(touched)}
 
     def remove_source(self, source_id: str) -> dict[str, Any]:
@@ -951,6 +1086,7 @@ class UniverseService:
                 conn.execute("UPDATE universe_entities SET frequency=(SELECT COUNT(*) FROM universe_occurrences o WHERE o.entity_id=universe_entities.id),updated_at=? WHERE universe_id=?", (utcnow(), universe_id))
                 self._refresh_clouds(conn, universe_id)
                 self._refresh_statistics(conn, universe_id)
+            self.repository.bump_revisions(conn)
         return {"source_id": source_id, "removed": True, "universes": affected}
 
     @staticmethod
@@ -1435,8 +1571,19 @@ class UniverseService:
         with self.repository.transaction() as conn:
             self._require_universe(conn, universe_id)
             entities = conn.execute("SELECT id,display_value FROM universe_entities WHERE universe_id=? ORDER BY frequency DESC LIMIT ?", (universe_id, max(1, min(int(payload.get("limit") or 200), 2000)))).fetchall()
+            entity_ids = [str(entity["id"]) for entity in entities]
+            memberships_by_entity: dict[str, dict[str, float]] = defaultdict(dict)
+            if entity_ids:
+                rows = conn.execute(
+                    "SELECT source_id,dimension_id,membership FROM projections WHERE source_type='entity' AND source_id IN ({}) AND dimension_id IN ({})".format(
+                        ",".join("?" for _ in entity_ids), ",".join("?" for _ in dimensions)
+                    ),
+                    [*entity_ids, *dimensions],
+                ).fetchall()
+                for row in rows:
+                    memberships_by_entity[str(row["source_id"])][str(row["dimension_id"])] = float(row["membership"])
             for entity in entities:
-                memberships = {row["dimension_id"]: float(row["membership"]) for row in conn.execute("SELECT dimension_id,membership FROM projections WHERE source_type='entity' AND source_id=? AND dimension_id IN (" + ",".join("?" for _ in dimensions) + ")", [entity["id"], *dimensions]).fetchall()}
+                memberships = memberships_by_entity[str(entity["id"])]
                 result.append({"id": entity["id"], "label": entity["display_value"], "x": memberships.get(dimensions[0], 0.0), "y": memberships.get(dimensions[1], 0.0) if len(dimensions) > 1 else 0.5, "projections": memberships})
         return {"universe_id": universe_id, "space_type": space_type, "projection_method": payload.get("projection_method") or "selected_dimensions", "points": result, "notice": "Screen coordinates are a two-dimensional projection, not the model distance."}
 

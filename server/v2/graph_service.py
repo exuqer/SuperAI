@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from server.core.settings import settings
 
+from .acceleration import AccelerationRuntime, runtime as acceleration_runtime
 from .event_graph import EventGraphPipeline
 from .graph_learning import ConstructionLearner, ObservationSignature
 from .graph_models import (
@@ -41,13 +42,18 @@ class GraphTrainingService:
         self,
         repository: Optional[GraphRepository] = None,
         morphology: Any = None,
+        *,
+        runtime: Optional[AccelerationRuntime] = None,
     ) -> None:
         if morphology is None:
             from .russian_morphology import RussianMorphology
             morphology = RussianMorphology()
         self.repository = repository or GraphRepository()
+        self.acceleration = runtime or acceleration_runtime
         self.events = EventGraphPipeline(self.repository, morphology)
-        self.universes = UniverseService(self.repository)
+        self.universes = UniverseService(
+            self.repository, runtime=self.acceleration
+        )
 
     def _materialize_and_project(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         discover_dimensions = kwargs.pop("discover_dimensions", None)
@@ -312,14 +318,18 @@ class GraphDialogueService:
         self,
         repository: Optional[GraphRepository] = None,
         morphology: Any = None,
+        *,
+        runtime: Optional[AccelerationRuntime] = None,
     ) -> None:
         if morphology is None:
             from .russian_morphology import RussianMorphology
             morphology = RussianMorphology()
         self.repository = repository or GraphRepository()
+        self.acceleration = runtime or acceleration_runtime
         self.morphology = morphology
         self.builder = QueryGraphBuilder(self.repository, morphology)
         self.matcher = GraphMatcher(self.repository)
+        self.matcher.swarms.acceleration = self.acceleration
         self.responses = GraphResponsePlanner(morphology)
         self.constructions = ConstructionLearner()
 
@@ -743,6 +753,30 @@ class GraphDialogueService:
             "response_plan": answer,
             "validation": answer.get("validation"),
         }
+        diagnostics = self.acceleration.diagnostics()
+        swarm_metrics = swarm_trace.get("metrics") or {}
+        diagnostics["vector_backend"] = str(
+            swarm_metrics.get("vector_backend") or diagnostics["vector_backend"]
+        )
+        diagnostics["route_backend"] = str(
+            swarm_metrics.get("route_backend") or diagnostics["route_backend"]
+        )
+        trace.update({
+            **diagnostics,
+            "sql_ms": 0.0,
+            "numerical_ms": 0.0,
+            "serialization_ms": 0.0,
+            "index_build_ms": float(
+                (swarm_trace.get("metrics") or {}).get("index_build_ms") or 0.0
+            ),
+            "peak_memory_bytes": 0,
+            "python_iterations": int(
+                swarm_metrics.get("events_scanned") or 0
+            ),
+            "sqlite_execute_count": int(
+                swarm_metrics.get("database_queries") or 0
+            ),
+        })
         next_state = {
             "query_graph": graph_dict,
             "selected_bindings": selected_bindings_dict,

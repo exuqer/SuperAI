@@ -65,8 +65,44 @@ class GraphRepository:
     def reset(self) -> None:
         """Remove all current model state; this operation is intentionally final."""
         with database.get_connection() as conn:
+            previous = {
+                str(row["key"]): int(row["value"])
+                for row in conn.execute(
+                    """SELECT key,value FROM graph_meta
+                       WHERE key IN ('projection_revision','transition_revision')"""
+                ).fetchall()
+            }
             reset_graph_schema(conn)
+            for name in ("projection_revision", "transition_revision"):
+                conn.execute(
+                    "UPDATE graph_meta SET value=? WHERE key=?",
+                    (str(previous.get(name, 0) + 1), name),
+                )
             conn.commit()
+
+    @staticmethod
+    def bump_revisions(conn: Any, *, projection: bool = True, transition: bool = True) -> Dict[str, int]:
+        """Invalidate process-local derived indices after committed geometry changes."""
+        names = []
+        if projection:
+            names.append("projection_revision")
+        if transition:
+            names.append("transition_revision")
+        for name in names:
+            conn.execute(
+                """INSERT INTO graph_meta(key,value) VALUES(?, '1')
+                   ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1""",
+                (name,),
+            )
+        if not names:
+            return {}
+        rows = conn.execute(
+            "SELECT key,value FROM graph_meta WHERE key IN ({})".format(
+                ",".join("?" for _ in names)
+            ),
+            names,
+        ).fetchall()
+        return {str(row["key"]): int(row["value"]) for row in rows}
 
     def graph_meta(self) -> Dict[str, str]:
         with self.transaction() as conn:

@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Dict, Mapping
 
+import server.database as database
 from server.core.settings import settings
 
+from .acceleration import AccelerationRuntime, runtime as acceleration_runtime
 from .graph_repository import GraphRepository, decode, encode, stable_id, utcnow
 
 
@@ -94,8 +96,9 @@ class JointBindingCoordinator:
 class GapSwarmCoordinator:
     """Run one deterministic Scout/Worker/Assembly/Observer swarm per GAP."""
 
-    def __init__(self, repository: GraphRepository) -> None:
+    def __init__(self, repository: GraphRepository, *, runtime: AccelerationRuntime | None = None) -> None:
         self.repository = repository
+        self.acceleration = runtime or acceleration_runtime
         self.joint = JointBindingCoordinator()
 
     def _plan(self, graph: Any, conn: Any) -> QueryPlan:
@@ -319,6 +322,45 @@ class GapSwarmCoordinator:
         })
         return combined, by_dimension, len(seed_rows) + len(rows)
 
+    def _warm_projection_index(
+        self,
+        conn: Any,
+        plan: QueryPlan,
+        projection_revision: str,
+    ) -> tuple[str, float]:
+        """Build/query the exact vector cache without changing SQL priority.
+
+        Predicate and known-node SQL hits continue to determine the candidate
+        order.  The vector probe is a bounded supplemental signal retained in
+        memory for subsequent swarm rounds, never a GraphMatcher shortcut.
+        """
+        dimensions = plan.enabled_dimensions
+        if not dimensions or not plan.seed_entities:
+            return "numpy", 0.0
+        index = self.acceleration.projection_index(
+            database.get_db_path(), projection_revision, dimensions
+        )
+        if not index.size:
+            rows = conn.execute(
+                """SELECT source_id,dimension_id,membership FROM projections
+                   WHERE source_type='entity' AND dimension_id IN ({})
+                   ORDER BY source_id,dimension_id""".format(
+                    ",".join("?" for _ in dimensions)
+                ),
+                list(dimensions),
+            ).fetchall()
+            vectors: Dict[str, Dict[str, float]] = {}
+            for row in rows:
+                vectors.setdefault(str(row["source_id"]), {})[
+                    str(row["dimension_id"])
+                ] = float(row["membership"])
+            index.rebuild(vectors.items())
+        # The query warms the exact search path and validates malformed seed
+        # vectors are ignored.  Results intentionally do not reorder the SQL
+        # candidate list below.
+        index.search({dimension: 1.0 for dimension in dimensions}, 1)
+        return index.backend, index.build_ms
+
     @staticmethod
     def _mission(
         run_id: str,
@@ -513,6 +555,28 @@ class GapSwarmCoordinator:
         now = utcnow()
         with self.repository.transaction() as conn:
             plan = self._plan(graph, conn)
+            meta = {
+                str(row["key"]): str(row["value"])
+                for row in conn.execute(
+                    "SELECT key,value FROM graph_meta WHERE key IN ('projection_revision','transition_revision')"
+                ).fetchall()
+            }
+            route_index = self.acceleration.route_index(
+                database.get_db_path(), meta.get("transition_revision", "0")
+            )
+            if not route_index.adjacency:
+                route_index.rebuild(
+                    conn.execute(
+                        "SELECT id,source_id,target_id,weight FROM universe_transitions"
+                    ).fetchall()
+                )
+            route_neighbours = route_index.expand(
+                self._word_entity_ids(plan.seed_entities),
+                budget=int(plan.budget["max_vertical_transitions"]),
+            )
+            vector_backend, index_build_ms = self._warm_projection_index(
+                conn, plan, meta.get("projection_revision", "0")
+            )
             index_event_ids = self._index_event_ids(conn, plan)
             retrieval_baseline_event_ids = self._index_event_ids(
                 conn,
@@ -686,6 +750,8 @@ class GapSwarmCoordinator:
                         max(0, len(mission["visited_universes"]) - 1)
                         for mission in missions
                     ),
+                    "route_neighbour_count": len(route_neighbours),
+                    "route_backend": route_index.backend,
                     "events_considered": len(candidate_event_ids),
                     "events_returned": len(candidate_event_ids),
                     "retrieval_mode": retrieval_mode,
@@ -768,6 +834,10 @@ class GapSwarmCoordinator:
                 "graph_match_attempts": 0,
                 "database_queries": 5,
                 "elapsed_ms": elapsed_ms,
+                "route_neighbour_count": len(route_neighbours),
+                "route_backend": route_index.backend,
+                "vector_backend": vector_backend,
+                "index_build_ms": round(index_build_ms, 3),
             },
         }
 

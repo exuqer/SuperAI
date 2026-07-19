@@ -84,3 +84,17 @@ continual 16 → повторный holdout → blind regression → smoke 25/50
 конкретных конструкциях, а не корпусной метрикой. Размерные и семантические
 свойства микровселенных являются эвристической производной наблюдений, а не
 доказанной моделью реального мира.
+
+## Optional acceleration
+
+For development with the optional native acceleration backends, install:
+
+```bash
+pip install -e ".[dev,acceleration]"
+```
+
+`SUPERAI_ACCELERATION_MODE` accepts `auto` (default), `native`, or `python`.
+`auto` records an unavailable optional backend and continues with the exact
+NumPy/SQLite implementation; `native` fails during startup when a required
+backend is unavailable; and
+`python` is the deterministic reference path used by parity tests.

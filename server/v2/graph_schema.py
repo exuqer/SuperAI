@@ -500,6 +500,8 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS binding_query_score_idx
             ON candidate_bindings(query_graph_id, status, total_score DESC);
+        CREATE INDEX IF NOT EXISTS binding_gap_query_score_idx
+            ON candidate_bindings(query_graph_id, gap_node_id, status, total_score DESC);
         CREATE INDEX IF NOT EXISTS binding_event_idx
             ON candidate_bindings(event_id, query_graph_id);
 
@@ -568,6 +570,14 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             FOREIGN KEY(swarm_run_id) REFERENCES swarm_runs(id) ON DELETE CASCADE
         );
+        CREATE INDEX IF NOT EXISTS bee_mission_run_idx
+            ON bee_missions(swarm_run_id);
+        CREATE INDEX IF NOT EXISTS bee_step_run_idx
+            ON bee_steps(swarm_run_id);
+        CREATE INDEX IF NOT EXISTS nectar_packet_run_idx
+            ON nectar_packets(swarm_run_id);
+        CREATE INDEX IF NOT EXISTS candidate_observation_run_idx
+            ON candidate_event_observations(swarm_run_id);
 
         CREATE TABLE IF NOT EXISTS binding_configurations (
             id TEXT PRIMARY KEY,
@@ -907,6 +917,8 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             ON projections(dimension_id, source_type, membership DESC);
         CREATE INDEX IF NOT EXISTS projection_source_idx
             ON projections(source_type, source_id, membership DESC);
+        CREATE INDEX IF NOT EXISTS projection_source_dimension_idx
+            ON projections(source_type, source_id, dimension_id, membership DESC);
 
         CREATE TABLE IF NOT EXISTS dimension_relations (
             source_dimension_id TEXT NOT NULL,
@@ -954,6 +966,10 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS universe_transition_source_idx
             ON universe_transitions(source_universe_id, source_id, weight DESC);
+        CREATE INDEX IF NOT EXISTS universe_transition_target_idx
+            ON universe_transitions(target_universe_id, target_id, weight DESC);
+        CREATE INDEX IF NOT EXISTS universe_transition_context_idx
+            ON universe_transitions(context_id);
 
         CREATE TABLE IF NOT EXISTS universe_training_events (
             id TEXT PRIMARY KEY,
@@ -1011,9 +1027,12 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         "query_graph_version": QUERY_GRAPH_VERSION,
         "generation_version": GENERATION_VERSION,
         "migration_version": MIGRATION_VERSION,
+        "projection_revision": "0",
+        "transition_revision": "0",
     }
     conn.executemany(
         """INSERT INTO graph_meta(key,value) VALUES(?,?)
-           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value
+           WHERE graph_meta.key NOT IN ('projection_revision','transition_revision')""",
         list(versions.items()),
     )

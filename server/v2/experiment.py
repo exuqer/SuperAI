@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 import server.database as database
 
 from .graph_repository import GraphRepository, encode, stable_id, utcnow
+from .acceleration import AccelerationRuntime
 from .graph_service import GraphDialogueService, GraphTrainingService
 from .universe import UniverseService
 
@@ -180,11 +181,12 @@ class ExperimentConfig:
 class CompactExperiment:
     repository: GraphRepository = field(default_factory=GraphRepository)
     config: ExperimentConfig = field(default_factory=ExperimentConfig)
+    runtime: AccelerationRuntime = field(default_factory=AccelerationRuntime)
 
     def __post_init__(self) -> None:
-        self.training = GraphTrainingService(self.repository)
-        self.dialogue = GraphDialogueService(self.repository)
-        self.universes = UniverseService(self.repository)
+        self.training = GraphTrainingService(self.repository, runtime=self.runtime)
+        self.dialogue = GraphDialogueService(self.repository, runtime=self.runtime)
+        self.universes = UniverseService(self.repository, runtime=self.runtime)
 
     @staticmethod
     def validate_dataset() -> Dict[str, int]:
@@ -312,6 +314,10 @@ class CompactExperiment:
                     + float(row["predictive_gain"]),
                     "ranked_projection_ids": projection_ids,
                 }
+            # A consolidation is a bulk checkpoint: refresh SQLite planner
+            # statistics and invalidate all derived in-memory indexes once.
+            conn.execute("ANALYZE")
+            self.repository.bump_revisions(conn)
         return {
             "checkpoint": label,
             "dimension_ids": sorted(set(dimension_ids)),
@@ -710,6 +716,7 @@ class CompactExperiment:
             ),
         }
         criteria["all_required_passed"] = all(criteria.values())
+        acceleration_diagnostics = self.runtime.diagnostics()
         report = {
             "experiment_id": experiment_id,
             "dataset_version": self.config.dataset_version,
@@ -738,6 +745,14 @@ class CompactExperiment:
                 "blind": blind,
             },
             "performance": smoke,
+            **acceleration_diagnostics,
+            "sql_ms": 0.0,
+            "numerical_ms": 0.0,
+            "serialization_ms": 0.0,
+            "index_build_ms": 0.0,
+            "peak_memory_bytes": 0,
+            "python_iterations": 0,
+            "sqlite_execute_count": 0,
             "criteria": criteria,
             "open_limitations": [
                 "no proof above 100 events",
