@@ -10,7 +10,7 @@ from .models import ParsedToken, QuestionOperator
 class QuestionOperatorParser:
     QUESTION_LEMMAS = {
         "кто", "что", "где", "куда", "откуда", "когда", "как", "почему",
-        "зачем", "чем", "сколько",
+        "зачем", "чем", "сколько", "который", "чей", "каков",
     }
     TYPED_QUESTION_LEMMA = "какой"
 

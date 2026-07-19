@@ -35,12 +35,14 @@ CONTRADICTS
 ## Модули
 
 - `graph_models.py` — неизменяемые контракты узлов, сигнатур, слотов и binding.
-- `graph_schema.py` — свежая SQLite-схема V2.8 и индексы обоих слоёв.
+- `graph_schema.py` — свежая SQLite-схема V2.9 и индексы обоих слоёв.
 - `graph_learning.py` — similarity, центроиды, local slots, slot sets,
   prototypes, anonymous semantic clusters и construction clusters.
 - `event_graph.py` — поздняя морфология и материализация подтверждённых событий.
 - `query_graph.py` — gap projection, строгий графовый допуск, binding,
   планирование и обратная проверка ответа.
+- `query_operator_learning.py` — профили конкретных употреблений операторов,
+  их проекции, slot history и shadow-прогнозы без семантического словаря.
 - `graph_service.py` — staging/commit/retract, persistent dialogue, безопасные
   training episodes и передача подтверждённых источников в `UniverseService`.
 
@@ -69,6 +71,14 @@ predicate index
 конструкцию и совместимость gap со слотом, но вопрос и ответ остаются
 лингвистическими свидетельствами со статусом `STAGED`. Событие мира при этом не
 создаётся. `UNRESOLVED`, конфликтные и невалидные ответы не обучают модель.
+
+Каждый вопросительный GAP с поверхностным оператором дополнительно сохраняется
+как `QueryOperatorOccurrence`. Подтверждённый binding обновляет лишь
+наблюдаемые проекции: словоформу, морфологию, контекст запроса, локальные
+слоты, облако ответа, отношение к событию и контекст диалога. Значения
+`кто/что/где/...` не задаются кодом. На текущем этапе эти профили работают в
+режиме `SHADOW`: они видны в trace и собирают историю принятых и отклонённых
+кандидатов, но не меняют admission и ранжирование `GraphMatcher`.
 
 ## Динамические микровселенные V2.8
 
@@ -114,6 +124,6 @@ generation_version
 migration_version
 ```
 
-Схема SQLite: `schema_version = 31`,
-`migration_version = fresh-v2.8-wordforms`. Несовместимое хранилище
+Схема SQLite: `schema_version = 33`,
+`migration_version = fresh-v2.9-query-operators`. Несовместимое хранилище
 пересоздаётся: перенос прежних таблиц и backfill намеренно не выполняются.

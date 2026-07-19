@@ -15,6 +15,9 @@ from .graph_models import (
 )
 
 
+# Query-operator evidence is an additive extension to V2.8's graph schema.
+# Keeping this version stable lets existing V2.8 databases gain the tables
+# below through CREATE IF NOT EXISTS instead of being reset.
 SCHEMA_VERSION = 33
 
 
@@ -633,6 +636,66 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(query_graph_id) REFERENCES query_graphs(id)
                 ON DELETE CASCADE
         );
+
+        /* Query operators are learned from concrete, validated uses.  These
+           tables contain no named participant roles or answer-type labels:
+           profiles retain only observable projections, local slot evidence
+           and the history required to evaluate a shadow prediction. */
+        CREATE TABLE IF NOT EXISTS query_operator_profiles (
+            id TEXT PRIMARY KEY,
+            profile_key TEXT NOT NULL UNIQUE,
+            projections_json TEXT NOT NULL DEFAULT '{}',
+            compatible_slots_json TEXT NOT NULL DEFAULT '{}',
+            support_count INTEGER NOT NULL DEFAULT 0 CHECK(support_count >= 0),
+            validated_count INTEGER NOT NULL DEFAULT 0 CHECK(validated_count >= 0),
+            rejected_count INTEGER NOT NULL DEFAULT 0 CHECK(rejected_count >= 0),
+            confidence REAL NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 1),
+            status TEXT NOT NULL CHECK(status IN ('SHADOW','LEARNED')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS query_operator_profile_status_idx
+            ON query_operator_profiles(status, confidence DESC);
+
+        CREATE TABLE IF NOT EXISTS query_operator_occurrences (
+            id TEXT PRIMARY KEY,
+            query_graph_id TEXT NOT NULL,
+            gap_node_id TEXT NOT NULL,
+            profile_id TEXT,
+            operator_surface TEXT NOT NULL,
+            operator_normalized TEXT NOT NULL,
+            token_indices_json TEXT NOT NULL DEFAULT '[]',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            prediction_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL CHECK(status IN ('OBSERVED','VALIDATED','REJECTED')),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(query_graph_id) REFERENCES query_graphs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(profile_id) REFERENCES query_operator_profiles(id)
+                ON DELETE SET NULL,
+            UNIQUE(query_graph_id, gap_node_id)
+        );
+        CREATE INDEX IF NOT EXISTS query_operator_occurrence_profile_idx
+            ON query_operator_occurrences(profile_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS query_operator_experiences (
+            id TEXT PRIMARY KEY,
+            occurrence_id TEXT NOT NULL,
+            profile_id TEXT,
+            outcome TEXT NOT NULL CHECK(outcome IN
+                ('VALIDATED_BINDING','REJECTED_BINDING',
+                 'UNSELECTED_CANDIDATE','REJECTED_EVENT')),
+            validated INTEGER NOT NULL DEFAULT 0 CHECK(validated IN (0,1)),
+            binding_json TEXT NOT NULL DEFAULT '{}',
+            rejection_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(occurrence_id) REFERENCES query_operator_occurrences(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(profile_id) REFERENCES query_operator_profiles(id)
+                ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS query_operator_experience_occurrence_idx
+            ON query_operator_experiences(occurrence_id, created_at);
 
         /* A universe is deliberately generic.  Names are UI metadata, not
            semantic instructions for the learner. */

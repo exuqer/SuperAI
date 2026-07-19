@@ -9,6 +9,7 @@ keep the base Python 3.9 installation small and usable.
 from __future__ import annotations
 
 import heapq
+import importlib
 import math
 import os
 from collections import defaultdict, deque
@@ -23,14 +24,33 @@ import numpy as np
 ACCELERATION_MODES = {"auto", "native", "python"}
 
 
-def _as_vector(value: Mapping[str, float] | Sequence[float], dimensions: Sequence[str]) -> np.ndarray:
-    if isinstance(value, Mapping):
-        return np.asarray([float(value.get(key, 0.0)) for key in dimensions], dtype=np.float32)
-    return np.asarray(value, dtype=np.float32).reshape(-1)
+def _as_vector(
+    value: Mapping[str, float] | Sequence[float],
+    dimensions: Sequence[str],
+) -> Optional[np.ndarray]:
+    """Convert observable coordinates without turning malformed data into errors."""
+    try:
+        if isinstance(value, Mapping):
+            return np.asarray(
+                [float(value.get(key, 0.0)) for key in dimensions],
+                dtype=np.float32,
+            )
+        return np.asarray(value, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
-def _normalise(vector: np.ndarray) -> Optional[np.ndarray]:
-    if vector.size == 0 or not np.isfinite(vector).all():
+def _normalise(
+    vector: Optional[np.ndarray],
+    *,
+    expected_size: Optional[int] = None,
+) -> Optional[np.ndarray]:
+    if (
+        vector is None
+        or vector.size == 0
+        or (expected_size is not None and vector.size != expected_size)
+        or not np.isfinite(vector).all()
+    ):
         return None
     norm = float(np.linalg.norm(vector))
     if not math.isfinite(norm) or norm <= 0.0:
@@ -77,7 +97,10 @@ class ProjectionIndex:
             else:
                 self.dimensions = tuple(str(index) for index, _ in enumerate(vector))
             self._vectors = np.empty((0, len(self.dimensions)), dtype=np.float32)
-        candidate = _normalise(_as_vector(vector, self.dimensions))
+        candidate = _normalise(
+            _as_vector(vector, self.dimensions),
+            expected_size=len(self.dimensions),
+        )
         if candidate is None:
             self.skipped += 1
             return False
@@ -101,25 +124,62 @@ class ProjectionIndex:
             else:
                 item_id, vector = item
                 prepared.append((str(item_id), vector))
-        self._ids = []
-        self._vectors = np.empty((0, len(self.dimensions)), dtype=np.float32)
+        if not self.dimensions and prepared:
+            mapping_dimensions = {
+                str(key)
+                for _, vector in prepared
+                if isinstance(vector, Mapping)
+                for key in vector
+            }
+            if mapping_dimensions:
+                self.dimensions = tuple(sorted(mapping_dimensions))
+            else:
+                sequence_lengths = {
+                    len(vector)
+                    for _, vector in prepared
+                    if not isinstance(vector, Mapping)
+                    and hasattr(vector, "__len__")
+                }
+                if len(sequence_lengths) == 1:
+                    self.dimensions = tuple(
+                        str(index) for index in range(sequence_lengths.pop())
+                    )
+        ids: list[str] = []
+        vectors: list[np.ndarray] = []
         self._faiss_index = None
         self.skipped = 0
         for item_id, vector in sorted(prepared, key=lambda value: value[0]):
-            self.add(item_id, vector)
+            candidate = _normalise(
+                _as_vector(vector, self.dimensions),
+                expected_size=len(self.dimensions),
+            )
+            if candidate is None:
+                self.skipped += 1
+                continue
+            ids.append(item_id)
+            vectors.append(candidate)
+        self._ids = ids
+        self._vectors = (
+            np.vstack(vectors).astype(np.float32, copy=False)
+            if vectors
+            else np.empty((0, len(self.dimensions)), dtype=np.float32)
+        )
         if self.runtime.use("faiss") and len(self._ids):
             try:
                 index = self.runtime.faiss.IndexFlatIP(self._vectors.shape[1])
                 index.add(self._vectors)
                 self._faiss_index = index
             except Exception as exc:  # native errors are safe only in auto
-                self.runtime.fallback("faiss", exc)
+                self.runtime.backend_failure("faiss", exc)
                 self._faiss_index = None
         self.build_ms = (perf_counter() - started) * 1000.0
         return self
 
     def search(self, vector: Mapping[str, float] | Sequence[float], limit: int = 10) -> list[ProjectionMatch]:
-        query = _normalise(_as_vector(vector, self.dimensions))
+        query = _normalise(
+            _as_vector(vector, self.dimensions),
+            expected_size=len(self.dimensions),
+        )
         if query is None or not self._ids or limit <= 0:
             return []
         # Ask FAISS for all rows.  Its internal tie ordering is unspecified;
@@ -132,7 +192,7 @@ class ProjectionIndex:
                     for score, index in zip(scores[0], indices[0]) if int(index) >= 0
                 ]
             except Exception as exc:
-                self.runtime.fallback("faiss", exc)
+                self.runtime.backend_failure("faiss", exc)
                 pairs = []
         else:
             pairs = []
@@ -188,22 +248,26 @@ class RouteGraphIndex:
                         graph.add_edge(self._node_indices[source], self._node_indices[target], (cost, edge_id))
                 self._graph = graph
             except Exception as exc:
-                self.runtime.fallback("rustworkx", exc)
+                self.runtime.backend_failure("rustworkx", exc)
         return self
 
     def expand(self, seeds: Iterable[str], budget: int = 128) -> list[str]:
         """Deterministically expand neighbours without exceeding ``budget``."""
-        seen = {str(seed) for seed in seeds}
-        queue = deque(sorted(seen))
-        result = list(sorted(seen))
-        while queue and len(result) < max(0, budget):
+        limit = max(0, int(budget))
+        if not limit:
+            return []
+        initial = sorted({str(seed) for seed in seeds})[:limit]
+        seen = set(initial)
+        queue = deque(initial)
+        result = list(initial)
+        while queue and len(result) < limit:
             node = queue.popleft()
             for target, _, _ in self.adjacency.get(node, ()):
                 if target not in seen:
                     seen.add(target)
                     result.append(target)
                     queue.append(target)
-                    if len(result) >= budget:
+                    if len(result) >= limit:
                         break
         return result
 
@@ -254,9 +318,22 @@ class AccelerationRuntime:
         if self.mode == "python":
             self._modules[name] = None
             return None
-        module_name = {"faiss": "faiss", "rustworkx": "rustworkx", "scipy": "scipy", "sklearn": "sklearn"}[name]
+        module_name = {
+            "faiss": "faiss",
+            "rustworkx": "rustworkx",
+            "scipy": "scipy",
+            "sklearn": "sklearn",
+        }[name]
         try:
-            module = __import__(module_name)
+            module = importlib.import_module(module_name)
+            # The accelerated callers use these public submodules directly.
+            # Import them here so availability is checked during native
+            # startup and does not depend on unrelated import order.
+            if name == "scipy":
+                importlib.import_module("scipy.sparse")
+            elif name == "sklearn":
+                importlib.import_module("sklearn.cluster")
+                importlib.import_module("sklearn.decomposition")
         except Exception as exc:
             if self.mode == "native":
                 raise RuntimeError("native acceleration requires %s" % module_name) from exc
@@ -288,6 +365,12 @@ class AccelerationRuntime:
         message = "%s: %s" % (backend, str(reason))
         if message not in self.fallback_reasons:
             self.fallback_reasons.append(message)
+
+    def backend_failure(self, backend: str, reason: BaseException) -> None:
+        """Fallback only in auto mode; native mode must remain fail-fast."""
+        if self.mode == "native":
+            raise RuntimeError("%s acceleration backend failed" % backend) from reason
+        self.fallback(backend, reason)
 
     def projection_index(self, database_path: str | Path, revision: str | int, dimensions: Iterable[str]) -> ProjectionIndex:
         key = (str(Path(database_path)), str(revision), tuple(sorted(str(item) for item in dimensions)))

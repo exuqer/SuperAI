@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -309,7 +310,7 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
                 reassignment_ratio=0,
             ).fit_predict(reduced)
         except Exception as exc:
-            runtime.fallback("sklearn", exc)
+            runtime.backend_failure("sklearn", exc)
             return []
         return [
             {"kind": "svd_kmeans", "component": index, "feature": features[index],
@@ -489,7 +490,6 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
             self._write_projections(conn, dimension_id, field, values, now)
             self._write_dimension_cloud(conn, dimension_id, field, values, stability, now)
         self._write_relations(conn, universe_id, candidates)
-        self._enforce_capacity(conn, universe_id)
         # Library-generated components remain *candidate* metadata.  They
         # have neither projections nor lifecycle authority, so they cannot
         # bypass support/stability/holdout checks or affect GraphMatcher.
@@ -520,6 +520,10 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
                     now,
                 ),
             )
+        # Apply the same configured budget after every candidate generator
+        # has contributed.  Running this before the shadow generator would
+        # allow native candidates to exceed the per-universe cap.
+        self._enforce_capacity(conn, universe_id)
         return dimension_ids
 
     def update_existing(
@@ -877,10 +881,41 @@ class UniverseService:
         source_id: str,
         *,
         discover_dimensions: bool = True,
+        connection: Any = None,
     ) -> dict[str, Any]:
         """Materialise confirmed graph evidence into the generic universe model."""
         touched: set[str] = set()
-        with self.repository.transaction() as conn:
+        transaction = (
+            nullcontext(connection)
+            if connection is not None
+            else self.repository.transaction()
+        )
+        with transaction as conn:
+            observed_at = utcnow()
+            training_event_rows: list[tuple[Any, ...]] = []
+            transition_counts: Counter[tuple[str, ...]] = Counter()
+            entity_states: dict[
+                str, tuple[int, Mapping[str, float]]
+            ] = {}
+
+            def queue_transition(
+                source_universe: str,
+                target_universe: str,
+                source_type: str,
+                source_value_id: str,
+                target_type: str,
+                target_value_id: str,
+            ) -> None:
+                transition_counts[(
+                    source_universe,
+                    target_universe,
+                    source_type,
+                    source_value_id,
+                    target_type,
+                    target_value_id,
+                    source_id,
+                )] += 1
+
             source = conn.execute("SELECT status FROM knowledge_sources WHERE id=?", (source_id,)).fetchone()
             if source is None:
                 raise KeyError(source_id)
@@ -926,10 +961,72 @@ class UniverseService:
                     if any("а" <= char <= "я" or char == "ё" for char in lemma)
                     else "shape:script:other"
                 ] = 0.2
-                lexeme_entity, lexeme_occurrence = self._observe(
-                    conn, "words", f"{language}:{lemma}:{sense_cluster_id}", lemma, source_id,
-                    f"lexeme:{token['token_index']}", lexeme_observable,
-                    confidence=float(morph.get("morph_score") or 0.8),
+                token_index = int(token["token_index"])
+                lexeme_key = f"{language}:{lemma}:{sense_cluster_id}"
+                lexeme_entity_id = stable_id(
+                    "universe-entity", "words", lexeme_key
+                )
+                lexeme_occurrence_id = stable_id(
+                    "universe-occurrence",
+                    "words",
+                    source_id,
+                    f"lexeme:{token_index}",
+                    lexeme_entity_id,
+                )
+                form_key = f"{language}:{lemma}:{display_surface}"
+                form_entity_id = stable_id(
+                    "universe-entity", "word_forms", form_key
+                )
+                form_occurrence_id = stable_id(
+                    "universe-occurrence",
+                    "word_forms",
+                    source_id,
+                    f"word-form:{token_index}",
+                    form_entity_id,
+                )
+                (
+                    (lexeme_entity, lexeme_occurrence),
+                    (word_form_entity, word_form_occurrence),
+                    (usage_entity, usage_occurrence),
+                ) = self._observe_many(
+                    conn,
+                    None,
+                    source_id,
+                    [
+                        {
+                            "universe_id": "words",
+                            "key": lexeme_key,
+                            "display": lemma,
+                            "context_id": f"lexeme:{token_index}",
+                            "observable": lexeme_observable,
+                            "confidence": float(
+                                morph.get("morph_score") or 0.8
+                            ),
+                        },
+                        {
+                            "universe_id": "word_forms",
+                            "key": form_key,
+                            "display": display_surface,
+                            "context_id": f"word-form:{token_index}",
+                            "observable": observable,
+                            "confidence": float(
+                                morph.get("morph_score") or 0.8
+                            ),
+                            "parent_occurrence_id": lexeme_occurrence_id,
+                        },
+                        {
+                            "universe_id": "usages",
+                            "key": f"{source_id}:{token_index}",
+                            "display": str(token["surface"]),
+                            "context_id": f"usage:{token_index}",
+                            "observable": observable,
+                            "confidence": 0.75,
+                            "parent_occurrence_id": form_occurrence_id,
+                        },
+                    ],
+                    observed_at=observed_at,
+                    event_rows=training_event_rows,
+                    entity_states=entity_states,
                 )
                 self._link_lexeme(
                     conn,
@@ -937,14 +1034,9 @@ class UniverseService:
                     language=language,
                     canonical_lemma=lemma,
                     sense_cluster_id=sense_cluster_id,
+                    observed_at=observed_at,
                 )
                 touched.add("words")
-                word_form_entity, word_form_occurrence = self._observe(
-                    conn, "word_forms", f"{language}:{lemma}:{display_surface}",
-                    display_surface, source_id, f"word-form:{token['token_index']}",
-                    observable, confidence=float(morph.get("morph_score") or 0.8),
-                    parent_occurrence_id=lexeme_occurrence,
-                )
                 self._link_word_form(
                     conn,
                     word_form_entity_id=word_form_entity,
@@ -954,17 +1046,13 @@ class UniverseService:
                     display_surface=display_surface,
                     morphology_features=morph["features"],
                     morphology_confidence=float(morph.get("morph_score") or 0.8),
+                    observed_at=observed_at,
                 )
-                self._transition(
-                    conn, "word_forms", "words", "entity", word_form_entity,
-                    "entity", lexeme_entity, source_id,
+                queue_transition(
+                    "word_forms", "words", "entity", word_form_entity,
+                    "entity", lexeme_entity,
                 )
                 touched.add("word_forms")
-                usage_entity, usage_occurrence = self._observe(
-                    conn, "usages", f"{source_id}:{token['token_index']}", str(token["surface"]), source_id,
-                    f"usage:{token['token_index']}", observable, confidence=0.75,
-                    parent_occurrence_id=word_form_occurrence,
-                )
                 self._link_word_usage(
                     conn,
                     usage_occurrence_id=usage_occurrence,
@@ -972,39 +1060,98 @@ class UniverseService:
                     word_form_entity_id=word_form_entity,
                     source_id=source_id,
                     sentence_index=int(token["sentence_index"]),
-                    token_index=int(token["token_index"]),
+                    token_index=token_index,
+                    observed_at=observed_at,
                 )
                 word_usages.append((lexeme_entity, word_form_entity, usage_occurrence))
-                self._transition(conn, "words", "usages", "entity", lexeme_entity, "occurrence", usage_occurrence, source_id)
-                self._transition(conn, "word_forms", "usages", "entity", word_form_entity, "occurrence", usage_occurrence, source_id)
+                queue_transition(
+                    "words", "usages", "entity", lexeme_entity,
+                    "occurrence", usage_occurrence,
+                )
+                queue_transition(
+                    "word_forms", "usages", "entity", word_form_entity,
+                    "occurrence", usage_occurrence,
+                )
                 touched.add("usages")
-                for char_index, character in enumerate(normalized_surface):
-                    symbol_entity, _ = self._observe(
-                        conn, "symbols", character, character, source_id,
-                        f"token:{token['token_index']}:char:{char_index}",
-                        {"position:character": min(char_index, 12) / 12.0}, confidence=0.7,
+                symbol_observations = [
+                    {
+                        "key": character,
+                        "display": character,
+                        "context_id": (
+                            f"token:{token['token_index']}:char:{char_index}"
+                        ),
+                        "observable": {
+                            "position:character": (
+                                min(char_index, 12) / 12.0
+                            )
+                        },
+                        "confidence": 0.7,
+                    }
+                    for char_index, character in enumerate(normalized_surface)
+                ]
+                for symbol_entity, _ in self._observe_many(
+                    conn,
+                    "symbols",
+                    source_id,
+                    symbol_observations,
+                    observed_at=observed_at,
+                    event_rows=training_event_rows,
+                    entity_states=entity_states,
+                ):
+                    queue_transition(
+                        "symbols", "word_forms", "entity", symbol_entity,
+                        "entity", word_form_entity,
                     )
-                    self._transition(conn, "symbols", "word_forms", "entity", symbol_entity, "entity", word_form_entity, source_id)
                     touched.add("symbols")
+                fragment_observations = []
                 for size in range(2, min(4, len(normalized_surface)) + 1):
                     for start in range(len(normalized_surface) - size + 1):
                         fragment = normalized_surface[start:start + size]
-                        fragment_entity, _ = self._observe(
-                            conn, "morphemes", fragment, fragment, source_id,
-                            f"token:{token['token_index']}:fragment:{start}:{size}",
-                            {"shape:length": float(size) / 4.0, "position:fragment": float(start) / max(1, len(normalized_surface))}, confidence=0.55,
+                        fragment_observations.append({
+                            "key": fragment,
+                            "display": fragment,
+                            "context_id": (
+                                f"token:{token['token_index']}:"
+                                f"fragment:{start}:{size}"
+                            ),
+                            "observable": {
+                                "shape:length": float(size) / 4.0,
+                                "position:fragment": (
+                                    float(start)
+                                    / max(1, len(normalized_surface))
+                                ),
+                            },
+                            "confidence": 0.55,
+                        })
+                for fragment_entity, _ in self._observe_many(
+                    conn,
+                    "morphemes",
+                    source_id,
+                    fragment_observations,
+                    observed_at=observed_at,
+                    event_rows=training_event_rows,
+                    entity_states=entity_states,
+                ):
+                        queue_transition(
+                            "morphemes", "word_forms", "entity",
+                            fragment_entity, "entity", word_form_entity,
                         )
-                        self._transition(conn, "morphemes", "word_forms", "entity", fragment_entity, "entity", word_form_entity, source_id)
                         touched.add("morphemes")
             for sentence, rows in self._group_sentences(token_rows).items():
                 key = " ".join(str(row["normalized"]) for row in rows)
                 clause_entity, clause_occurrence = self._observe(
                     conn, "clauses", key, " ".join(str(row["surface"]) for row in rows), source_id,
                     f"sentence:{sentence}", {"shape:token_count": min(len(rows), 12) / 12.0}, confidence=0.65,
+                    observed_at=observed_at,
+                    event_rows=training_event_rows,
+                    entity_states=entity_states,
                 )
                 touched.add("clauses")
                 for _, _, usage_occurrence in word_usages:
-                    self._transition(conn, "usages", "clauses", "occurrence", usage_occurrence, "occurrence", clause_occurrence, source_id)
+                    queue_transition(
+                        "usages", "clauses", "occurrence",
+                        usage_occurrence, "occurrence", clause_occurrence,
+                    )
             event_rows = conn.execute(
                 "SELECT id,predicate_lemma,predicate_surface,confidence FROM graph_events WHERE source_id=?", (source_id,)
             ).fetchall()
@@ -1012,17 +1159,29 @@ class UniverseService:
                 event_entity, event_occurrence = self._observe(
                     conn, "events", str(event["predicate_lemma"]), str(event["predicate_surface"]), source_id,
                     f"event:{event['id']}", {"context:predicate": 1.0}, confidence=float(event["confidence"]),
+                    observed_at=observed_at,
+                    event_rows=training_event_rows,
+                    entity_states=entity_states,
                 )
                 touched.add("events")
                 for _, _, usage_occurrence in word_usages:
-                    self._transition(conn, "usages", "events", "occurrence", usage_occurrence, "occurrence", event_occurrence, source_id)
+                    queue_transition(
+                        "usages", "events", "occurrence",
+                        usage_occurrence, "occurrence", event_occurrence,
+                    )
             scene_entity, scene_occurrence = self._observe(
                 conn, "scenes", source_id, source_id, source_id, "source", {"shape:source": 1.0}, confidence=0.65,
+                observed_at=observed_at,
+                event_rows=training_event_rows,
+                entity_states=entity_states,
             )
             touched.add("scenes")
             for event in event_rows:
                 event_entity = stable_id("universe-entity", "events", str(event["predicate_lemma"]))
-                self._transition(conn, "events", "scenes", "entity", event_entity, "occurrence", scene_occurrence, source_id)
+                queue_transition(
+                    "events", "scenes", "entity", event_entity,
+                    "occurrence", scene_occurrence,
+                )
             for universe_id in touched:
                 if discover_dimensions:
                     self.discoverer.propose_candidates(conn, universe_id)
@@ -1047,9 +1206,15 @@ class UniverseService:
                     f"dimension:{dimension['id']}",
                     {f"field:{basis.get('residual_feature', dimension['id'])}": 1.0},
                     confidence=0.65,
+                    observed_at=observed_at,
+                    event_rows=training_event_rows,
+                    entity_states=entity_states,
                 )
-                self._transition(conn, str(dimension["universe_id"]), "abstractions", "dimension",
-                                 str(dimension["id"]), "entity", abstraction_id, source_id)
+                queue_transition(
+                    str(dimension["universe_id"]), "abstractions",
+                    "dimension", str(dimension["id"]), "entity",
+                    abstraction_id,
+                )
                 touched.add("abstractions")
             if "abstractions" in touched:
                 if discover_dimensions:
@@ -1063,6 +1228,20 @@ class UniverseService:
                 if discover_dimensions:
                     self._refresh_clouds(conn, "abstractions")
                 self._refresh_statistics(conn, "abstractions")
+            self._write_transitions(
+                conn,
+                transition_counts,
+                observed_at=observed_at,
+                event_rows=training_event_rows,
+            )
+            if training_event_rows:
+                conn.executemany(
+                    """INSERT INTO universe_training_events
+                       (id,universe_id,event_type,subject_id,payload_json,
+                        created_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    training_event_rows,
+                )
             # A source transaction changes both projection memberships and
             # vertical edges.  Increment each revision exactly once only
             # after all materialisation work has succeeded.
@@ -1107,8 +1286,9 @@ class UniverseService:
         display_surface: str,
         morphology_features: Mapping[str, Any],
         morphology_confidence: float,
+        observed_at: Optional[str] = None,
     ) -> None:
-        now = utcnow()
+        now = observed_at or utcnow()
         conn.execute(
             """INSERT INTO word_forms
                (word_form_entity_id,lexeme_entity_id,language,normalized_surface,
@@ -1141,8 +1321,9 @@ class UniverseService:
         language: str,
         canonical_lemma: str,
         sense_cluster_id: str,
+        observed_at: Optional[str] = None,
     ) -> None:
-        now = utcnow()
+        now = observed_at or utcnow()
         conn.execute(
             """INSERT INTO lexemes
                (lexeme_entity_id,language,canonical_lemma,sense_cluster_id,
@@ -1170,6 +1351,7 @@ class UniverseService:
         source_id: str,
         sentence_index: int,
         token_index: int,
+        observed_at: Optional[str] = None,
     ) -> None:
         conn.execute(
             """INSERT OR IGNORE INTO word_usages
@@ -1183,7 +1365,7 @@ class UniverseService:
                 source_id,
                 sentence_index,
                 token_index,
-                utcnow(),
+                observed_at or utcnow(),
             ),
         )
 
@@ -1191,38 +1373,431 @@ class UniverseService:
         self, conn: Any, universe_id: str, key: str, display: str, source_id: str,
         context_id: str, observable: Mapping[str, float], *, confidence: float,
         parent_occurrence_id: Optional[str] = None,
+        observed_at: Optional[str] = None,
+        event_rows: Optional[list[tuple[Any, ...]]] = None,
+        entity_states: Optional[
+            dict[str, tuple[int, Mapping[str, float]]]
+        ] = None,
     ) -> tuple[str, str]:
         entity_id = stable_id("universe-entity", universe_id, key)
         occurrence_id = stable_id("universe-occurrence", universe_id, source_id, context_id, entity_id)
-        existing_entity = conn.execute("SELECT id FROM universe_entities WHERE id=?", (entity_id,)).fetchone()
-        now = utcnow()
-        if existing_entity is None:
-            conn.execute(
+        now = observed_at or utcnow()
+        observable_json = encode(dict(observable))
+        cached_state = (
+            entity_states.get(entity_id)
+            if entity_states is not None
+            else None
+        )
+        created_entity = None
+        if cached_state is None:
+            created_entity = conn.execute(
                 """INSERT INTO universe_entities
-                   (id,universe_id,observable_key,display_value,prototype_vector_json,
-                    base_position_json,mass,gravity,stability,frequency,dispersion,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,1,0,0,0,0,?,?)""",
-                (entity_id, universe_id, key, display, encode(dict(observable)), encode(_position(entity_id)), now, now),
+                   (id,universe_id,observable_key,display_value,
+                    prototype_vector_json,base_position_json,mass,gravity,
+                    stability,frequency,dispersion,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,1,0,0,0,0,?,?)
+                   ON CONFLICT(id) DO NOTHING
+                   RETURNING id""",
+                (
+                    entity_id,
+                    universe_id,
+                    key,
+                    display,
+                    observable_json,
+                    encode(_position(entity_id)),
+                    now,
+                    now,
+                ),
+            ).fetchone()
+        if created_entity is not None:
+            event_row = (
+                stable_id(
+                    "universe-history",
+                    universe_id,
+                    "entity_created",
+                    entity_id,
+                    now,
+                ),
+                universe_id,
+                "entity_created",
+                entity_id,
+                encode({"source_id": source_id}),
+                now,
             )
-            _record_event(conn, universe_id, "entity_created", entity_id, {"source_id": source_id})
+            if event_rows is None:
+                conn.execute(
+                    """INSERT INTO universe_training_events
+                       (id,universe_id,event_type,subject_id,payload_json,
+                        created_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    event_row,
+                )
+            else:
+                event_rows.append(event_row)
         inserted = conn.execute(
             """INSERT OR IGNORE INTO universe_occurrences
                (id,universe_id,entity_id,source_id,parent_occurrence_id,context_id,
                 observable_features_json,context_vector_json,base_position_json,confidence,created_at)
                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (occurrence_id, universe_id, entity_id, source_id, parent_occurrence_id, context_id,
-             encode(dict(observable)), encode(dict(observable)), encode(_position(occurrence_id)), _clamp(confidence), now),
+            (
+                occurrence_id,
+                universe_id,
+                entity_id,
+                source_id,
+                parent_occurrence_id,
+                context_id,
+                observable_json,
+                observable_json,
+                encode(_position(occurrence_id)),
+                _clamp(confidence),
+                now,
+            ),
         ).rowcount
         if inserted:
-            row = conn.execute("SELECT frequency,prototype_vector_json FROM universe_entities WHERE id=?", (entity_id,)).fetchone()
-            frequency = int(row["frequency"]) + 1
-            prototype = _mean_vectors((decode(row["prototype_vector_json"], {}), observable))
+            if cached_state is not None:
+                previous_frequency, previous_prototype = cached_state
+            elif created_entity is not None:
+                previous_frequency = 0
+                previous_prototype = dict(observable)
+            else:
+                row = conn.execute(
+                    """SELECT frequency,prototype_vector_json
+                       FROM universe_entities WHERE id=?""",
+                    (entity_id,),
+                ).fetchone()
+                previous_frequency = int(row["frequency"])
+                previous_prototype = decode(
+                    row["prototype_vector_json"], {}
+                )
+            frequency = previous_frequency + 1
+            prototype = _mean_vectors(
+                (previous_prototype, observable)
+            )
             conn.execute(
                 """UPDATE universe_entities SET prototype_vector_json=?,mass=?,gravity=?,stability=?,frequency=?,updated_at=? WHERE id=?""",
                 (encode(prototype), round(1.0 + math.log1p(frequency), 6), round(min(1.0, frequency / 16.0), 6),
                  round(min(1.0, frequency / 8.0), 6), frequency, now, entity_id),
             )
+            if entity_states is not None:
+                entity_states[entity_id] = (frequency, prototype)
         return entity_id, occurrence_id
+
+    @staticmethod
+    def _observe_many(
+        conn: Any,
+        universe_id: Optional[str],
+        source_id: str,
+        observations: Sequence[Mapping[str, Any]],
+        *,
+        observed_at: str,
+        event_rows: list[tuple[Any, ...]],
+        entity_states: dict[str, tuple[int, Mapping[str, float]]],
+    ) -> list[tuple[str, str]]:
+        """Pre-aggregate a homogeneous observation batch.
+
+        Symbols and fragments account for most occurrence writes.  Preparing
+        their stable IDs first lets SQLite read existing aggregate state once
+        and update each entity once while preserving the same observation
+        order and recursive prototype calculation as ``_observe``.
+        """
+        prepared: list[dict[str, Any]] = []
+        for observation in observations:
+            item_universe_id = str(
+                observation.get("universe_id") or universe_id or ""
+            )
+            if not item_universe_id:
+                raise ValueError("observation universe_id is required")
+            key = str(observation["key"])
+            context_id = str(observation["context_id"])
+            observable = {
+                str(name): float(value)
+                for name, value in dict(
+                    observation.get("observable") or {}
+                ).items()
+            }
+            entity_id = stable_id(
+                "universe-entity", item_universe_id, key
+            )
+            occurrence_id = stable_id(
+                "universe-occurrence",
+                item_universe_id,
+                source_id,
+                context_id,
+                entity_id,
+            )
+            prepared.append({
+                "entity_id": entity_id,
+                "occurrence_id": occurrence_id,
+                "universe_id": item_universe_id,
+                "key": key,
+                "display": str(observation.get("display") or key),
+                "context_id": context_id,
+                "observable": observable,
+                "observable_json": encode(observable),
+                "confidence": _clamp(
+                    float(observation.get("confidence") or 0.0)
+                ),
+                "parent_occurrence_id": observation.get(
+                    "parent_occurrence_id"
+                ),
+            })
+        if not prepared:
+            return []
+
+        entity_ids = sorted({
+            str(item["entity_id"]) for item in prepared
+            if str(item["entity_id"]) not in entity_states
+        })
+        if entity_ids:
+            rows = conn.execute(
+                """SELECT id,frequency,prototype_vector_json
+                   FROM universe_entities WHERE id IN ({})""".format(
+                    ",".join("?" for _ in entity_ids)
+                ),
+                entity_ids,
+            ).fetchall()
+            entity_states.update({
+                str(row["id"]): (
+                    int(row["frequency"]),
+                    decode(row["prototype_vector_json"], {}),
+                )
+                for row in rows
+            })
+
+        first_by_entity: dict[str, Mapping[str, Any]] = {}
+        for item in prepared:
+            first_by_entity.setdefault(str(item["entity_id"]), item)
+        missing = [
+            item for entity_id, item in first_by_entity.items()
+            if entity_id not in entity_states
+        ]
+        if missing:
+            conn.executemany(
+                """INSERT INTO universe_entities
+                   (id,universe_id,observable_key,display_value,
+                    prototype_vector_json,base_position_json,mass,gravity,
+                    stability,frequency,dispersion,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,1,0,0,0,0,?,?)""",
+                [
+                    (
+                        item["entity_id"],
+                        item["universe_id"],
+                        item["key"],
+                        item["display"],
+                        item["observable_json"],
+                        encode(_position(str(item["entity_id"]))),
+                        observed_at,
+                        observed_at,
+                    )
+                    for item in missing
+                ],
+            )
+            for item in missing:
+                entity_id = str(item["entity_id"])
+                entity_states[entity_id] = (
+                    0,
+                    dict(item["observable"]),
+                )
+                event_rows.append((
+                    stable_id(
+                        "universe-history",
+                        item["universe_id"],
+                        "entity_created",
+                        entity_id,
+                        observed_at,
+                    ),
+                    item["universe_id"],
+                    "entity_created",
+                    entity_id,
+                    encode({"source_id": source_id}),
+                    observed_at,
+                ))
+
+        occurrence_ids = [
+            str(item["occurrence_id"]) for item in prepared
+        ]
+        existing_occurrences = {
+            str(row["id"])
+            for row in conn.execute(
+                """SELECT id FROM universe_occurrences
+                   WHERE id IN ({})""".format(
+                    ",".join("?" for _ in occurrence_ids)
+                ),
+                occurrence_ids,
+            ).fetchall()
+        }
+        inserted = [
+            item for item in prepared
+            if str(item["occurrence_id"]) not in existing_occurrences
+        ]
+        if inserted:
+            conn.executemany(
+                """INSERT INTO universe_occurrences
+                   (id,universe_id,entity_id,source_id,
+                    parent_occurrence_id,context_id,
+                    observable_features_json,context_vector_json,
+                    base_position_json,confidence,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        item["occurrence_id"],
+                        item["universe_id"],
+                        item["entity_id"],
+                        source_id,
+                        item["parent_occurrence_id"],
+                        item["context_id"],
+                        item["observable_json"],
+                        item["observable_json"],
+                        encode(_position(str(item["occurrence_id"]))),
+                        item["confidence"],
+                        observed_at,
+                    )
+                    for item in inserted
+                ],
+            )
+            updated_ids: set[str] = set()
+            for item in inserted:
+                entity_id = str(item["entity_id"])
+                frequency, prototype = entity_states[entity_id]
+                entity_states[entity_id] = (
+                    frequency + 1,
+                    _mean_vectors((
+                        prototype,
+                        item["observable"],
+                    )),
+                )
+                updated_ids.add(entity_id)
+            conn.executemany(
+                """UPDATE universe_entities SET prototype_vector_json=?,
+                   mass=?,gravity=?,stability=?,frequency=?,updated_at=?
+                   WHERE id=?""",
+                [
+                    (
+                        encode(entity_states[entity_id][1]),
+                        round(
+                            1.0
+                            + math.log1p(entity_states[entity_id][0]),
+                            6,
+                        ),
+                        round(
+                            min(
+                                1.0,
+                                entity_states[entity_id][0] / 16.0,
+                            ),
+                            6,
+                        ),
+                        round(
+                            min(
+                                1.0,
+                                entity_states[entity_id][0] / 8.0,
+                            ),
+                            6,
+                        ),
+                        entity_states[entity_id][0],
+                        observed_at,
+                        entity_id,
+                    )
+                    for entity_id in sorted(updated_ids)
+                ],
+            )
+        return [
+            (str(item["entity_id"]), str(item["occurrence_id"]))
+            for item in prepared
+        ]
+
+    @staticmethod
+    def _write_transitions(
+        conn: Any,
+        transitions: Mapping[tuple[str, ...], int],
+        *,
+        observed_at: str,
+        event_rows: list[tuple[Any, ...]],
+    ) -> None:
+        """Write one pre-aggregated transition batch for a source."""
+        prepared = []
+        for transition, evidence_count in transitions.items():
+            (
+                source_universe,
+                target_universe,
+                source_type,
+                source_id,
+                target_type,
+                target_id,
+                context_id,
+            ) = transition
+            transition_id = stable_id(
+                "universe-transition",
+                source_universe,
+                target_universe,
+                source_type,
+                source_id,
+                target_type,
+                target_id,
+                context_id,
+            )
+            count = max(1, int(evidence_count))
+            prepared.append((
+                transition_id,
+                source_universe,
+                target_universe,
+                source_type,
+                source_id,
+                target_type,
+                target_id,
+                min(1.0, 0.7 + 0.05 * (count - 1)),
+                min(1.0, 0.7 + 0.03 * (count - 1)),
+                context_id,
+                count,
+                observed_at,
+                observed_at,
+            ))
+        if not prepared:
+            return
+        prepared.sort(key=lambda row: row[0])
+        existing_ids: set[str] = set()
+        for start in range(0, len(prepared), 500):
+            identifiers = [row[0] for row in prepared[start:start + 500]]
+            existing_ids.update(
+                str(row["id"])
+                for row in conn.execute(
+                    """SELECT id FROM universe_transitions
+                       WHERE id IN ({})""".format(
+                        ",".join("?" for _ in identifiers)
+                    ),
+                    identifiers,
+                ).fetchall()
+            )
+        conn.executemany(
+            """INSERT INTO universe_transitions
+               (id,source_universe_id,target_universe_id,source_type,
+                source_id,target_type,target_id,weight,confidence,context_id,
+                evidence_count,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                 evidence_count=evidence_count+excluded.evidence_count,
+                 weight=MIN(1.0,weight+.05*excluded.evidence_count),
+                 confidence=MIN(1.0,confidence+.03*excluded.evidence_count),
+                 updated_at=excluded.updated_at""",
+            prepared,
+        )
+        event_rows.extend(
+            (
+                stable_id(
+                    "universe-history",
+                    row[1],
+                    "transition_created",
+                    row[0],
+                    observed_at,
+                ),
+                row[1],
+                "transition_created",
+                row[0],
+                encode({"target_universe": row[2]}),
+                observed_at,
+            )
+            for row in prepared
+            if row[0] not in existing_ids
+        )
 
     def _transition(
         self, conn: Any, source_universe: str, target_universe: str, source_type: str,

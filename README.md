@@ -55,7 +55,7 @@ python3 -m uvicorn server.server:app --reload
 ## Хранилище и совместимость
 
 SQLite-файл по умолчанию: `.superai/state.sqlite`. Текущая схема имеет
-`schema_version = 33` и `migration_version = fresh-v2.8-wordforms`.
+`schema_version = 33` и `migration_version = fresh-v2.9-query-operators`.
 Несовместимая база намеренно удаляется и создаётся заново: legacy-таблицы,
 ролевые аннотации и backfill не поддерживаются. Перед обновлением сохраните
 нужные данные через `GET /api/export/memory`.

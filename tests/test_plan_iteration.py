@@ -33,6 +33,9 @@ def test_schema_contains_iteration_evidence_and_experiment_tables():
         "shadow_retrieval_runs",
         "experiment_runs",
         "experiment_metrics",
+        "query_operator_profiles",
+        "query_operator_occurrences",
+        "query_operator_experiences",
     }
     with repository.transaction() as conn:
         tables = {
@@ -57,6 +60,209 @@ def test_schema_contains_iteration_evidence_and_experiment_tables():
         "shadow_retrieval_gain",
         "validated_answer_contribution_count",
     } <= dimension_columns
+
+
+def test_query_operator_schema_extension_preserves_a_v28_database():
+    repository, _, _ = services()
+    with repository.transaction() as conn:
+        for table in (
+            "query_operator_experiences",
+            "query_operator_occurrences",
+            "query_operator_profiles",
+        ):
+            conn.execute(f"DROP TABLE {table}")
+        conn.execute(
+            """INSERT INTO hives
+               (id,conversation_id,max_cells,active_query_graph_id,state_json,
+                created_at,updated_at)
+               VALUES('existing-hive','existing-conversation',24,NULL,'{}',
+                      '2026-01-01','2026-01-01')"""
+        )
+
+    upgraded = GraphRepository()
+    with upgraded.transaction() as conn:
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        preserved = conn.execute(
+            "SELECT id FROM hives WHERE id='existing-hive'"
+        ).fetchone()
+    assert preserved is not None
+    assert {
+        "query_operator_profiles",
+        "query_operator_occurrences",
+        "query_operator_experiences",
+    } <= tables
+
+
+def test_future_graph_schema_is_not_silently_downgraded_as_compatible():
+    repository, _, _ = services()
+    with repository.transaction() as conn:
+        conn.execute("CREATE TABLE future_only_marker(id TEXT PRIMARY KEY)")
+        conn.execute(
+            "UPDATE graph_meta SET value='34' WHERE key='schema_version'"
+        )
+
+    recreated = GraphRepository()
+    with recreated.transaction() as conn:
+        marker = conn.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='future_only_marker'"""
+        ).fetchone()
+        schema_version = conn.execute(
+            "SELECT value FROM graph_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    assert marker is None
+    assert str(schema_version) == "33"
+
+
+def test_query_operator_profiles_are_shadow_learned_from_validated_bindings():
+    repository, training, dialogue = services()
+    training.train(
+        "Механик дал роботу болт.",
+        independent_key="query-operator-shadow",
+    )
+
+    first = dialogue.query(
+        dialogue.create()["hive"]["id"],
+        "Что механик дал роботу?",
+    )
+    assert first["answer"]["surface"] == "болт."
+    first_gap = first["query_graph"]["event_pattern"]["target_gaps"][0]
+    assert first_gap["evidence"]["learned_gap_profile"]["profile_status"] == "UNSEEN"
+
+    with repository.transaction() as conn:
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        profile = conn.execute(
+            """SELECT compatible_slots_json,validated_count,status
+               FROM query_operator_profiles WHERE profile_key='surface:что'"""
+        ).fetchone()
+        occurrences = conn.execute(
+            """SELECT status FROM query_operator_occurrences
+               WHERE operator_normalized='что'"""
+        ).fetchall()
+        experiences = conn.execute(
+            """SELECT outcome,validated FROM query_operator_experiences
+               WHERE outcome='VALIDATED_BINDING'"""
+        ).fetchall()
+    assert {
+        "query_operator_profiles",
+        "query_operator_occurrences",
+        "query_operator_experiences",
+    } <= tables
+    assert profile["status"] == "SHADOW"
+    assert int(profile["validated_count"]) == 1
+    assert decode(profile["compatible_slots_json"], {})
+    assert [row["status"] for row in occurrences] == ["VALIDATED"]
+    assert [(row["outcome"], row["validated"]) for row in experiences] == [
+        ("VALIDATED_BINDING", 1),
+    ]
+
+    second = dialogue.query(
+        dialogue.create()["hive"]["id"],
+        "Что механик дал роботу?",
+    )
+    shadow = second["query_graph"]["event_pattern"]["target_gaps"][0][
+        "evidence"
+    ]["learned_gap_profile"]
+    assert second["answer"]["surface"] == "болт."
+    assert shadow["mode"] == "SHADOW"
+    assert shadow["support_count"] == 1
+    assert shadow["compatible_local_slots"]
+    assert "D-Q-local_slot-" in shadow["projection_dimensions"][
+        "local_slot"
+    ]["dimension_id"]
+
+
+def test_query_operator_support_alone_never_promotes_shadow_profile():
+    repository, training, dialogue = services()
+    training.train(
+        "Механик дал роботу болт.",
+        independent_key="query-operator-no-automatic-promotion",
+    )
+    for _ in range(3):
+        result = dialogue.query(
+            dialogue.create()["hive"]["id"],
+            "Что механик дал роботу?",
+        )
+        assert result["answer"]["surface"] == "болт."
+
+    with repository.transaction() as conn:
+        profile = conn.execute(
+            """SELECT validated_count,status
+               FROM query_operator_profiles WHERE profile_key='surface:что'"""
+        ).fetchone()
+    assert int(profile["validated_count"]) == 3
+    assert profile["status"] == "SHADOW"
+
+
+def test_active_instrument_construction_does_not_override_passive_structure():
+    _, training, dialogue = services()
+    for index, text in enumerate((
+        "Повар разрезал хлеб ножом.",
+        "Девочка разрезала яблоко ножницами.",
+        "Мастер разрезал провод кусачками.",
+        "Автомат разрезал лист резаком.",
+        "Бобр разрезал ветку зубами.",
+        "Хозяин разрезал корм ножом.",
+        "Оператор разрезал ленту ножницами.",
+        "Клиент разрезал упаковку ножом.",
+        "Ткань была разрезана портным ножницами.",
+    )):
+        training.train(
+            text,
+            independent_key=f"query-operator-passive:{index}",
+        )
+
+    result = dialogue.query(
+        dialogue.create()["hive"]["id"],
+        "Кем была разрезана ткань?",
+    )
+
+    assert result["answer"]["status"] == "RESOLVED"
+    assert result["answer"]["surface"] == "портным."
+
+
+def test_multi_gap_query_creates_an_independent_operator_occurrence_per_gap():
+    repository, training, dialogue = services()
+    training.train(
+        "Механик дал роботу болт.",
+        independent_key="query-operator-multi-gap",
+    )
+    result = dialogue.query(
+        dialogue.create()["hive"]["id"],
+        "Кто, кому и что дал?",
+    )
+    assert result["answer"]["status"] == "RESOLVED"
+
+    with repository.transaction() as conn:
+        rows = conn.execute(
+            """SELECT operator_normalized,status
+               FROM query_operator_occurrences ORDER BY operator_normalized"""
+        ).fetchall()
+        profiles = conn.execute(
+            """SELECT compatible_slots_json
+               FROM query_operator_profiles ORDER BY profile_key"""
+        ).fetchall()
+        experiences = conn.execute(
+            """SELECT occurrence_id FROM query_operator_experiences
+               WHERE outcome='VALIDATED_BINDING'"""
+        ).fetchall()
+    assert [(row["operator_normalized"], row["status"]) for row in rows] == [
+        ("кому", "VALIDATED"),
+        ("кто", "VALIDATED"),
+        ("что", "VALIDATED"),
+    ]
+    assert len({row["occurrence_id"] for row in experiences}) == 3
+    assert all(decode(row["compatible_slots_json"], {}) for row in profiles)
 
 
 def test_multi_gap_contract_is_canonical_and_learns_one_configuration():

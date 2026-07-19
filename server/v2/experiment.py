@@ -12,6 +12,7 @@ import hashlib
 import json
 import random
 import tempfile
+import tracemalloc
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from time import perf_counter
@@ -19,7 +20,13 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import server.database as database
 
-from .graph_repository import GraphRepository, encode, stable_id, utcnow
+from .graph_repository import (
+    GraphRepository,
+    encode,
+    serialization_snapshot,
+    stable_id,
+    utcnow,
+)
 from .acceleration import AccelerationRuntime
 from .graph_service import GraphDialogueService, GraphTrainingService
 from .universe import UniverseService
@@ -541,6 +548,9 @@ class CompactExperiment:
             database.DB_PATH = original_path
 
     def run(self) -> Dict[str, Any]:
+        run_started = perf_counter()
+        sql_before, executes_before = database.metrics_snapshot()
+        serialization_before = serialization_snapshot()
         counts = self.validate_dataset()
         self.repository.reset()
         self.universes._ensure_universes()
@@ -717,6 +727,12 @@ class CompactExperiment:
         }
         criteria["all_required_passed"] = all(criteria.values())
         acceleration_diagnostics = self.runtime.diagnostics()
+        sql_after, executes_after = database.metrics_snapshot()
+        sql_ms = max(0.0, sql_after - sql_before)
+        serialization_ms = max(
+            0.0, serialization_snapshot() - serialization_before
+        )
+        elapsed_ms = (perf_counter() - run_started) * 1000.0
         report = {
             "experiment_id": experiment_id,
             "dataset_version": self.config.dataset_version,
@@ -746,13 +762,28 @@ class CompactExperiment:
             },
             "performance": smoke,
             **acceleration_diagnostics,
-            "sql_ms": 0.0,
-            "numerical_ms": 0.0,
-            "serialization_ms": 0.0,
-            "index_build_ms": 0.0,
-            "peak_memory_bytes": 0,
-            "python_iterations": 0,
-            "sqlite_execute_count": 0,
+            "sql_ms": round(sql_ms, 3),
+            "numerical_ms": round(max(
+                0.0,
+                elapsed_ms - sql_ms - serialization_ms,
+            ), 3),
+            "serialization_ms": round(serialization_ms, 3),
+            "index_build_ms": round(sum(
+                float(item.get("index_build_ms") or 0.0)
+                for item in smoke
+            ), 3),
+            "peak_memory_bytes": (
+                int(tracemalloc.get_traced_memory()[1])
+                if tracemalloc.is_tracing()
+                else 0
+            ),
+            "python_iterations": sum(
+                int(item.get("events_scanned") or 0)
+                for item in smoke
+            ),
+            "sqlite_execute_count": max(
+                0, executes_after - executes_before
+            ),
             "criteria": criteria,
             "open_limitations": [
                 "no proof above 100 events",

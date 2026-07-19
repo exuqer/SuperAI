@@ -1267,9 +1267,43 @@ class ConstructionLearner:
             row_gap = GapKind(str(row["gap_kind"])) if row["gap_kind"] else None
             if gap_kind and row_gap and row_gap != gap_kind:
                 continue
+            learned_signature = decode(
+                row["structural_signature_json"],
+                {},
+            )
+            current_predicate_forms = {
+                key
+                for key in signature.values
+                if key.startswith("shape:predicate_form:")
+            }
+            learned_predicate_forms = {
+                key
+                for key in learned_signature
+                if key.startswith("shape:predicate_form:")
+            }
+            current_has_voice = any(
+                key.startswith("voice:") for key in signature.values
+            )
+            learned_has_voice = any(
+                key.startswith("voice:") for key in learned_signature
+            )
+            # Predicate form and explicit voice markers are structural
+            # controls, not answer semantics.  Treating an active finite-verb
+            # construction as a passive participial one can transfer an
+            # instrumental tool slot onto an instrumental passive participant.
+            if (
+                current_predicate_forms
+                and learned_predicate_forms
+                and current_predicate_forms.isdisjoint(
+                    learned_predicate_forms
+                )
+            ):
+                continue
+            if current_has_voice != learned_has_voice:
+                continue
             score = signature_similarity(
                 signature.values,
-                decode(row["structural_signature_json"], {}),
+                learned_signature,
             ) * float(row["confidence"])
             if winner is None or score > winner[0]:
                 winner = (score, row)

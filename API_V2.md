@@ -102,7 +102,10 @@ Batch-операции:
 `GET /api/v2/hives/{id}/trace` возвращает морфологические гипотезы,
 кандидатов упоминаний и событий, гипотезы слотов и конструкций, preliminary и
 final QueryGraph, memory feedback, принятые/отклонённые события, binding,
-ResponsePlan и validation.
+ResponsePlan и validation. Для вопросительных GAP в `QueryGraph.trace` также
+есть `query_operator_shadow`: это профиль конкретного употребления, его
+многомерные проекции и прогноз локальных слотов; на этом этапе он не влияет
+на ответ.
 
 `GET /api/v2/hives/{id}/bindings` возвращает текущие candidate bindings,
 выбранное binding и причины отклонения событий.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -409,6 +410,7 @@ class EventGraphPipeline:
         independent_key: str = "",
         domain_key: str = "",
         force_status: Optional[str] = None,
+        connection: Any = None,
     ) -> Dict[str, Any]:
         normalized_text = str(text or "").strip()
         if not normalized_text:
@@ -430,7 +432,12 @@ class EventGraphPipeline:
             status = inferred_status
         independent_key = independent_key or content_hash(normalized_text)
         domain_key = domain_key or source_type
-        with self.repository.transaction() as conn:
+        transaction = (
+            nullcontext(connection)
+            if connection is not None
+            else self.repository.transaction()
+        )
+        with transaction as conn:
             source_id, created, status = self._persist_source(
                 conn,
                 normalized_text,

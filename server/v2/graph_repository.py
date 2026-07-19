@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any, Dict, Iterator, Optional
 
 import server.database as database
@@ -13,23 +15,45 @@ import server.database as database
 from .graph_schema import ensure_graph_schema, reset_graph_schema
 
 
+_TRANSACTION_LOCAL = threading.local()
+_SERIALIZATION_LOCAL = threading.local()
+
+
+def serialization_snapshot() -> float:
+    return float(getattr(_SERIALIZATION_LOCAL, "elapsed_ms", 0.0))
+
+
+def _record_serialization(started: float) -> None:
+    _SERIALIZATION_LOCAL.elapsed_ms = float(
+        getattr(_SERIALIZATION_LOCAL, "elapsed_ms", 0.0)
+    ) + (perf_counter() - started) * 1000.0
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def encode(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    started = perf_counter()
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    finally:
+        _record_serialization(started)
 
 
 def decode(value: Optional[str], default: Any = None) -> Any:
     if not value:
         return {} if default is None else default
-    return json.loads(value)
+    started = perf_counter()
+    try:
+        return json.loads(value)
+    finally:
+        _record_serialization(started)
 
 
 def stable_id(prefix: str, *values: object, size: int = 20) -> str:
@@ -49,13 +73,39 @@ class GraphRepository:
 
     @contextmanager
     def transaction(self) -> Iterator[Any]:
+        path = database.get_db_path()
+        active = getattr(_TRANSACTION_LOCAL, "connection", None)
+        if (
+            active is not None
+            and getattr(_TRANSACTION_LOCAL, "path", None) == path
+        ):
+            _TRANSACTION_LOCAL.depth = int(
+                getattr(_TRANSACTION_LOCAL, "depth", 1)
+            ) + 1
+            try:
+                yield active
+            finally:
+                _TRANSACTION_LOCAL.depth -= 1
+            return
         with database.get_connection() as conn:
+            _TRANSACTION_LOCAL.connection = conn
+            _TRANSACTION_LOCAL.path = path
+            _TRANSACTION_LOCAL.depth = 1
             try:
                 yield conn
-                conn.commit()
+                # sqlite3 does not open a transaction for plain SELECTs.
+                # Avoid issuing a redundant commit for the many read-only
+                # graph/query contexts.
+                if conn.in_transaction:
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                if conn.in_transaction:
+                    conn.rollback()
                 raise
+            finally:
+                _TRANSACTION_LOCAL.connection = None
+                _TRANSACTION_LOCAL.path = None
+                _TRANSACTION_LOCAL.depth = 0
 
     def ensure_schema(self) -> None:
         with database.get_connection() as conn:

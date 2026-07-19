@@ -561,22 +561,32 @@ class GapSwarmCoordinator:
                     "SELECT key,value FROM graph_meta WHERE key IN ('projection_revision','transition_revision')"
                 ).fetchall()
             }
-            route_index = self.acceleration.route_index(
-                database.get_db_path(), meta.get("transition_revision", "0")
-            )
-            if not route_index.adjacency:
-                route_index.rebuild(
-                    conn.execute(
-                        "SELECT id,source_id,target_id,weight FROM universe_transitions"
-                    ).fetchall()
+            route_neighbours: list[str] = []
+            route_backend = "python"
+            if self.acceleration.use("rustworkx"):
+                route_index = self.acceleration.route_index(
+                    database.get_db_path(),
+                    meta.get("transition_revision", "0"),
                 )
-            route_neighbours = route_index.expand(
-                self._word_entity_ids(plan.seed_entities),
-                budget=int(plan.budget["max_vertical_transitions"]),
-            )
-            vector_backend, index_build_ms = self._warm_projection_index(
-                conn, plan, meta.get("projection_revision", "0")
-            )
+                if not route_index.adjacency:
+                    route_index.rebuild(
+                        conn.execute(
+                            """SELECT id,source_id,target_id,weight
+                               FROM universe_transitions"""
+                        ).fetchall()
+                    )
+                route_neighbours = route_index.expand(
+                    self._word_entity_ids(plan.seed_entities),
+                    budget=int(plan.budget["max_vertical_transitions"]),
+                )
+                route_backend = route_index.backend
+            vector_backend, index_build_ms = "numpy", 0.0
+            if self.acceleration.use("faiss"):
+                vector_backend, index_build_ms = self._warm_projection_index(
+                    conn,
+                    plan,
+                    meta.get("projection_revision", "0"),
+                )
             index_event_ids = self._index_event_ids(conn, plan)
             retrieval_baseline_event_ids = self._index_event_ids(
                 conn,
@@ -751,7 +761,7 @@ class GapSwarmCoordinator:
                         for mission in missions
                     ),
                     "route_neighbour_count": len(route_neighbours),
-                    "route_backend": route_index.backend,
+                    "route_backend": route_backend,
                     "events_considered": len(candidate_event_ids),
                     "events_returned": len(candidate_event_ids),
                     "retrieval_mode": retrieval_mode,
@@ -835,7 +845,7 @@ class GapSwarmCoordinator:
                 "database_queries": 5,
                 "elapsed_ms": elapsed_ms,
                 "route_neighbour_count": len(route_neighbours),
-                "route_backend": route_index.backend,
+                "route_backend": route_backend,
                 "vector_backend": vector_backend,
                 "index_build_ms": round(index_build_ms, 3),
             },

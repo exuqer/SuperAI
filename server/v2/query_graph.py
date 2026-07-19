@@ -33,6 +33,7 @@ from .graph_repository import (
     utcnow,
 )
 from .language import UniversalLanguageAnalyzer
+from .query_operator_learning import QueryOperatorLearner
 from .swarm import GapSwarmCoordinator
 
 
@@ -50,6 +51,7 @@ class QueryGraphBuilder:
         self.observations = ObservationBuilder()
         self.slots = SlotLearner()
         self.constructions = ConstructionLearner()
+        self.query_operators = QueryOperatorLearner()
 
     @staticmethod
     def _default_gap_kind(
@@ -581,6 +583,42 @@ class QueryGraphBuilder:
                     "operator_index": index,
                 },
             ))
+        # The learned query-operator model is intentionally shadow-only in
+        # this revision.  It can inspect an occurrence and propose local-slot
+        # neighbourhoods, but cannot alter GraphMatcher's admission or score.
+        # This keeps a profile trained from one successful answer from
+        # becoming an unvalidated lexical rule.
+        shadow_predictions: Dict[str, Dict[str, Any]] = {}
+        with self.repository.transaction() as conn:
+            enriched_gaps: List[GapNode] = []
+            shadow_graph = QueryGraph(
+                id=graph_id,
+                predicate=predicate,
+                known_nodes=tuple(known_nodes),
+                gap_node=target_gaps[0],
+                target_gaps=tuple(target_gaps),
+                question_operators=(),
+                status=GraphStatus.READY,
+                continuation_of=(
+                    previous_graph.id
+                    if continuation_mode in {"STRUCTURAL", "REFERENTIAL"}
+                    and previous_graph else None
+                ),
+                trace={"continuation_mode": continuation_mode},
+            )
+            for current_gap in target_gaps:
+                prediction = self.query_operators.predict(
+                    conn, shadow_graph, current_gap,
+                )
+                shadow_predictions[current_gap.id] = prediction
+                enriched_gaps.append(replace(
+                    current_gap,
+                    evidence={
+                        **dict(current_gap.evidence),
+                        "learned_gap_profile": prediction,
+                    },
+                ))
+        target_gaps = enriched_gaps
         gap = target_gaps[0]
         implicit_gaps = self._implicit_gaps(
             analysis, predicate, graph_id, questions, current_known_nodes
@@ -702,6 +740,7 @@ class QueryGraphBuilder:
                 if released_node else None,
                 "gap_release_diagnostic": release_diagnostic,
                 "memory_feedback_limited_to_existing_hypotheses": True,
+                "query_operator_shadow": shadow_predictions,
                 "target_gap_requested": True,
                 "target_gap_count": len(target_gaps),
                 "implicit_gap_count": len(implicit_gaps),
@@ -923,6 +962,35 @@ class GraphMatcher:
         return max(direct, learned), direct, learned, state
 
     @staticmethod
+    def _structural_attachment_fit(
+        graph: QueryGraph,
+        signature: Optional[ObservationSignature],
+    ) -> float:
+        """Prefer tightly attached candidates in explicit voice constructions.
+
+        This is a surface-structural observation shared by all question
+        operators.  It does not map any interrogative lexeme to an answer
+        type, and it stays inactive for ordinary finite-verb clauses.
+        """
+        structural = dict(graph.trace.get("structural_signature") or {})
+        if (
+            signature is None
+            or not any(key.startswith("voice:") for key in structural)
+        ):
+            return 0.0
+        distances = []
+        for key in signature.values:
+            if not key.startswith("distance:predicate:"):
+                continue
+            try:
+                distances.append(
+                    max(1, int(key.rsplit(":", 1)[-1]))
+                )
+            except ValueError:
+                continue
+        return 1.0 / min(distances) if distances else 0.0
+
+    @staticmethod
     def _question_morphology_fit(
         graph: QueryGraph,
         signature: Optional[ObservationSignature],
@@ -1116,6 +1184,15 @@ class GraphMatcher:
                     for gap, (participant, slot, case_fit) in zip(
                         graph.target_gaps, combination
                     ):
+                        (
+                            _,
+                            direct_slot_score,
+                            learned_slot_score,
+                            compatibility_state,
+                        ) = self._slot_scores(
+                            replace(graph, gap_node=gap),
+                            participant,
+                        )
                         total = max(0.0, min(1.0,
                             0.42 * self._known_node_score(graph.known_nodes, matched)
                             + 0.22 * max(0.16, slot)
@@ -1142,9 +1219,19 @@ class GraphMatcher:
                             evidence=({
                                 "gap_kind": gap.gap_kind.value,
                                 "configuration_binding": True,
+                                "local_slot_ids": [
+                                    hypothesis.local_slot_id
+                                    for hypothesis in participant.slot_hypotheses
+                                ],
+                                "score_components": {
+                                    "slot_similarity": direct_slot_score,
+                                    "learned_substitution_score": learned_slot_score,
+                                    "question_morphology": case_fit,
+                                },
                                 "supporting_event_ids": [event.id],
                                 "independent_source_count": 1,
                             },),
+                            slot_compatibility_state=compatibility_state,
                         ))
                     score = sum(binding.total_score for binding in bindings) / len(bindings)
                     if score > best_score:
@@ -1327,6 +1414,11 @@ class GraphMatcher:
                         slot_score, direct_score, learned_score, compatibility_state = (
                             self._slot_scores(graph, participant)
                         )
+                        effective_slot_score = (
+                            direct_score
+                            if compatibility_state == "below_threshold"
+                            else slot_score
+                        )
                         candidates.append({
                             "node_id": participant.id,
                             "concept_id": (
@@ -1343,7 +1435,12 @@ class GraphMatcher:
                                 "preposition": participant.mention.preposition,
                             },
                             "signature": participant.observation_signature,
-                            "slot_score": slot_score,
+                            # A sub-threshold learned slot is retained in
+                            # evidence but cannot improve ranking.  Otherwise
+                            # weak historical proximity can beat an equally
+                            # valid structural candidate merely by a few
+                            # thousandths.
+                            "slot_score": effective_slot_score,
                             "direct_slot_similarity": direct_score,
                             "learned_substitution_score": learned_score,
                             "slot_compatibility_state": compatibility_state,
@@ -1384,6 +1481,12 @@ class GraphMatcher:
                         min(1.0, float(candidate.get("slot_score", 0.0))),
                     )
                     evidence_score = event.confidence
+                    structural_attachment_fit = (
+                        self._structural_attachment_fit(
+                            graph,
+                            candidate.get("signature"),
+                        )
+                    )
                     morphology_fit, morphology_conflict, morphology_evidence = (
                         self._question_morphology_fit(
                             graph,
@@ -1391,19 +1494,20 @@ class GraphMatcher:
                         )
                     )
                     requested_gap_conflict = (
-                        0.12
+                        0.12 * (1.0 - structural_attachment_fit)
                         if candidate.get("slot_compatibility_state")
                         == "below_threshold"
                         else 0.0
                     )
-                    # Slot proximity is useful but cannot eclipse an explicit
-                    # conflict with the question's surviving morphology.
+                    # Slot proximity is useful but cannot eclipse explicit
+                    # morphology or a tightly attached structural candidate.
                     total = max(0.0, min(
                         1.0,
                         0.42 * structural_score
                         + 0.24 * signature_score
                         + 0.16 * evidence_score
                         + 0.12 * morphology_fit
+                        + 0.06 * structural_attachment_fit
                         - 0.28 * morphology_conflict
                         - requested_gap_conflict,
                     ))
@@ -1445,6 +1549,7 @@ class GraphMatcher:
                                     "learned_substitution_score", 0.0,
                                 ),
                                 "question_morphology": morphology_fit,
+                                "structural_attachment": structural_attachment_fit,
                                 "morphology_conflict": morphology_conflict,
                                 "requested_gap_conflict": requested_gap_conflict,
                             },

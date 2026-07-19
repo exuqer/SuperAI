@@ -20,8 +20,9 @@ SEMANTIC_CLUSTER_VERSION = "2.7.0"
 QUERY_GRAPH_VERSION = "2.7.0"
 GENERATION_VERSION = "2.7.0"
 # The graph database is intentionally recreated when this contract changes.
-# Word forms became a separate layer in 2.8, so there is no legacy merge path.
-MIGRATION_VERSION = "fresh-v2.8-wordforms"
+# Query-operator occurrences became an explicit learned layer in 2.9, so
+# there is no legacy merge path for databases without this evidence.
+MIGRATION_VERSION = "fresh-v2.9-query-operators"
 
 
 class StringEnum(str, Enum):

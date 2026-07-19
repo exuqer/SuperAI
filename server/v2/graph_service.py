@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+import server.database as database
 from server.core.settings import settings
 
 from .acceleration import AccelerationRuntime, runtime as acceleration_runtime
@@ -24,6 +26,7 @@ from .graph_repository import (
     decode,
     encode,
     stable_id,
+    serialization_snapshot,
     utcnow,
 )
 from .query_graph import (
@@ -58,31 +61,40 @@ class GraphTrainingService:
     def _materialize_and_project(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         discover_dimensions = kwargs.pop("discover_dimensions", None)
         project_universes = bool(kwargs.pop("project_universes", True))
-        result = self.events.materialize(*args, **kwargs)
-        if result.get("status") == "CONFIRMED" and project_universes:
-            if discover_dimensions is None:
-                with self.repository.transaction() as conn:
+        # Event evidence and its universe projection form one source-level
+        # transaction.  Besides avoiding a second durability barrier, this
+        # prevents a confirmed graph source from surviving a failed
+        # projection as a partially materialised ingest.
+        with self.repository.transaction() as conn:
+            result = self.events.materialize(
+                *args,
+                **kwargs,
+                connection=conn,
+            )
+            if result.get("status") == "CONFIRMED" and project_universes:
+                if discover_dimensions is None:
                     source_count = int(conn.execute(
                         """SELECT COUNT(*) FROM knowledge_sources
                            WHERE status='CONFIRMED'"""
                     ).fetchone()[0])
-                interval = max(
-                    1,
-                    settings.dimension_discovery_checkpoint_interval,
+                    interval = max(
+                        1,
+                        settings.dimension_discovery_checkpoint_interval,
+                    )
+                    discover_dimensions = (
+                        source_count == 1 or source_count % interval == 0
+                    )
+                result["universe_update"] = self.universes.ingest_source(
+                    str(result["source_id"]),
+                    discover_dimensions=bool(discover_dimensions),
+                    connection=conn,
                 )
-                discover_dimensions = (
-                    source_count == 1 or source_count % interval == 0
-                )
-            result["universe_update"] = self.universes.ingest_source(
-                str(result["source_id"]),
-                discover_dimensions=bool(discover_dimensions),
-            )
-        elif result.get("status") == "CONFIRMED":
-            result["universe_update"] = {
-                "source_id": str(result["source_id"]),
-                "ingested": False,
-                "reason": "projection_deferred_to_batch_checkpoint",
-            }
+            elif result.get("status") == "CONFIRMED":
+                result["universe_update"] = {
+                    "source_id": str(result["source_id"]),
+                    "ingested": False,
+                    "reason": "projection_deferred_to_batch_checkpoint",
+                }
         return result
 
     def train(
@@ -332,6 +344,7 @@ class GraphDialogueService:
         self.matcher.swarms.acceleration = self.acceleration
         self.responses = GraphResponsePlanner(morphology)
         self.constructions = ConstructionLearner()
+        self.query_operators = self.builder.query_operators
 
     def create(
         self,
@@ -575,6 +588,45 @@ class GraphDialogueService:
         *,
         resolved_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # Query construction, swarm evidence, strict matching and persisted
+        # outcome are one atomic turn.  Repository transactions opened by the
+        # individual stages join this outer transaction.
+        with self.repository.transaction():
+            started = perf_counter()
+            sql_before, executes_before = database.metrics_snapshot()
+            serialization_before = serialization_snapshot()
+            result = self._query(
+                hive_id, text, resolved_mode=resolved_mode
+            )
+            sql_after, executes_after = database.metrics_snapshot()
+            serialization_after = serialization_snapshot()
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            sql_ms = max(0.0, sql_after - sql_before)
+            serialization_ms = max(
+                0.0, serialization_after - serialization_before
+            )
+            trace = result.get("trace") or {}
+            trace.update({
+                "sql_ms": round(sql_ms, 3),
+                "serialization_ms": round(serialization_ms, 3),
+                "numerical_ms": round(max(
+                    0.0,
+                    elapsed_ms - sql_ms - serialization_ms,
+                ), 3),
+                "sqlite_execute_count": max(
+                    0, executes_after - executes_before
+                ),
+            })
+            result["trace"] = trace
+            return result
+
+    def _query(
+        self,
+        hive_id: str,
+        text: str,
+        *,
+        resolved_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
         normalized_text = str(text or "").strip()
         if not normalized_text:
             raise ValueError("text must not be empty")
@@ -796,6 +848,14 @@ class GraphDialogueService:
                 normalized_text,
                 hive_id=hive_id,
                 search=search,
+            )
+            self.query_operators.record_outcomes(
+                conn,
+                graph,
+                selected_bindings=selected_bindings,
+                accepted_bindings=accepted,
+                rejected=rejected,
+                answer=answer,
             )
             if binding_configuration_model:
                 conn.execute(
