@@ -890,6 +890,91 @@ class EventGraphPipeline:
             ),
         )
 
+    @staticmethod
+    def load_event_participants(conn: Any, event_id: str) -> List[ParticipantNode]:
+        """Load only participants of an event without full event reconstruction."""
+        participant_rows = conn.execute(
+            """SELECT p.*,m.*,
+                      p.id AS participant_node_id,
+                      m.id AS mention_node_id
+               FROM graph_participants p
+               JOIN graph_mentions m ON m.id=p.mention_id
+               WHERE p.event_id=? ORDER BY p.ordinal_hint,p.id""",
+            (event_id,),
+        ).fetchall()
+        participants: List[ParticipantNode] = []
+        for participant_row in participant_rows:
+            components = [
+                # Components are already validated role-free JSON contracts.
+                # Rehydrate only the data required by graph matching.
+                item
+                for item in decode(participant_row["components_json"], [])
+            ]
+            mention_components = tuple(
+                MentionComponent(
+                    id=str(item["component_id"]),
+                    lemma=str(item["lemma"]),
+                    surface=str(item["surface"]),
+                    token_index=int(item["token_index"]),
+                    attachment_signature=ObservationSignature(
+                        item.get("attachment_signature") or {}
+                    ),
+                    required=bool(item.get("required", True)),
+                )
+                for item in components
+            )
+            mention = MentionNode(
+                id=str(participant_row["mention_node_id"]),
+                head_lemma=str(participant_row["head_lemma"]),
+                head_surface=str(participant_row["head_surface"]),
+                surface=str(participant_row["surface"]),
+                token_start=int(participant_row["token_start"]),
+                token_end=int(participant_row["token_end"]),
+                token_indices=tuple(
+                    decode(participant_row["token_indices_json"], [])
+                ),
+                features=decode(participant_row["features_json"], {}),
+                components=mention_components,
+                preposition=str(participant_row["preposition"]),
+                entity_id=participant_row["entity_id"],
+                semantic_cluster_ids=tuple(
+                    str(item["semantic_cluster_id"])
+                    for item in conn.execute(
+                        """SELECT semantic_cluster_id
+                           FROM semantic_cluster_members
+                           WHERE entity_id=? ORDER BY compatibility DESC""",
+                        (participant_row["entity_id"],),
+                    ).fetchall()
+                ),
+            )
+            hypothesis_rows = conn.execute(
+                """SELECT local_slot_id,compatibility,evidence_json
+                   FROM participant_slot_hypotheses
+                   WHERE participant_id=?
+                   ORDER BY selected DESC,compatibility DESC""",
+                (participant_row["participant_node_id"],),
+            ).fetchall()
+            participants.append(ParticipantNode(
+                id=str(participant_row["participant_node_id"]),
+                mention=mention,
+                observation_signature=ObservationSignature(
+                    decode(
+                        participant_row["observation_signature_json"],
+                        {},
+                    )
+                ),
+                slot_hypotheses=tuple(
+                    SlotHypothesis(
+                        local_slot_id=str(item["local_slot_id"]),
+                        compatibility=float(item["compatibility"]),
+                        evidence=tuple(decode(item["evidence_json"], [])),
+                    )
+                    for item in hypothesis_rows
+                ),
+                confidence=float(participant_row["confidence"]),
+            ))
+        return participants
+
     def retract(self, source_id: str) -> Dict[str, Any]:
         with self.repository.transaction() as conn:
             row = conn.execute(

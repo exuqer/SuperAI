@@ -18,7 +18,7 @@ from .graph_models import (
 # Query-operator evidence is an additive extension to V2.8's graph schema.
 # Keeping this version stable lets existing V2.8 databases gain the tables
 # below through CREATE IF NOT EXISTS instead of being reset.
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 
 def _reset_incompatible_schema(conn: sqlite3.Connection) -> None:
@@ -1077,6 +1077,220 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             details_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             FOREIGN KEY(experiment_id) REFERENCES experiment_runs(id)
+                ON DELETE CASCADE
+        );
+
+        /* EventBindingFrame: stable dialogue projection of a selected event.
+           Survives multiple short turns and tracks how participants relate
+           to questions and bindings across the dialogue. */
+        CREATE TABLE IF NOT EXISTS event_binding_frames (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            root_query_graph_id TEXT NOT NULL,
+            latest_query_graph_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            predicate_concept_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('ACTIVE','WEAK','CLOSED')),
+            confidence REAL NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 1),
+            state_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS event_binding_frame_conversation_idx
+            ON event_binding_frames(conversation_id, status);
+        CREATE INDEX IF NOT EXISTS event_binding_frame_event_idx
+            ON event_binding_frames(event_id);
+
+        CREATE TABLE IF NOT EXISTS event_binding_frame_participants (
+            id TEXT PRIMARY KEY,
+            frame_id TEXT NOT NULL,
+            participant_node_id TEXT NOT NULL,
+            concept_id TEXT NOT NULL,
+            resolved_lemma TEXT NOT NULL,
+            canonical_surface TEXT NOT NULL,
+            morphology_json TEXT NOT NULL DEFAULT '{}',
+            origin TEXT NOT NULL CHECK(origin IN
+                ('EXPLICIT_ROOT_QUERY','RESOLVED_ROOT_GAP',
+                 'RESOLVED_LATER_GAP','INFERRED_EVENT_PARTICIPANT')),
+            lineage_root_gap_id TEXT,
+            latest_source_gap_id TEXT,
+            latest_source_binding_id TEXT,
+            source_query_graph_ids_json TEXT NOT NULL DEFAULT '[]',
+            observed_question_profiles_json TEXT NOT NULL DEFAULT '[]',
+            compatible_question_profiles_json TEXT NOT NULL DEFAULT '{}',
+            binding_confidence REAL NOT NULL DEFAULT 0,
+            replaceable INTEGER NOT NULL DEFAULT 1 CHECK(replaceable IN (0,1)),
+            last_released_turn INTEGER,
+            last_selected_turn INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(frame_id) REFERENCES event_binding_frames(id)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS event_binding_frame_participant_frame_idx
+            ON event_binding_frame_participants(frame_id);
+        CREATE INDEX IF NOT EXISTS event_binding_frame_participant_node_idx
+            ON event_binding_frame_participants(participant_node_id);
+        CREATE INDEX IF NOT EXISTS event_binding_frame_participant_concept_idx
+            ON event_binding_frame_participants(concept_id);
+
+        CREATE TABLE IF NOT EXISTS event_binding_frame_question_profiles (
+            frame_participant_id TEXT NOT NULL,
+            family_key TEXT NOT NULL,
+            question_surface TEXT NOT NULL,
+            morphology_signature_json TEXT NOT NULL DEFAULT '{}',
+            confidence REAL NOT NULL DEFAULT 0,
+            observation_count INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(frame_participant_id, family_key, question_surface),
+            FOREIGN KEY(frame_participant_id)
+                REFERENCES event_binding_frame_participants(id)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS event_binding_frame_qp_family_idx
+            ON event_binding_frame_question_profiles(frame_participant_id, family_key);
+
+        /* Query interpretation hypotheses: competing ways to interpret
+           a short turn (continuation, standalone query, event rebind). */
+        CREATE TABLE IF NOT EXISTS query_interpretation_hypotheses (
+            id TEXT PRIMARY KEY,
+            query_graph_id TEXT NOT NULL,
+            hypothesis_index INTEGER NOT NULL,
+            interpretation_type TEXT NOT NULL CHECK(interpretation_type IN
+                ('EXPLICIT_QUERY','STRUCTURAL_CONTINUATION',
+                 'ANCHORED_EVENT_REBIND','STANDALONE_GAP_QUERY',
+                 'CONTEXT_REFERENCE_QUERY')),
+            prior_score REAL NOT NULL DEFAULT 0,
+            current_evidence_score REAL NOT NULL DEFAULT 0,
+            inherited_context_score REAL NOT NULL DEFAULT 0,
+            event_retrieval_score REAL NOT NULL DEFAULT 0,
+            graph_validation_score REAL NOT NULL DEFAULT 0,
+            total_score REAL NOT NULL DEFAULT 0,
+            admitted_event_ids_json TEXT NOT NULL DEFAULT '[]',
+            rejection_reason TEXT,
+            selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(query_graph_id) REFERENCES query_graphs(id)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS query_interpretation_hypothesis_graph_idx
+            ON query_interpretation_hypotheses(query_graph_id, selected DESC);
+
+        /* GAP release diagnostics: full scoring breakdown for every
+           participant candidate when a GAP rotation occurs. */
+        CREATE TABLE IF NOT EXISTS gap_release_diagnostics (
+            id TEXT PRIMARY KEY,
+            query_graph_id TEXT NOT NULL,
+            frame_id TEXT,
+            event_id TEXT,
+            question_family_key TEXT,
+            candidates_json TEXT NOT NULL DEFAULT '[]',
+            selected_participant_node_id TEXT,
+            selected_score REAL NOT NULL DEFAULT 0,
+            second_score REAL NOT NULL DEFAULT 0,
+            release_margin REAL NOT NULL DEFAULT 0,
+            decision TEXT NOT NULL CHECK(decision IN
+                ('RELEASED','AMBIGUOUS','NO_COMPATIBLE_PARTICIPANT')),
+            decision_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(query_graph_id) REFERENCES query_graphs(id)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS gap_release_diagnostic_query_idx
+            ON gap_release_diagnostics(query_graph_id);
+
+        CREATE TABLE IF NOT EXISTS gap_release_candidate_scores (
+            diagnostic_id TEXT NOT NULL,
+            participant_node_id TEXT NOT NULL,
+            concept_id TEXT NOT NULL,
+            resolved_surface TEXT NOT NULL,
+            exact_surface_match REAL NOT NULL DEFAULT 0,
+            question_family_match REAL NOT NULL DEFAULT 0,
+            root_gap_lineage_match REAL NOT NULL DEFAULT 0,
+            latest_gap_lineage_match REAL NOT NULL DEFAULT 0,
+            local_slot_score REAL NOT NULL DEFAULT 0,
+            animacy_score REAL NOT NULL DEFAULT 0,
+            case_score REAL NOT NULL DEFAULT 0,
+            morphology_score REAL NOT NULL DEFAULT 0,
+            frame_confidence REAL NOT NULL DEFAULT 0,
+            recency_score REAL NOT NULL DEFAULT 0,
+            explicit_current_penalty REAL NOT NULL DEFAULT 0,
+            animacy_conflict REAL NOT NULL DEFAULT 0,
+            hard_slot_conflict REAL NOT NULL DEFAULT 0,
+            final_score REAL NOT NULL DEFAULT 0,
+            rank INTEGER NOT NULL,
+            accepted INTEGER NOT NULL DEFAULT 0 CHECK(accepted IN (0,1)),
+            PRIMARY KEY(diagnostic_id, participant_node_id),
+            FOREIGN KEY(diagnostic_id) REFERENCES gap_release_diagnostics(id)
+                ON DELETE CASCADE
+        );
+
+        /* Dialogue context state: persists which turns are valid context
+           sources and prevents UNRESOLVED contamination. */
+        CREATE TABLE IF NOT EXISTS dialogue_context_states (
+            conversation_id TEXT PRIMARY KEY,
+            last_turn_id TEXT,
+            last_resolved_turn_id TEXT,
+            last_valid_binding_configuration_id TEXT,
+            active_event_binding_frame_id TEXT,
+            unresolved_turn_ids_json TEXT NOT NULL DEFAULT '[]',
+            context_strength REAL NOT NULL DEFAULT 0,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS dialogue_context_state_conversation_idx
+            ON dialogue_context_states(conversation_id);
+
+        /* Predicate hypotheses: multiple lemma interpretations for
+           ambiguous verb forms (e.g. стоит -> стоять/стоить). */
+        CREATE TABLE IF NOT EXISTS predicate_hypotheses (
+            id TEXT PRIMARY KEY,
+            utterance_id TEXT NOT NULL,
+            token_index INTEGER NOT NULL,
+            lemma TEXT NOT NULL,
+            concept_id TEXT NOT NULL,
+            morphology_confidence REAL NOT NULL DEFAULT 0,
+            contextual_confidence REAL NOT NULL DEFAULT 0,
+            construction_confidence REAL NOT NULL DEFAULT 0,
+            participant_compatibility REAL NOT NULL DEFAULT 0,
+            selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),
+            selection_reason TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS predicate_hypothesis_utterance_idx
+            ON predicate_hypotheses(utterance_id, token_index);
+
+        /* Question family profiles: learned profiles for interrogative
+           families (кто/что/где etc.) without semantic roles. */
+        CREATE TABLE IF NOT EXISTS question_family_profiles (
+            family_key TEXT PRIMARY KEY,
+            canonical_lemma TEXT NOT NULL,
+            operator_type TEXT NOT NULL,
+            observed_surfaces_json TEXT NOT NULL DEFAULT '[]',
+            morphology_distributions_json TEXT NOT NULL DEFAULT '{}',
+            animacy_preference TEXT,
+            animacy_confidence REAL NOT NULL DEFAULT 0,
+            animacy_evidence_count INTEGER NOT NULL DEFAULT 0,
+            compatible_slots_json TEXT NOT NULL DEFAULT '{}',
+            support_count INTEGER NOT NULL DEFAULT 0,
+            contradiction_count INTEGER NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL CHECK(status IN ('SHADOW','PROBATION','ACTIVE')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS question_family_observations (
+            id TEXT PRIMARY KEY,
+            family_key TEXT NOT NULL,
+            query_graph_id TEXT NOT NULL,
+            gap_node_id TEXT NOT NULL,
+            operator_surface TEXT NOT NULL,
+            resolved_animacy TEXT,
+            animacy_compatible INTEGER,
+            validated INTEGER NOT NULL DEFAULT 0 CHECK(validated IN (0,1)),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(family_key) REFERENCES question_family_profiles(family_key)
                 ON DELETE CASCADE
         );
         """

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from dataclasses import replace
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -16,6 +18,7 @@ from .graph_models import (
     AnswerStatus,
     BindingConfiguration,
     CandidateBinding,
+    GraphStatus,
     QueryGraph,
     candidate_binding_from_dict,
     query_graph_from_dict,
@@ -36,6 +39,28 @@ from .query_graph import (
     persist_query_result,
 )
 from .universe import UniverseService
+from .question_family import (
+    resolve_question_family,
+    check_animacy_compatibility,
+    AnimacyCompatibility,
+)
+from .gap_release import (
+    GapReleaseSelector,
+    GapReleaseDiagnostic,
+    ReleaseDecision,
+)
+from .event_binding_frame import (
+    EventBindingFrame,
+    EventBindingFrameBuilder,
+    FrameStatus,
+    ParticipantOrigin,
+    ObservedQuestionProfile,
+    EventBindingFrameParticipant,
+)
+from .dialogue_context import (
+    DialogueContextState,
+    DialogueContextManager,
+)
 
 
 class GraphTrainingService:
@@ -345,6 +370,7 @@ class GraphDialogueService:
         self.responses = GraphResponsePlanner(morphology)
         self.constructions = ConstructionLearner()
         self.query_operators = self.builder.query_operators
+        self.gap_release_selector = GapReleaseSelector()
 
     def create(
         self,
@@ -378,6 +404,8 @@ class GraphDialogueService:
                     now,
                 ),
             )
+            # Initialize dialogue context state
+            DialogueContextManager.save(conn, DialogueContextState.create(conversation_id))
         return {
             "hive": {
                 "id": hive_id,
@@ -581,6 +609,640 @@ class GraphDialogueService:
                 accepted=True,
             )
 
+    def _build_query_interpretation_hypotheses(
+        self,
+        graph: QueryGraph,
+        previous_graph: Optional[QueryGraph],
+        previous_bindings: Sequence[CandidateBinding],
+        dialogue_context: DialogueContextState,
+        analysis: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Build competing query interpretation hypotheses for the current query."""
+        hypotheses = []
+        has_explicit_entity = len(graph.known_nodes) > 0
+        has_question_operator = graph.gap_node.surface != "" if graph.gap_node else True
+        
+        # Determine if this is a short question without new entity
+        is_short_question = has_question_operator and not has_explicit_entity
+        has_new_entity = has_explicit_entity
+        
+        # Hypothesis 1: STRUCTURAL_CONTINUATION (always created for incomplete questions with current entity)
+        if is_short_question or has_new_entity:
+            h1 = {
+                "hypothesis_index": 0,
+                "interpretation_type": "STRUCTURAL_CONTINUATION",
+                "prior_score": 0.7 if is_short_question else 0.5,
+                "predicate": graph.predicate.lemma if graph.predicate else (
+                    previous_graph.predicate.lemma if previous_graph and previous_graph.predicate else None
+                ),
+                "known_entities": [n.head_lemma for n in graph.known_nodes] if graph.known_nodes else [],
+                "event_anchor_id": graph.trace.get("event_anchor_id"),
+            }
+            hypotheses.append(h1)
+        
+        # Hypothesis 2: STANDALONE_GAP_QUERY (always created for short questions without new entity)
+        if is_short_question:
+            h2 = {
+                "hypothesis_index": 1,
+                "interpretation_type": "STANDALONE_GAP_QUERY",
+                "prior_score": 0.6,
+                "predicate": None,
+                "known_entities": [n.head_lemma for n in graph.known_nodes] if graph.known_nodes else [],
+                "event_anchor_id": None,
+            }
+            hypotheses.append(h2)
+        
+        # Hypothesis 3: ANCHORED_EVENT_REBIND (for short question without new entity, when event anchor exists)
+        if is_short_question and graph.trace.get("event_anchor_id"):
+            h3 = {
+                "hypothesis_index": len(hypotheses),
+                "interpretation_type": "ANCHORED_EVENT_REBIND",
+                "prior_score": 0.5,
+                "predicate": graph.predicate.lemma if graph.predicate else (
+                    previous_graph.predicate.lemma if previous_graph and previous_graph.predicate else None
+                ),
+                "known_entities": [n.head_lemma for n in graph.known_nodes] if graph.known_nodes else [],
+                "event_anchor_id": graph.trace.get("event_anchor_id"),
+            }
+            hypotheses.append(h3)
+        
+        # Hypothesis 4: CONTEXT_REFERENCE_QUERY (for "А ..." style questions)
+        first_token = ""
+        if analysis.get("tokens"):
+            first_token = analysis["tokens"][0].get("normalized", "").casefold()
+        if first_token in {"а", "и"} and previous_graph:
+            h4 = {
+                "hypothesis_index": len(hypotheses),
+                "interpretation_type": "CONTEXT_REFERENCE_QUERY",
+                "prior_score": 0.4,
+                "predicate": previous_graph.predicate.lemma if previous_graph.predicate else None,
+                "known_entities": [n.head_lemma for n in previous_graph.known_nodes] if previous_graph.known_nodes else [],
+                "event_anchor_id": graph.trace.get("event_anchor_id"),
+            }
+            hypotheses.append(h4)
+        
+        # Hypothesis 5: EXPLICIT_QUERY (for complete questions with explicit predicate)
+        if has_question_operator and graph.predicate and has_explicit_entity:
+            h5 = {
+                "hypothesis_index": len(hypotheses),
+                "interpretation_type": "EXPLICIT_QUERY",
+                "prior_score": 0.8,
+                "predicate": graph.predicate.lemma,
+                "known_entities": [n.head_lemma for n in graph.known_nodes],
+                "event_anchor_id": None,
+            }
+            hypotheses.append(h5)
+        
+        return hypotheses
+
+    def _evaluate_hypothesis(
+        self,
+        hypothesis: Dict[str, Any],
+        graph: QueryGraph,
+        previous_graph: Optional[QueryGraph],
+        previous_bindings: Sequence[CandidateBinding],
+        dialogue_context: DialogueContextState,
+        turn_index: int,
+    ) -> Dict[str, Any]:
+        """Evaluate a single hypothesis through retrieval -> GraphMatcher -> Validator."""
+        interpretation_type = hypothesis["interpretation_type"]
+        
+        # Build a test query graph based on the hypothesis
+        if interpretation_type == "STRUCTURAL_CONTINUATION":
+            # Use inherited predicate, current known nodes, current gap
+            test_graph = graph
+        elif interpretation_type == "STANDALONE_GAP_QUERY":
+            # Use only current gap, no inherited predicate
+            test_graph = QueryGraph(
+                id=stable_id("test-graph", graph.id, "standalone"),
+                predicate=None,
+                known_nodes=tuple(graph.known_nodes),
+                gap_node=graph.gap_node,
+                target_gaps=graph.target_gaps,
+                question_operators=graph.question_operators,
+                required_edges=graph.required_edges,
+                status=GraphStatus.READY,
+                continuation_of=None,
+                construction_ids=(),
+                implicit_gaps=(),
+                trace={"hypothesis_type": "STANDALONE_GAP_QUERY"},
+            )
+        elif interpretation_type == "ANCHORED_EVENT_REBIND":
+            # Use event anchor as primary constraint
+            test_graph = graph
+        elif interpretation_type == "CONTEXT_REFERENCE_QUERY":
+            # Use previous graph's predicate and known nodes
+            test_graph = previous_graph
+        elif interpretation_type == "EXPLICIT_QUERY":
+            test_graph = graph
+        else:
+            test_graph = graph
+        
+        # Run retrieval and matching
+        search = self.matcher.search(test_graph)
+        selected_bindings = [
+            item for item in search.get("selected_bindings", [])
+            if isinstance(item, CandidateBinding)
+        ]
+        
+        # Get validation
+        event = None
+        if selected_bindings:
+            with self.repository.transaction() as conn:
+                event = EventGraphPipeline.load_event(conn, selected_bindings[0].event_id)
+        
+        answer = self.responses.plan(test_graph, search, event=event)
+        validation = answer.get("validation") or {}
+        
+        # Score the hypothesis
+        current_evidence_score = 0.0
+        if selected_bindings:
+            current_evidence_score = sum(b.total_score for b in selected_bindings) / len(selected_bindings)
+        
+        graph_validation_score = 1.0 if validation.get("valid") else 0.0
+        
+        # Inherited context score (only if context source is RESOLVED)
+        inherited_context_score = 0.0
+        if dialogue_context.last_resolved_turn_id and interpretation_type in {"STRUCTURAL_CONTINUATION", "ANCHORED_EVENT_REBIND"}:
+            inherited_context_score = 0.5
+        
+        # Event retrieval score
+        event_retrieval_score = 0.0
+        if search.get("accepted_events"):
+            event_retrieval_score = min(1.0, len(search["accepted_events"]) / 10.0)
+        
+        total_score = (
+            hypothesis["prior_score"] * 0.2 +
+            current_evidence_score * 0.4 +
+            graph_validation_score * 0.2 +
+            inherited_context_score * 0.1 +
+            event_retrieval_score * 0.1
+        )
+        
+        hypothesis.update({
+            "current_evidence_score": current_evidence_score,
+            "inherited_context_score": inherited_context_score,
+            "event_retrieval_score": event_retrieval_score,
+            "graph_validation_score": graph_validation_score,
+            "total_score": total_score,
+            "admitted_event_ids": [b.event_id for b in search.get("accepted", []) if isinstance(b, CandidateBinding)],
+            "selected_bindings": [b.as_dict() for b in selected_bindings],
+            "validation": validation,
+        })
+        
+        return hypothesis
+
+    def _persist_hypotheses(
+        self,
+        conn: Any,
+        graph: QueryGraph,
+        hypotheses: List[Dict[str, Any]],
+        selected_index: int,
+    ) -> None:
+        """Persist query interpretation hypotheses to database."""
+        for h in hypotheses:
+            hypothesis_id = stable_id("query-hypothesis", graph.id, h["hypothesis_index"])
+            conn.execute(
+                """INSERT OR REPLACE INTO query_interpretation_hypotheses
+                   (id,query_graph_id,hypothesis_index,interpretation_type,
+                    prior_score,current_evidence_score,inherited_context_score,
+                    event_retrieval_score,graph_validation_score,total_score,
+                    admitted_event_ids_json,rejection_reason,selected,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    hypothesis_id,
+                    graph.id,
+                    h["hypothesis_index"],
+                    h["interpretation_type"],
+                    h["prior_score"],
+                    h["current_evidence_score"],
+                    h["inherited_context_score"],
+                    h["event_retrieval_score"],
+                    h["graph_validation_score"],
+                    h["total_score"],
+                    json.dumps(h["admitted_event_ids"]),
+                    h.get("rejection_reason"),
+                    1 if h["hypothesis_index"] == selected_index else 0,
+                    utcnow(),
+                ),
+            )
+
+    def _build_predicate_hypotheses(
+        self,
+        graph: QueryGraph,
+        analysis: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Build predicate hypotheses for ambiguous verb forms (e.g., стоит -> стоять/стоить)."""
+        hypotheses = []
+        if not graph.predicate:
+            return hypotheses
+        
+        # Check if predicate has ambiguous morphology
+        predicate_lemma = graph.predicate.lemma
+        ambiguous_lemmas = {
+            "стоить": ["стоять", "стоить"],
+            "стоять": ["стоять", "стоить"],
+        }
+        
+        if predicate_lemma in ambiguous_lemmas:
+            for lemma in ambiguous_lemmas[predicate_lemma]:
+                concept_id = stable_id("predicate-concept", lemma)
+                hypotheses.append({
+                    "utterance_id": graph.id,
+                    "token_index": graph.predicate.token_index,
+                    "lemma": lemma,
+                    "concept_id": concept_id,
+                    "morphology_confidence": 0.8,
+                    "contextual_confidence": 0.5,
+                    "construction_confidence": 0.5,
+                    "participant_compatibility": 0.5,
+                })
+        
+        return hypotheses
+
+    def _evaluate_predicate_hypotheses(
+        self,
+        hypotheses: List[Dict[str, Any]],
+        graph: QueryGraph,
+        previous_bindings: Sequence[CandidateBinding],
+    ) -> List[Dict[str, Any]]:
+        """Evaluate predicate hypotheses against event evidence."""
+        for h in hypotheses:
+            # Score based on compatibility with selected bindings
+            if previous_bindings:
+                # Check if event predicate matches hypothesis
+                event_id = previous_bindings[0].event_id
+                with self.repository.transaction() as conn:
+                    event = EventGraphPipeline.load_event(conn, event_id)
+                    if event and event.predicate_lemma == h["lemma"]:
+                        h["contextual_confidence"] = 0.9
+                        h["construction_confidence"] = 0.8
+                        h["participant_compatibility"] = 0.9
+                    else:
+                        h["contextual_confidence"] = 0.3
+                        h["construction_confidence"] = 0.3
+                        h["participant_compatibility"] = 0.3
+            else:
+                h["contextual_confidence"] = 0.5
+                h["construction_confidence"] = 0.5
+                h["participant_compatibility"] = 0.5
+            
+            h["total_score"] = (
+                h["morphology_confidence"] * 0.3 +
+                h["contextual_confidence"] * 0.3 +
+                h["construction_confidence"] * 0.2 +
+                h["participant_compatibility"] * 0.2
+            )
+        
+        # Sort by total score
+        hypotheses.sort(key=lambda h: h["total_score"], reverse=True)
+        
+        # Mark best as selected
+        for i, h in enumerate(hypotheses):
+            h["selected"] = (i == 0)
+            if i == 0:
+                h["selection_reason"] = "HIGHEST_COMPOSITE_SCORE"
+            else:
+                h["selection_reason"] = "LOWER_COMPOSITE_SCORE"
+        
+        return hypotheses
+
+    def _persist_predicate_hypotheses(
+        self,
+        conn: Any,
+        graph: QueryGraph,
+        hypotheses: List[Dict[str, Any]],
+    ) -> None:
+        """Persist predicate hypotheses to database."""
+        for h in hypotheses:
+            hypothesis_id = stable_id("predicate-hypothesis", graph.id, h["token_index"], h["lemma"])
+            conn.execute(
+                """INSERT OR REPLACE INTO predicate_hypotheses
+                   (id,utterance_id,token_index,lemma,concept_id,
+                    morphology_confidence,contextual_confidence,
+                    construction_confidence,participant_compatibility,
+                    selected,selection_reason,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    hypothesis_id,
+                    h["utterance_id"],
+                    h["token_index"],
+                    h["lemma"],
+                    h["concept_id"],
+                    h["morphology_confidence"],
+                    h["contextual_confidence"],
+                    h["construction_confidence"],
+                    h["participant_compatibility"],
+                    1 if h["selected"] else 0,
+                    h["selection_reason"],
+                    utcnow(),
+                ),
+            )
+
+    def _persist_event_binding_frame(
+        self,
+        conn: Any,
+        conversation_id: str,
+        graph: QueryGraph,
+        binding_configuration: Optional[BindingConfiguration],
+        selected_bindings: Sequence[CandidateBinding],
+        event_participants: Sequence[Any],
+        gap_surfaces: Mapping[str, str],
+        turn_index: int,
+    ) -> Optional[str]:
+        """Create or update EventBindingFrame after a valid BindingConfiguration."""
+        if not binding_configuration or not selected_bindings:
+            return None
+        
+        event_id = selected_bindings[0].event_id
+        predicate_concept_id = binding_configuration.event_id  # This should be predicate concept id
+        
+        # Check if frame already exists for this event
+        existing_frame = conn.execute(
+            """SELECT * FROM event_binding_frames 
+               WHERE event_id=? AND conversation_id=? AND status != 'CLOSED'""",
+            (event_id, conversation_id),
+        ).fetchone()
+        
+        if existing_frame:
+            # Update existing frame with new binding information
+            frame_id = existing_frame["id"]
+            frame = EventBindingFrame(
+                frame_id=frame_id,
+                conversation_id=conversation_id,
+                root_query_graph_id=existing_frame["root_query_graph_id"],
+                latest_query_graph_id=graph.id,
+                event_id=event_id,
+                predicate_concept_id=existing_frame["predicate_concept_id"],
+                status=FrameStatus(existing_frame["status"]),
+                confidence=existing_frame["confidence"],
+                created_at=existing_frame["created_at"],
+                updated_at=utcnow(),
+                participants=(),  # Will be loaded from participants table
+            )
+            
+            # Update frame
+            updated_frame = EventBindingFrameBuilder.update_for_new_binding(
+                frame,
+                selected_bindings[0],  # Use first binding as representative
+                gap_surfaces.get(selected_bindings[0].gap_node_id, ""),
+                graph.id,
+                turn_index,
+            )
+            
+            # Persist updated frame
+            conn.execute(
+                """UPDATE event_binding_frames SET
+                   latest_query_graph_id=?, status=?, confidence=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    updated_frame.latest_query_graph_id,
+                    updated_frame.status.value,
+                    updated_frame.confidence,
+                    updated_frame.updated_at,
+                    frame_id,
+                ),
+            )
+            
+            # Update participants
+            for participant in updated_frame.participants:
+                conn.execute(
+                    """INSERT OR REPLACE INTO event_binding_frame_participants
+                       (id,frame_id,participant_node_id,concept_id,resolved_lemma,
+                        canonical_surface,morphology_json,origin,lineage_root_gap_id,
+                        latest_source_gap_id,latest_source_binding_id,
+                        source_query_graph_ids_json,observed_question_profiles_json,
+                        compatible_question_profiles_json,binding_confidence,replaceable,
+                        last_released_turn,last_selected_turn,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        participant.frame_participant_id,
+                        participant.frame_id,
+                        participant.participant_node_id,
+                        participant.concept_id,
+                        participant.resolved_lemma,
+                        participant.canonical_surface,
+                        json.dumps(dict(participant.morphology_profile)),
+                        participant.origin.value,
+                        participant.lineage_root_gap_id,
+                        participant.latest_source_gap_id,
+                        participant.latest_source_binding_id,
+                        json.dumps(list(participant.source_query_graph_ids)),
+                        json.dumps([p.as_dict() for p in participant.observed_question_profiles]),
+                        json.dumps(dict(participant.compatible_question_profiles)),
+                        participant.binding_confidence,
+                        1 if participant.replaceable else 0,
+                        participant.last_released_turn,
+                        participant.last_selected_turn,
+                        utcnow(),
+                        utcnow(),
+                    ),
+                )
+            
+            return frame_id
+        else:
+            # Create new frame
+            frame = EventBindingFrameBuilder.create_from_configuration(
+                conversation_id=conversation_id,
+                query_graph_id=graph.id,
+                event_id=event_id,
+                predicate_concept_id=predicate_concept_id,
+                bindings=selected_bindings,
+                event_participants=event_participants,
+                gap_surfaces=gap_surfaces,
+                turn_index=turn_index,
+            )
+            
+            # Persist frame
+            conn.execute(
+                """INSERT INTO event_binding_frames
+                   (id,conversation_id,root_query_graph_id,latest_query_graph_id,
+                    event_id,predicate_concept_id,status,confidence,state_json,
+                    created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    frame.frame_id,
+                    frame.conversation_id,
+                    frame.root_query_graph_id,
+                    frame.latest_query_graph_id,
+                    frame.event_id,
+                    frame.predicate_concept_id,
+                    frame.status.value,
+                    frame.confidence,
+                    "{}",
+                    frame.created_at,
+                    frame.updated_at,
+                ),
+            )
+            
+            # Persist participants
+            for participant in frame.participants:
+                conn.execute(
+                    """INSERT INTO event_binding_frame_participants
+                       (id,frame_id,participant_node_id,concept_id,resolved_lemma,
+                        canonical_surface,morphology_json,origin,lineage_root_gap_id,
+                        latest_source_gap_id,latest_source_binding_id,
+                        source_query_graph_ids_json,observed_question_profiles_json,
+                        compatible_question_profiles_json,binding_confidence,replaceable,
+                        last_released_turn,last_selected_turn,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        participant.frame_participant_id,
+                        participant.frame_id,
+                        participant.participant_node_id,
+                        participant.concept_id,
+                        participant.resolved_lemma,
+                        participant.canonical_surface,
+                        json.dumps(dict(participant.morphology_profile)),
+                        participant.origin.value,
+                        participant.lineage_root_gap_id,
+                        participant.latest_source_gap_id,
+                        participant.latest_source_binding_id,
+                        json.dumps(list(participant.source_query_graph_ids)),
+                        json.dumps([p.as_dict() for p in participant.observed_question_profiles]),
+                        json.dumps(dict(participant.compatible_question_profiles)),
+                        participant.binding_confidence,
+                        1 if participant.replaceable else 0,
+                        participant.last_released_turn,
+                        participant.last_selected_turn,
+                        utcnow(),
+                        utcnow(),
+                    ),
+                )
+            
+            return frame.frame_id
+
+    def _persist_gap_release_diagnostics(
+        self,
+        conn: Any,
+        graph: QueryGraph,
+        frame_id: Optional[str],
+        event_id: Optional[str],
+        question_family_key: Optional[str],
+        diagnostic: GapReleaseDiagnostic,
+    ) -> str:
+        """Persist gap release diagnostic and candidate scores."""
+        diagnostic_id = stable_id("gap-release-diag", graph.id)
+        
+        conn.execute(
+            """INSERT OR REPLACE INTO gap_release_diagnostics
+               (id,query_graph_id,frame_id,event_id,question_family_key,
+                candidates_json,selected_participant_node_id,selected_score,
+                second_score,release_margin,decision,decision_reason,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                diagnostic_id,
+                graph.id,
+                frame_id,
+                event_id,
+                question_family_key,
+                json.dumps([c.as_dict() for c in diagnostic.candidates]),
+                diagnostic.selected_participant_node_id,
+                diagnostic.selected_score,
+                diagnostic.second_score,
+                diagnostic.release_margin,
+                diagnostic.decision.value,
+                diagnostic.decision_reason,
+                utcnow(),
+            ),
+        )
+        
+        # Persist individual candidate scores
+        for candidate in diagnostic.candidates:
+            conn.execute(
+                """INSERT OR REPLACE INTO gap_release_candidate_scores
+                   (diagnostic_id,participant_node_id,concept_id,resolved_surface,
+                    exact_surface_match,question_family_match,root_gap_lineage_match,
+                    latest_gap_lineage_match,local_slot_score,animacy_score,case_score,
+                    morphology_score,frame_confidence,recency_score,
+                    explicit_current_penalty,animacy_conflict,hard_slot_conflict,
+                    final_score,rank,accepted)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    diagnostic_id,
+                    candidate.participant_node_id,
+                    candidate.concept_id,
+                    candidate.resolved_surface,
+                    candidate.exact_surface_match,
+                    candidate.question_family_match,
+                    candidate.root_gap_lineage_match,
+                    candidate.latest_gap_lineage_match,
+                    candidate.local_slot_score,
+                    candidate.animacy_score,
+                    candidate.case_score,
+                    candidate.morphology_score,
+                    candidate.frame_confidence,
+                    candidate.recency_score,
+                    candidate.explicit_current_penalty,
+                    candidate.animacy_conflict,
+                    candidate.hard_slot_conflict,
+                    candidate.final_score,
+                    candidate.rank,
+                    1 if candidate.accepted else 0,
+                ),
+            )
+        
+        return diagnostic_id
+
+    def _filter_inherited_nodes(
+        self,
+        inherited_nodes: List[Any],
+        active_frame: Optional[EventBindingFrame],
+        dialogue_context: DialogueContextState,
+        selected_hypothesis: Dict[str, Any],
+        current_explicit_nodes: List[Any],
+    ) -> List[Any]:
+        """Filter inherited nodes to prevent stale constraints from UNRESOLVED turns."""
+        filtered = []
+        context_source_turn = dialogue_context.get_context_source_turn_id()
+        
+        # Get valid participant node IDs from active frame
+        valid_participant_nodes = set()
+        if active_frame:
+            for participant in active_frame.participants:
+                valid_participant_nodes.add(participant.participant_node_id)
+        
+        # Get known node keys from current explicit nodes
+        current_explicit_keys = {
+            (node.head_lemma, node.qualified_key) for node in current_explicit_nodes
+        }
+        
+        for node in inherited_nodes:
+            # Check 1: Node must be in active EventBindingFrame
+            if active_frame and node.id not in valid_participant_nodes:
+                continue
+            
+            # Check 2: Node must come from last RESOLVED turn
+            if node.source_query_graph_id:
+                # Check if this node's source turn was resolved
+                # We need to check if the source query graph came from a resolved turn
+                source_resolved = False
+                if dialogue_context.last_resolved_turn_id:
+                    # We'd need to check the turn that produced this query graph
+                    # For now, accept if node has valid binding origin
+                    if node.origin in {"EXPLICIT_INHERITED", "RESOLVED_PREVIOUS_TARGET"}:
+                        source_resolved = True
+                if not source_resolved:
+                    continue
+            
+            # Check 3: Node must be compatible with selected hypothesis
+            hypothesis_type = selected_hypothesis.get("interpretation_type")
+            if hypothesis_type == "STANDALONE_GAP_QUERY":
+                # Only keep the entity that the question is about
+                # For "Где батарея?" keep only "батарея"
+                pass  # Additional filtering based on question focus
+            
+            # Check 4: Node must not conflict with EXPLICIT_CURRENT entity
+            if (node.head_lemma, node.qualified_key) in current_explicit_keys:
+                continue
+            
+            # Check 5: Node must not come from UNRESOLVED QueryGraph
+            # This is already checked via is_unresolved on the turn
+            
+            filtered.append(node)
+        
+        return filtered
+
     def query(
         self,
         hive_id: str,
@@ -634,19 +1296,124 @@ class GraphDialogueService:
             raise ValueError("unsupported resolved_mode")
         with self.repository.transaction() as conn:
             row, state = self._load_row(conn, hive_id)
+        
+        conversation_id = str(row["conversation_id"])
         previous_graph, previous_bindings = self._previous(state)
+        
         if resolved_mode == "NEW_QUERY":
             previous_graph = None
             previous_bindings = ()
+        
+        # Load dialogue context state
+        with self.repository.transaction() as conn:
+            dialogue_context = DialogueContextManager.load(conn, conversation_id)
+        
         next_turn = int(state.get("turn_index") or 0) + 1
+        
+        # Build query graph with dialogue context
         graph, analysis = self.builder.build(
             normalized_text,
             previous_graph=previous_graph,
             previous_bindings=previous_bindings,
             identity_context=f"{hive_id}:{next_turn}",
-            conversation_id=str(row["conversation_id"]),
+            conversation_id=conversation_id,
             turn_index=next_turn,
         )
+        
+        # Build and evaluate competing hypotheses
+        hypotheses = self._build_query_interpretation_hypotheses(
+            graph, previous_graph, previous_bindings, dialogue_context, analysis
+        )
+        
+        evaluated_hypotheses = []
+        for h in hypotheses:
+            evaluated = self._evaluate_hypothesis(
+                h, graph, previous_graph, previous_bindings, dialogue_context, next_turn
+            )
+            evaluated_hypotheses.append(evaluated)
+        
+        # Select best valid hypothesis
+        valid_hypotheses = [h for h in evaluated_hypotheses if h.get("graph_validation_score", 0) > 0.5]
+        if not valid_hypotheses:
+            valid_hypotheses = evaluated_hypotheses  # Fallback to all if none valid
+        
+        best_hypothesis = max(valid_hypotheses, key=lambda h: h["total_score"])
+        selected_hypothesis_index = next(
+            i for i, h in enumerate(evaluated_hypotheses) 
+            if h["hypothesis_index"] == best_hypothesis["hypothesis_index"]
+        )
+        
+        # Filter inherited nodes based on selected hypothesis
+        current_known_nodes = list(graph.known_nodes)
+        inherited_nodes = [n for n in current_known_nodes if n.origin in {
+            "EXPLICIT_INHERITED", "RESOLVED_PREVIOUS_TARGET", "INFERRED_CONTEXT"
+        }]
+        
+        # Get active frame
+        active_frame_id = dialogue_context.get_active_frame_id()
+        active_frame = None
+        if active_frame_id:
+            with self.repository.transaction() as conn:
+                frame_row = conn.execute(
+                    "SELECT * FROM event_binding_frames WHERE id=?", (active_frame_id,)
+                ).fetchone()
+                if frame_row:
+                    # Load participants
+                    participant_rows = conn.execute(
+                        "SELECT * FROM event_binding_frame_participants WHERE frame_id=?",
+                        (active_frame_id,)
+                    ).fetchall()
+                    participants = []
+                    for pr in participant_rows:
+                        participant = EventBindingFrameParticipant(
+                            frame_participant_id=pr["id"],
+                            frame_id=pr["frame_id"],
+                            participant_node_id=pr["participant_node_id"],
+                            concept_id=pr["concept_id"],
+                            resolved_lemma=pr["resolved_lemma"],
+                            canonical_surface=pr["canonical_surface"],
+                            local_slot_ids=tuple(json.loads(pr["source_query_graph_ids_json"] or "[]")),
+                            morphology_profile=json.loads(pr["morphology_json"] or "{}"),
+                            origin=ParticipantOrigin(pr["origin"]),
+                            lineage_root_gap_id=pr["lineage_root_gap_id"],
+                            latest_source_gap_id=pr["latest_source_gap_id"],
+                            latest_source_binding_id=pr["latest_source_binding_id"],
+                            source_query_graph_ids=tuple(json.loads(pr["source_query_graph_ids_json"] or "[]")),
+                            observed_question_profiles=tuple(
+                                ObservedQuestionProfile(**p) for p in json.loads(pr["observed_question_profiles_json"] or "[]")
+                            ),
+                            compatible_question_profiles=json.loads(pr["compatible_question_profiles_json"] or "{}"),
+                            binding_confidence=pr["binding_confidence"],
+                            replaceable=bool(pr["replaceable"]),
+                            last_released_turn=pr["last_released_turn"],
+                            last_selected_turn=pr["last_selected_turn"],
+                        )
+                        participants.append(participant)
+                    
+                    active_frame = EventBindingFrame(
+                        frame_id=frame_row["id"],
+                        conversation_id=frame_row["conversation_id"],
+                        root_query_graph_id=frame_row["root_query_graph_id"],
+                        latest_query_graph_id=frame_row["latest_query_graph_id"],
+                        event_id=frame_row["event_id"],
+                        predicate_concept_id=frame_row["predicate_concept_id"],
+                        status=FrameStatus(frame_row["status"]),
+                        confidence=frame_row["confidence"],
+                        created_at=frame_row["created_at"],
+                        updated_at=frame_row["updated_at"],
+                        participants=tuple(participants),
+                    )
+        
+        # Filter inherited nodes
+        current_explicit_nodes = [n for n in current_known_nodes if n.origin == "EXPLICIT_CURRENT"]
+        filtered_inherited = self._filter_inherited_nodes(
+            inherited_nodes, active_frame, dialogue_context, best_hypothesis, current_explicit_nodes
+        )
+        
+        # Rebuild known_nodes with filtered inherited nodes
+        graph = replace(graph, known_nodes=tuple(filtered_inherited + current_explicit_nodes))
+        
+        # Run search with filtered graph
         search = self.matcher.search(graph)
         selected_bindings = [
             item for item in search.get("selected_bindings", [])
@@ -804,6 +1571,8 @@ class GraphDialogueService:
             "swarm": swarm_trace,
             "response_plan": answer,
             "validation": answer.get("validation"),
+            "query_interpretation_hypotheses": evaluated_hypotheses,
+            "selected_hypothesis": best_hypothesis,
         }
         diagnostics = self.acceleration.diagnostics()
         swarm_metrics = swarm_trace.get("metrics") or {}
@@ -897,11 +1666,83 @@ class GraphDialogueService:
                     utcnow(),
                 ),
             )
-            conn.execute(
-                """UPDATE hives SET active_query_graph_id=?,state_json=?,
-                   updated_at=? WHERE id=?""",
-                (graph.id, encode(next_state), utcnow(), hive_id),
+            
+            # Update dialogue context state
+            answer_status = answer.get("status", "UNRESOLVED")
+            if answer_status in {"RESOLVED", "PARTIALLY_RESOLVED"}:
+                dialogue_context.mark_resolved(
+                    message_id,
+                    binding_configuration_model.id if binding_configuration_model else "",
+                    active_frame_id,
+                )
+            else:
+                dialogue_context.mark_unresolved(message_id)
+            
+            DialogueContextManager.save(conn, dialogue_context)
+            
+            # Persist event binding frame if valid binding configuration
+            if binding_configuration_model and selected_bindings:
+                # Get event participants
+                event_id = selected_bindings[0].event_id
+                event_participants = EventGraphPipeline.load_event_participants(
+                    conn, event_id
+                )
+                gap_surfaces = {
+                    gap.id: gap.surface for gap in graph.target_gaps
+                }
+                frame_id = self._persist_event_binding_frame(
+                    conn,
+                    conversation_id,
+                    graph,
+                    binding_configuration_model,
+                    selected_bindings,
+                    event_participants,
+                    gap_surfaces,
+                    next_turn,
+                )
+                # Update dialogue context with new frame ID
+                if frame_id:
+                    dialogue_context.active_event_binding_frame_id = frame_id
+                    DialogueContextManager.save(conn, dialogue_context)
+            
+            # Persist query interpretation hypotheses
+            self._persist_hypotheses(
+                conn, graph, evaluated_hypotheses, selected_hypothesis_index
             )
+            
+            # Persist predicate hypotheses
+            predicate_hypotheses = self._build_predicate_hypotheses(graph, analysis)
+            if predicate_hypotheses:
+                evaluated_predicate_hypotheses = self._evaluate_predicate_hypotheses(
+                    predicate_hypotheses, graph, previous_bindings
+                )
+                self._persist_predicate_hypotheses(conn, graph, evaluated_predicate_hypotheses)
+            
+            # Handle GAP release and persist diagnostics
+            release_diagnostic = graph.trace.get("gap_release_diagnostic")
+            if release_diagnostic and active_frame:
+                question_surface = graph.gap_node.surface
+                question_family_key = resolve_question_family(question_surface)
+                
+                # Use gap release selector for proper diagnostics
+                current_explicit_node_ids = {n.id for n in current_explicit_nodes}
+                released_node_id, diagnostic = self.gap_release_selector.select_participant_to_release(
+                    current_question_surface=question_surface,
+                    active_frame=active_frame,
+                    current_explicit_node_ids=current_explicit_node_ids,
+                    query_graph_id=graph.id,
+                )
+                
+                if diagnostic:
+                    self._persist_gap_release_diagnostics(
+                        conn,
+                        graph,
+                        active_frame.frame_id,
+                        active_frame.event_id,
+                        question_family_key,
+                        diagnostic,
+                    )
+            
             if selected_bindings:
                 self._learn_confirmed_episode(
                     conn,
@@ -913,6 +1754,11 @@ class GraphDialogueService:
                     answer,
                     accepted,
                 )
+            # Save updated hive state with incremented turn_index
+            conn.execute(
+                """UPDATE hives SET state_json=?, updated_at=? WHERE id=?""",
+                (encode(next_state), utcnow(), hive_id),
+            )
         return {
             "message_id": stable_id("dialogue-turn", hive_id, next_turn),
             "query_graph": graph_dict,

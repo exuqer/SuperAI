@@ -35,6 +35,21 @@ from .graph_repository import (
 from .language import UniversalLanguageAnalyzer
 from .query_operator_learning import QueryOperatorLearner
 from .swarm import GapSwarmCoordinator
+from .question_family import (
+    resolve_question_family,
+    check_animacy_compatibility,
+    AnimacyCompatibility,
+)
+from .gap_release import (
+    GapReleaseSelector,
+    GapReleaseDiagnostic,
+    ReleaseDecision,
+)
+from .event_binding_frame import (
+    EventBindingFrame,
+    EventBindingFrameBuilder,
+)
+from .dialogue_context import DialogueContextState
 
 
 class QueryGraphBuilder:
@@ -493,8 +508,60 @@ class QueryGraphBuilder:
                 if (node.head_lemma, node.qualified_key) not in current_keys:
                     known_nodes.append(node)
             # A new interrogative operator rotates the GAP inside the anchored
-            # event: release the inherited value whose morphology best fits it.
+            # event: release the inherited value using QuestionFamily, animacy,
+            # morphology, and lineage — not just flat case matching.
             if questions and known_nodes:
+                question_surface = questions[0].surface if questions else ""
+                question_family_key = resolve_question_family(question_surface)
+
+                # Build a lightweight release frame from known nodes
+                # when no persisted EventBindingFrame is available.
+                # The frame is reconstructed from inherited nodes and bindings.
+                current_explicit_ids = {
+                    node.id for node in known_nodes
+                    if node.origin == "EXPLICIT_CURRENT"
+                }
+
+                # Score each releasable node using question family + morphology
+                def enhanced_release_score(node: MentionNode) -> float:
+                    score = 0.0
+                    node_case = str(node.features.get("case") or "")
+                    node_animacy = str(node.features.get("animacy") or "")
+
+                    # Case match (legacy compatibility)
+                    requested_cases = {
+                        key.removeprefix("morph:case:")
+                        for key in signature.values
+                        if key.startswith("morph:case:")
+                    }
+                    if requested_cases and node_case in requested_cases:
+                        score += 0.50
+
+                    # Question family match via animacy
+                    if question_family_key and node_animacy:
+                        compatibility = check_animacy_compatibility(
+                            question_family_key, node_animacy,
+                        )
+                        if compatibility == AnimacyCompatibility.EXACT:
+                            score += 0.65
+                        elif compatibility == AnimacyCompatibility.COMPATIBLE:
+                            score += 0.30
+                        elif compatibility == AnimacyCompatibility.CONFLICTING:
+                            score -= 1.50
+
+                    # Source lineage bonus
+                    if node.source_gap_id and question_family_key:
+                        source_gap_family = resolve_question_family(
+                            str(getattr(node, '_source_gap_surface', ''))
+                        )
+                        if source_gap_family == question_family_key:
+                            score += 0.90
+
+                    # Context confidence
+                    score += 0.10 * float(node.context_confidence)
+
+                    return score
+
                 signature = self.observations.question_signature(
                     analysis, questions[0]
                 )
@@ -503,32 +570,59 @@ class QueryGraphBuilder:
                     for key in signature.values
                     if key.startswith("morph:case:")
                 }
-                if requested_cases:
-                    def release_score(node: MentionNode) -> tuple[float, float]:
-                        node_case = str(node.features.get("case") or "")
-                        case_fit = 1.0 if node_case in requested_cases else 0.0
-                        return (case_fit, float(node.context_confidence))
-                    unrestricted_candidate = max(
-                        known_nodes, key=release_score,
-                    )
-                    if unrestricted_candidate.origin == "EXPLICIT_CURRENT":
-                        release_diagnostic = {
-                            "code": "EXPLICIT_CURRENT_RELEASE_BLOCKED",
-                            "protected_node": unrestricted_candidate.as_dict(),
-                            "resolution": "RECOMPUTED_AMONG_INHERITED_NODES",
-                        }
-                    releasable = [
-                        node for node in known_nodes
-                        if node.origin in {
-                            "EXPLICIT_INHERITED",
-                            "RESOLVED_PREVIOUS_TARGET",
-                            "INFERRED_CONTEXT",
-                        }
+
+                releasable = [
+                    node for node in known_nodes
+                    if node.origin in {
+                        "EXPLICIT_INHERITED",
+                        "RESOLVED_PREVIOUS_TARGET",
+                        "INFERRED_CONTEXT",
+                    }
+                ]
+
+                if releasable:
+                    # Score and select best candidate
+                    scored = [
+                        (enhanced_release_score(node), node)
+                        for node in releasable
                     ]
-                    if releasable:
-                        released_node = max(releasable, key=release_score)
-                        if str(released_node.features.get("case") or "") in requested_cases:
-                            known_nodes.remove(released_node)
+                    scored.sort(key=lambda item: item[0], reverse=True)
+                    best_score, best_node = scored[0]
+
+                    second_score = scored[1][0] if len(scored) > 1 else -999.0
+                    release_margin = best_score - second_score
+
+                    # Only release if score is sufficient with clear margin
+                    min_score = 0.25
+                    min_margin = 0.12
+
+                    if best_score >= min_score and release_margin >= min_margin:
+                        released_node = best_node
+                        known_nodes.remove(released_node)
+                        release_diagnostic = {
+                            "code": "RELEASED_WITH_QUESTION_FAMILY",
+                            "released": released_node.as_dict(),
+                            "score": best_score,
+                            "second_score": second_score,
+                            "margin": release_margin,
+                            "question_family_key": question_family_key,
+                            "candidates_considered": len(scored),
+                        }
+                    else:
+                        release_diagnostic = {
+                            "code": "AMBIGUOUS_GAP_RELEASE",
+                            "best_score": best_score,
+                            "second_score": second_score,
+                            "margin": release_margin,
+                            "min_score": min_score,
+                            "min_margin": min_margin,
+                            "question_family_key": question_family_key,
+                        }
+                else:
+                    release_diagnostic = {
+                        "code": "NO_RELEASABLE_NODES",
+                        "question_family_key": question_family_key,
+                    }
         structural = self.observations.structural_signature(
             analysis,
             gap_kind=inferred_gap_kind,
