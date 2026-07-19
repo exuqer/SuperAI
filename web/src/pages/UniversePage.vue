@@ -47,9 +47,10 @@
           />
           <div class="training-actions">
             <span v-if="trainingStatus">{{ trainingStatus }}</span>
-            <button type="submit" :disabled="training || !trainingText.trim()">
-              {{ training ? 'Обучение…' : 'Добавить в память' }}
-            </button>
+            <div>
+              <button type="button" class="clear-draft" :disabled="training || !trainingText" @click="trainingText = ''; trainingStatus = ''">Очистить текст</button>
+              <button type="submit" :disabled="training || !trainingText.trim()">{{ training ? 'Обучение…' : 'Добавить в память' }}</button>
+            </div>
           </div>
         </form>
         <p class="notice">
@@ -97,6 +98,31 @@
             <strong>{{ compact(dimension.id) }} <small v-if="dimension.alias">— {{ dimension.alias }}</small></strong>
             <span>{{ selectedDimensions.includes(dimension.id) ? '✓ на карте · ' : '' }}{{ dimension.representation_type }} · {{ dimension.status }} · {{ dimension.utility.toFixed(2) }}</span>
           </button>
+          <section v-if="dimensionDetail" class="dimension-detail">
+            <h3>Проверка измерения</h3>
+            <p>
+              revision {{ dimensionDetail.metadata.revision }} ·
+              {{ dimensionDetail.metadata.status }}
+            </p>
+            <dl>
+              <dt>Semantic basis</dt>
+              <dd>{{ dimensionDetail.semantic_basis.residual_feature || '—' }}</dd>
+              <dt>Control features</dt>
+              <dd>{{ dimensionDetail.control_features.join(', ') || 'нет' }}</dd>
+              <dt>Support train / holdout / continual</dt>
+              <dd>{{ dimensionDetail.metadata.train_support }} / {{ dimensionDetail.metadata.holdout_support }} / {{ dimensionDetail.metadata.continual_support }}</dd>
+              <dt>Stability / lower bound</dt>
+              <dd>{{ dimensionDetail.metadata.stability.toFixed(2) }} / {{ dimensionDetail.metadata.stability_lower_bound.toFixed(2) }}</dd>
+              <dt>Retrieval / shadow gain</dt>
+              <dd>{{ dimensionDetail.metadata.holdout_retrieval_gain.toFixed(2) }} / {{ dimensionDetail.metadata.shadow_retrieval_gain.toFixed(2) }}</dd>
+              <dt>Validated utility</dt>
+              <dd>{{ dimensionDetail.metadata.validated_answer_contribution_count }}</dd>
+              <dt>Lineage</dt>
+              <dd>{{ dimensionDetail.lineage?.lineage_reason || 'первая revision' }}</dd>
+              <dt>Relations</dt>
+              <dd>{{ dimensionDetail.related_dimensions.length }}</dd>
+            </dl>
+          </section>
           <p v-if="!dimensions.length" class="empty">Кандидаты появятся после повторяющихся наблюдений.</p>
         </template>
         <p v-if="error" class="error">{{ error }}</p>
@@ -113,6 +139,23 @@ import { copyJsonToClipboard } from '@/shared/utils/clipboard';
 type Universe = { id: string; name: string; entity_count: number; active_dimension_count: number };
 type Entity = { id: string; label: string; mass: number; stability: number; base_position: number[] };
 type Dimension = { id: string; alias?: string | null; representation_type: string; status: string; utility: number };
+type DimensionDetail = {
+  metadata: Dimension & {
+    revision: number;
+    train_support: number;
+    holdout_support: number;
+    continual_support: number;
+    stability: number;
+    stability_lower_bound: number;
+    holdout_retrieval_gain: number;
+    shadow_retrieval_gain: number;
+    validated_answer_contribution_count: number;
+  };
+  semantic_basis: Record<string, string>;
+  control_features: string[];
+  lineage: { lineage_reason?: string } | null;
+  related_dimensions: unknown[];
+};
 type Projection = { id: string; dimension_id: string; membership: number };
 type WordForm = { id: string; surface: string; usage_count: number; morphological_features: Record<string, unknown> };
 type Profile = {
@@ -129,6 +172,7 @@ const universes = ref<Universe[]>([]);
 const selectedUniverse = ref('words');
 const base = ref<{ entities: Entity[] }>({ entities: [] });
 const dimensions = ref<Dimension[]>([]);
+const dimensionDetail = ref<DimensionDetail | null>(null);
 const selectedEntity = ref<Profile | null>(null);
 const selectedDimensions = ref<string[]>([]);
 const projectionPoints = ref<ProjectionPoint[]>([]);
@@ -152,7 +196,7 @@ function position(point: Entity | ProjectionPoint): Record<string, string> {
   return { left: `${18 + point.x * 64}%`, top: `${18 + point.y * 64}%`, fontSize: '14px' };
 }
 async function loadUniverse(): Promise<void> {
-  error.value = ''; selectedEntity.value = null; selectedDimensions.value = []; projectionPoints.value = [];
+  error.value = ''; selectedEntity.value = null; selectedDimensions.value = []; projectionPoints.value = []; dimensionDetail.value = null;
   try {
     const [space, fields] = await Promise.all([
       api.get<{ entities: Entity[] }>(`/api/universes/${selectedUniverse.value}/base-space`),
@@ -166,15 +210,22 @@ async function toggleDimension(id: string): Promise<void> {
   selectedDimensions.value = selectedDimensions.value.includes(id)
     ? selectedDimensions.value.filter(value => value !== id)
     : [...selectedDimensions.value.slice(-1), id];
-  if (!selectedDimensions.value.length) { projectionPoints.value = []; return; }
+  if (!selectedDimensions.value.length) { projectionPoints.value = []; dimensionDetail.value = null; return; }
   try {
-    const result = await api.post<{ points: ProjectionPoint[] }>('/api/visualization/project', {
-      universe_id: selectedUniverse.value,
-      space_type: 'dimensions',
-      dimension_ids: selectedDimensions.value,
-      projection_method: 'selected_dimensions',
-    });
+    const inspectedDimension = selectedDimensions.value[
+      selectedDimensions.value.length - 1
+    ];
+    const [result, detail] = await Promise.all([
+      api.post<{ points: ProjectionPoint[] }>('/api/visualization/project', {
+        universe_id: selectedUniverse.value,
+        space_type: 'dimensions',
+        dimension_ids: selectedDimensions.value,
+        projection_method: 'selected_dimensions',
+      }),
+      api.get<DimensionDetail>(`/api/dimensions/${inspectedDimension}`),
+    ]);
     projectionPoints.value = result.points;
+    dimensionDetail.value = detail;
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не удалось построить проекцию'; }
 }
 async function openEntity(id: string): Promise<void> {
@@ -239,9 +290,10 @@ nav { display: flex; align-items: center; gap: 18px; } nav a { color: #9db0c8; t
 .workspace { display: grid; grid-template-columns: 230px minmax(420px, 1fr) 310px; min-height: calc(100vh - 62px); gap: 1px; background: #233145; }.panel { background: #101827; padding: 20px; }
 .navigator button, .dimension, .projection { display: flex; width: 100%; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; padding: 10px; margin: 4px 0; }.navigator button { flex-direction: column; }.navigator button span, .dimension span { color: #7d91ad; font-size: 12px; }.navigator button.selected, .navigator button:hover, .dimension:hover { background: #1a2a40; }
 .kicker { color: #6cbefa; font-size: 10px; letter-spacing: .15em; font-weight: 700; }.panel-head { display: flex; align-items: flex-start; justify-content: space-between; }.panel-head h1 { margin: 3px 0; font-size: 24px; }.panel-head > span { color: #7d91ad; }.notice { color: #7d91ad; font-size: 12px; }
-.training-form { display: grid; gap: 7px; margin: 14px 0; padding: 12px; border: 1px solid #29435d; border-radius: 10px; background: #142338; }.training-form label { color: #9db0c8; font-size: 12px; }.training-form textarea { resize: vertical; min-height: 56px; border: 1px solid #38536f; border-radius: 7px; padding: 8px; color: #e8edf5; background: #0c1624; font: inherit; }.training-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #8cccf5; font-size: 12px; }.training-actions button { border: 0; border-radius: 7px; padding: 8px 12px; color: #07121c; background: #6bc7f7; font-weight: 700; cursor: pointer; }.training-actions button:disabled { opacity: .5; cursor: default; }
+.training-form { display: grid; gap: 7px; margin: 14px 0; padding: 12px; border: 1px solid #29435d; border-radius: 10px; background: #142338; }.training-form label { color: #9db0c8; font-size: 12px; }.training-form textarea { resize: vertical; min-height: 56px; border: 1px solid #38536f; border-radius: 7px; padding: 8px; color: #e8edf5; background: #0c1624; font: inherit; }.training-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #8cccf5; font-size: 12px; }.training-actions div { display: flex; gap: 8px; }.training-actions button { border: 0; border-radius: 7px; padding: 8px 12px; color: #07121c; background: #6bc7f7; font-weight: 700; cursor: pointer; }.training-actions .clear-draft { color: #b9e4fa; background: transparent; border: 1px solid #38536f; }.training-actions button:disabled { opacity: .5; cursor: default; }
 .map { position: relative; min-height: 680px; overflow: hidden; border: 1px solid #22334a; border-radius: 14px; background: radial-gradient(circle at 45% 42%, #183657 0, #101b2b 38%, #0e1520 75%); }.map::before { content: ''; position: absolute; inset: 10%; border: 1px solid #2b4867; border-radius: 50%; opacity: .4; }
 .entity { position: absolute; transform: translate(-50%, -50%); border: 0; border-radius: 999px; padding: 7px 10px; color: #dff1ff; background: #1b5276cc; box-shadow: 0 0 0 1px #76ceff55, 0 0 20px #419bd044; cursor: pointer; }.entity:hover, .entity.active { background: #2b8fc8; box-shadow: 0 0 0 2px #b6e8ff; }.empty { position: absolute; inset: 45% 10%; text-align: center; color: #7d91ad; }
 .inspector h2 { margin: 7px 0; }.inspector h3 { margin: 18px 0 7px; font-size: 12px; color: #9db0c8; }.inspector p { color: #9db0c8; }.show-dimensions, .show-word-forms { border: 1px solid #38536f; border-radius: 6px; padding: 7px 9px; color: #b9e4fa; background: transparent; cursor: pointer; }.word-form { display: flex; width: 100%; justify-content: space-between; border: 0; border-radius: 6px; padding: 5px 7px; color: #d8e8f4; background: #152438; text-align: left; cursor: pointer; }.word-form:hover { background: #1d3b59; }.word-form em { color: #91aac3; font-size: 11px; font-style: normal; }.show-word-forms { margin-top: 10px; }.dimension-help { font-size: 12px; }.dimension { flex-direction: column; }.dimension.selected { background: #1a2f48; box-shadow: inset 3px 0 #6bc7f7; }.dimension small { color: #9db0c8; font-weight: 400; }.projection { align-items: center; gap: 8px; padding: 5px 0; cursor: default; }.projection span { width: 92px; color: #9db0c8; }.projection i { flex: 1; height: 7px; background: #25344a; border-radius: 99px; overflow: hidden; }.projection b { display: block; height: 100%; background: #5bc0f6; }.projection em { width: 30px; color: #d8e8f4; font-style: normal; font-size: 12px; }.error { color: #ff9e9e !important; }
+.dimension-detail { margin-top: 12px; padding: 10px; border: 1px solid #29435d; border-radius: 8px; background: #111e30; }.dimension-detail dl { display: grid; grid-template-columns: 1fr; gap: 2px; }.dimension-detail dt { margin-top: 7px; color: #7890ad; font-size: 10px; text-transform: uppercase; }.dimension-detail dd { margin: 0; color: #d3e2ef; font-size: 11px; overflow-wrap: anywhere; }
 @media (max-width: 960px) { .workspace { grid-template-columns: 190px 1fr; }.inspector { grid-column: 1 / -1; }.map { min-height: 430px; } }
 </style>

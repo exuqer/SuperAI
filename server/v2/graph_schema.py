@@ -15,7 +15,7 @@ from .graph_models import (
 )
 
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 33
 
 
 def _reset_incompatible_schema(conn: sqlite3.Connection) -> None:
@@ -430,6 +430,22 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
                 ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS predicate_perspective_relations (
+            source_predicate_concept_id TEXT NOT NULL,
+            target_predicate_concept_id TEXT NOT NULL,
+            slot_permutation_json TEXT NOT NULL DEFAULT '{}',
+            evidence_count INTEGER NOT NULL DEFAULT 0 CHECK(evidence_count >= 0),
+            confidence REAL NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 1),
+            context_support_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(source_predicate_concept_id,target_predicate_concept_id)
+        );
+        CREATE INDEX IF NOT EXISTS predicate_perspective_target_idx
+            ON predicate_perspective_relations(
+                target_predicate_concept_id, confidence DESC
+            );
+
         CREATE TABLE IF NOT EXISTS hives (
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
@@ -487,6 +503,89 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS binding_event_idx
             ON candidate_bindings(event_id, query_graph_id);
 
+        /* Search is auditable: a swarm proposes events, while GraphMatcher
+           remains the only component that admits a binding. */
+        CREATE TABLE IF NOT EXISTS swarm_runs (
+            id TEXT PRIMARY KEY,
+            query_graph_id TEXT NOT NULL,
+            gap_id TEXT NOT NULL,
+            deterministic_seed TEXT NOT NULL,
+            status TEXT NOT NULL,
+            termination_reason TEXT NOT NULL,
+            retrieval_mode TEXT NOT NULL,
+            budget_json TEXT NOT NULL DEFAULT '{}',
+            trace_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS swarm_run_query_idx
+            ON swarm_runs(query_graph_id, gap_id, started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS bee_missions (
+            id TEXT PRIMARY KEY,
+            swarm_run_id TEXT NOT NULL,
+            bee_type TEXT NOT NULL,
+            mission_type TEXT NOT NULL,
+            seed_json TEXT NOT NULL DEFAULT '{}',
+            visited_universes_json TEXT NOT NULL DEFAULT '[]',
+            candidate_event_ids_json TEXT NOT NULL DEFAULT '[]',
+            successful INTEGER NOT NULL DEFAULT 0 CHECK(successful IN (0,1)),
+            termination_reason TEXT NOT NULL,
+            FOREIGN KEY(swarm_run_id) REFERENCES swarm_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS bee_steps (
+            id TEXT PRIMARY KEY,
+            swarm_run_id TEXT NOT NULL,
+            bee_id TEXT NOT NULL,
+            step_index INTEGER NOT NULL CHECK(step_index >= 0),
+            source_universe TEXT NOT NULL,
+            target_universe TEXT NOT NULL,
+            action TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(swarm_run_id) REFERENCES swarm_runs(id) ON DELETE CASCADE,
+            UNIQUE(swarm_run_id,bee_id,step_index)
+        );
+        CREATE TABLE IF NOT EXISTS nectar_packets (
+            id TEXT PRIMARY KEY,
+            swarm_run_id TEXT NOT NULL,
+            source_universe TEXT NOT NULL,
+            target_universe TEXT NOT NULL,
+            event_ids_json TEXT NOT NULL DEFAULT '[]',
+            dimension_ids_json TEXT NOT NULL DEFAULT '[]',
+            evidence_weight REAL NOT NULL DEFAULT 0,
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(swarm_run_id) REFERENCES swarm_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS candidate_event_observations (
+            id TEXT PRIMARY KEY,
+            swarm_run_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            source_mode TEXT NOT NULL,
+            evidence_weight REAL NOT NULL DEFAULT 0,
+            admitted INTEGER,
+            rejection_reason TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(swarm_run_id) REFERENCES swarm_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS binding_configurations (
+            id TEXT PRIMARY KEY,
+            query_graph_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            bindings_json TEXT NOT NULL DEFAULT '[]',
+            all_required_gaps_bound INTEGER NOT NULL CHECK(all_required_gaps_bound IN (0,1)),
+            distinct_node_count INTEGER NOT NULL DEFAULT 0,
+            configuration_score REAL NOT NULL DEFAULT 0,
+            validation_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS binding_configuration_query_idx
+            ON binding_configurations(query_graph_id, configuration_score DESC);
+        CREATE INDEX IF NOT EXISTS binding_configuration_event_idx
+            ON binding_configurations(event_id, status, configuration_score DESC);
+
         CREATE TABLE IF NOT EXISTS dialogue_turns (
             id TEXT PRIMARY KEY,
             hive_id TEXT NOT NULL,
@@ -494,13 +593,12 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             speaker TEXT NOT NULL,
             raw_text TEXT NOT NULL,
             query_graph_id TEXT,
-            selected_binding_id TEXT,
+            selected_bindings_json TEXT NOT NULL DEFAULT '[]',
+            binding_configuration_id TEXT,
             answer_json TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(hive_id) REFERENCES hives(id) ON DELETE CASCADE,
             FOREIGN KEY(query_graph_id) REFERENCES query_graphs(id)
-                ON DELETE SET NULL,
-            FOREIGN KEY(selected_binding_id) REFERENCES candidate_bindings(id)
                 ON DELETE SET NULL,
             UNIQUE(hive_id, turn_index)
         );
@@ -512,7 +610,8 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             utterance TEXT NOT NULL,
             query_graph_id TEXT NOT NULL,
             candidate_bindings_json TEXT NOT NULL DEFAULT '[]',
-            selected_binding_id TEXT,
+            selected_bindings_json TEXT NOT NULL DEFAULT '[]',
+            binding_configuration_id TEXT,
             event_ids_json TEXT NOT NULL DEFAULT '[]',
             construction_ids_json TEXT NOT NULL DEFAULT '[]',
             slot_hypotheses_json TEXT NOT NULL DEFAULT '[]',
@@ -677,6 +776,8 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS latent_dimensions (
             id TEXT PRIMARY KEY,
+            canonical_dimension_id TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
             universe_id TEXT NOT NULL,
             owner_scope TEXT NOT NULL CHECK(owner_scope IN ('universe','cloud','local')),
             owner_id TEXT,
@@ -691,15 +792,84 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             compression_gain REAL NOT NULL DEFAULT 0,
             memory_cost REAL NOT NULL DEFAULT 0,
             usage_count INTEGER NOT NULL DEFAULT 0,
+            projection_usage_count INTEGER NOT NULL DEFAULT 0,
+            retrieval_contribution_count INTEGER NOT NULL DEFAULT 0,
+            graph_admitted_contribution_count INTEGER NOT NULL DEFAULT 0,
+            validated_answer_contribution_count INTEGER NOT NULL DEFAULT 0,
             evidence_count INTEGER NOT NULL DEFAULT 0,
+            entity_support INTEGER NOT NULL DEFAULT 0,
+            source_support INTEGER NOT NULL DEFAULT 0,
+            domain_support INTEGER NOT NULL DEFAULT 0,
+            train_support INTEGER NOT NULL DEFAULT 0,
+            holdout_support INTEGER NOT NULL DEFAULT 0,
+            continual_support INTEGER NOT NULL DEFAULT 0,
+            stability_lower_bound REAL NOT NULL DEFAULT 0,
+            holdout_retrieval_gain REAL NOT NULL DEFAULT 0,
+            shadow_retrieval_gain REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL CHECK(status IN
-                ('candidate','probation','active','shared','weak','merged','pruned','frozen')),
+                ('candidate','probation','active','shared','weak','merged','split',
+                 'pruned','frozen')),
             created_at TEXT NOT NULL,
+            activated_at TEXT,
+            last_updated_at TEXT NOT NULL,
             last_confirmed_at TEXT,
             FOREIGN KEY(universe_id) REFERENCES universes(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS latent_dimension_universe_idx
             ON latent_dimensions(universe_id, status, stability DESC);
+        CREATE INDEX IF NOT EXISTS latent_dimension_canonical_idx
+            ON latent_dimensions(canonical_dimension_id, revision DESC);
+
+        CREATE TABLE IF NOT EXISTS dimension_history (
+            id TEXT PRIMARY KEY,
+            dimension_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(dimension_id) REFERENCES latent_dimensions(id)
+                ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS dimension_lineage (
+            canonical_dimension_id TEXT PRIMARY KEY,
+            current_revision_id TEXT NOT NULL,
+            parent_dimension_ids_json TEXT NOT NULL DEFAULT '[]',
+            merged_from_json TEXT NOT NULL DEFAULT '[]',
+            split_from_json TEXT NOT NULL DEFAULT '[]',
+            replaced_by TEXT,
+            lineage_reason TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS dimension_evaluations (
+            id TEXT PRIMARY KEY,
+            dimension_id TEXT NOT NULL,
+            dataset_split TEXT NOT NULL,
+            entity_support INTEGER NOT NULL DEFAULT 0,
+            source_support INTEGER NOT NULL DEFAULT 0,
+            domain_support INTEGER NOT NULL DEFAULT 0,
+            stability_point_estimate REAL NOT NULL DEFAULT 0,
+            stability_lower_bound REAL NOT NULL DEFAULT 0,
+            retrieval_gain REAL NOT NULL DEFAULT 0,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(dimension_id) REFERENCES latent_dimensions(id)
+                ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS shadow_retrieval_runs (
+            id TEXT PRIMARY KEY,
+            query_graph_id TEXT NOT NULL,
+            dimension_id TEXT NOT NULL,
+            baseline_event_ids_json TEXT NOT NULL DEFAULT '[]',
+            shadow_candidate_events_json TEXT NOT NULL DEFAULT '[]',
+            shadow_graph_admitted_events_json TEXT NOT NULL DEFAULT '[]',
+            shadow_correct_event_rank INTEGER,
+            shadow_retrieval_gain REAL NOT NULL DEFAULT 0,
+            shadow_false_positive_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(dimension_id) REFERENCES latent_dimensions(id)
+                ON DELETE CASCADE
+        );
 
         CREATE TABLE IF NOT EXISTS dimension_clouds (
             id TEXT PRIMARY KEY,
@@ -800,6 +970,36 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS universe_training_event_idx
             ON universe_training_events(universe_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS experiment_runs (
+            id TEXT PRIMARY KEY,
+            dataset_version TEXT NOT NULL,
+            dataset_split TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            pipeline_versions_json TEXT NOT NULL DEFAULT '{}',
+            configuration_hash TEXT NOT NULL,
+            random_seed INTEGER NOT NULL,
+            training_order_json TEXT NOT NULL DEFAULT '[]',
+            batch_boundaries_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            report_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS experiment_reproducibility_idx
+            ON experiment_runs(dataset_version,configuration_hash,random_seed);
+        CREATE TABLE IF NOT EXISTS experiment_metrics (
+            id TEXT PRIMARY KEY,
+            experiment_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            metric_name TEXT NOT NULL,
+            metric_value REAL NOT NULL,
+            tolerance REAL NOT NULL DEFAULT 0,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(experiment_id) REFERENCES experiment_runs(id)
+                ON DELETE CASCADE
+        );
         """
     )
     versions = {

@@ -71,16 +71,21 @@ export interface GapNode {
   surface: string;
   token_indices: number[];
   attached_to_node_id: string | null;
+  required?: boolean;
+  coordination_group_id?: string | null;
   question_signature: Record<string, number>;
   compatible_slot_hypotheses: Record<string, number>;
 }
 
 export interface QueryGraph {
   query_graph_id: string;
+  question_operators?: Array<Record<string, unknown>>;
   event_pattern: {
     predicate: PredicateNode | null;
     known_nodes: MentionNode[];
     gap_node: GapNode;
+    target_gaps?: GapNode[];
+    target_gap?: GapNode;
     required_edges: Array<Record<string, unknown>>;
   };
   exclusions: Array<Record<string, unknown>>;
@@ -117,7 +122,8 @@ export interface GraphAnswer {
   short_answer: string | null;
   full_answer: string | null;
   surface: string | null;
-  selected_binding?: CandidateBinding;
+  chat_text?: string;
+  selected_bindings?: CandidateBinding[];
   provenance?: {
     source_event_ids: string[];
     independent_source_count: number;
@@ -131,6 +137,53 @@ export interface GraphAnswer {
   versions?: ModelVersions;
 }
 
+export interface GapSwarmRun {
+  id: string;
+  gap_id: string;
+  status: string;
+  termination_reason: string;
+  retrieval_mode: 'SWARM_DIMENSIONAL' | 'SWARM_MIXED' | 'INDEX_FALLBACK' | 'DIRECT_EVENT_LOOKUP';
+  fallback_reason?: string;
+  events_considered: number;
+  events_returned: number;
+  missions: Array<{
+    bee_id: string;
+    bee_type: string;
+    mission_type: string;
+    seed?: Record<string, unknown>;
+    visited_universes: string[];
+    candidate_event_ids?: string[];
+    successful: boolean;
+    termination_reason?: string;
+  }>;
+  nectar_packets?: Array<{
+    packet_id: string;
+    source_universe: string;
+    target_universe: string;
+    event_ids: string[];
+    dimension_ids: string[];
+    evidence_weight: number;
+  }>;
+}
+
+export interface SwarmTrace {
+  retrieval_mode?: string;
+  fallback_reason?: string;
+  query_plan?: Record<string, unknown>;
+  gap_swarms?: GapSwarmRun[];
+}
+
+export interface BindingConfiguration {
+  configuration_id: string;
+  event_id: string;
+  bindings_by_gap: Record<string, CandidateBinding>;
+  all_required_gaps_bound: boolean;
+  distinct_node_count: number;
+  configuration_score: number;
+  graph_validation: GraphAnswer['validation'];
+  status: 'SELECTED' | 'REJECTED';
+}
+
 export interface HiveSummary {
   id: string;
   conversation_id: string;
@@ -141,7 +194,9 @@ export interface HiveSummary {
 export interface HiveState {
   hive: HiveSummary;
   query_graph: QueryGraph | null;
-  selected_binding: CandidateBinding | null;
+  selected_bindings: CandidateBinding[];
+  binding_configuration?: BindingConfiguration | null;
+  swarm?: SwarmTrace;
   candidate_bindings: CandidateBinding[];
   rejected_events: Array<Record<string, unknown>>;
   answer: GraphAnswer | null;
@@ -162,6 +217,8 @@ export interface ChatMessage {
   createdAt: string;
   status?: AnswerStatus | 'PENDING' | 'ERROR';
   queryGraphId?: string;
+  answer?: GraphAnswer | null;
+  queryGraph?: QueryGraph | null;
 }
 
 export interface SlotHypothesis {

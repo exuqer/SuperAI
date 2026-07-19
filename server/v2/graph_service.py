@@ -5,10 +5,13 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from server.core.settings import settings
+
 from .event_graph import EventGraphPipeline
 from .graph_learning import ConstructionLearner, ObservationSignature
 from .graph_models import (
     AnswerStatus,
+    BindingConfiguration,
     CandidateBinding,
     QueryGraph,
     candidate_binding_from_dict,
@@ -47,11 +50,33 @@ class GraphTrainingService:
         self.universes = UniverseService(self.repository)
 
     def _materialize_and_project(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        discover_dimensions = kwargs.pop("discover_dimensions", None)
+        project_universes = bool(kwargs.pop("project_universes", True))
         result = self.events.materialize(*args, **kwargs)
-        if result.get("status") == "CONFIRMED":
+        if result.get("status") == "CONFIRMED" and project_universes:
+            if discover_dimensions is None:
+                with self.repository.transaction() as conn:
+                    source_count = int(conn.execute(
+                        """SELECT COUNT(*) FROM knowledge_sources
+                           WHERE status='CONFIRMED'"""
+                    ).fetchone()[0])
+                interval = max(
+                    1,
+                    settings.dimension_discovery_checkpoint_interval,
+                )
+                discover_dimensions = (
+                    source_count == 1 or source_count % interval == 0
+                )
             result["universe_update"] = self.universes.ingest_source(
-                str(result["source_id"])
+                str(result["source_id"]),
+                discover_dimensions=bool(discover_dimensions),
             )
+        elif result.get("status") == "CONFIRMED":
+            result["universe_update"] = {
+                "source_id": str(result["source_id"]),
+                "ingested": False,
+                "reason": "projection_deferred_to_batch_checkpoint",
+            }
         return result
 
     def train(
@@ -61,6 +86,8 @@ class GraphTrainingService:
         source_type: str = "document",
         independent_key: str = "",
         domain_key: str = "",
+        discover_dimensions: Optional[bool] = None,
+        project_universes: bool = True,
     ) -> Dict[str, Any]:
         return self._materialize_and_project(
             text,
@@ -68,6 +95,8 @@ class GraphTrainingService:
             independent_key=independent_key,
             domain_key=domain_key,
             force_status=None,
+            discover_dimensions=discover_dimensions,
+            project_universes=project_universes,
         )
 
     def stage(
@@ -304,7 +333,7 @@ class GraphDialogueService:
         now = utcnow()
         state = {
             "query_graph": None,
-            "selected_binding": None,
+            "selected_bindings": [],
             "candidate_bindings": [],
             "rejected_events": [],
             "answer": None,
@@ -362,16 +391,47 @@ class GraphDialogueService:
                 **state,
             }
 
+    def delete(self, hive_id: str) -> Dict[str, Any]:
+        with self.repository.transaction() as conn:
+            row = conn.execute("SELECT id FROM hives WHERE id=?", (hive_id,)).fetchone()
+            if row is None:
+                raise KeyError(hive_id)
+            conn.execute("DELETE FROM hives WHERE id=?", (hive_id,))
+        return {"hive_id": hive_id, "deleted": True}
+
     @staticmethod
     def _previous(
         state: Mapping[str, Any],
-    ) -> tuple[Optional[QueryGraph], Optional[CandidateBinding]]:
+    ) -> tuple[Optional[QueryGraph], tuple[CandidateBinding, ...]]:
         graph_value = state.get("query_graph")
-        binding_value = state.get("selected_binding")
+        bindings_value = state.get("selected_bindings") or []
+        bindings = tuple(
+            binding
+            for binding in (
+                candidate_binding_from_dict(value)
+                for value in bindings_value
+            )
+            if binding is not None
+        )
         return (
             query_graph_from_dict(graph_value) if graph_value else None,
-            candidate_binding_from_dict(binding_value),
+            bindings,
         )
+
+    @staticmethod
+    def _chat_answer_text(
+        answer: Mapping[str, Any],
+        graph: QueryGraph,
+    ) -> str:
+        """Persist the same GAP-oriented text that the chat presents."""
+        surface = str(answer.get("surface") or "")
+        short = str(answer.get("short_answer") or "")
+        full = str(answer.get("full_answer") or "")
+        if str(answer.get("status") or "") != AnswerStatus.RESOLVED.value:
+            return surface or short or full
+        if len(tuple(graph.target_gaps)) == 1:
+            return surface or short or full
+        return full or surface or short
 
     def parse(
         self,
@@ -379,6 +439,7 @@ class GraphDialogueService:
         *,
         previous_graph: Optional[QueryGraph] = None,
         previous_binding: Optional[CandidateBinding] = None,
+        previous_bindings: Sequence[CandidateBinding] = (),
         conversation_id: str = "",
         turn_index: int = 0,
     ) -> Dict[str, Any]:
@@ -386,6 +447,7 @@ class GraphDialogueService:
             text,
             previous_graph=previous_graph,
             previous_binding=previous_binding,
+            previous_bindings=previous_bindings,
             conversation_id=conversation_id,
             turn_index=turn_index,
         )
@@ -400,7 +462,8 @@ class GraphDialogueService:
         hive_id: str,
         text: str,
         graph: QueryGraph,
-        selected: CandidateBinding,
+        selected_bindings: Sequence[CandidateBinding],
+        binding_configuration: Optional[BindingConfiguration],
         answer: Mapping[str, Any],
         accepted: Sequence[CandidateBinding],
     ) -> None:
@@ -415,31 +478,39 @@ class GraphDialogueService:
         episode_id = stable_id(
             "training-episode",
             graph.id,
-            selected.id,
+            binding_configuration.id if binding_configuration else ",".join(
+                binding.id for binding in selected_bindings
+            ),
         )
-        local_slot_ids = [
+        local_slot_ids = sorted({
             str(local_slot_id)
-            for evidence in selected.evidence
+            for binding in selected_bindings
+            for evidence in binding.evidence
             for local_slot_id in evidence.get("local_slot_ids", [])
-        ]
+        })
         supporting_event_ids = sorted({
             event_id
-            for evidence in selected.evidence
+            for binding in selected_bindings
+            for evidence in binding.evidence
             for event_id in evidence.get("supporting_event_ids", [])
-        } or {selected.event_id})
+        } or {
+            binding.event_id for binding in selected_bindings
+        })
         conn.execute(
             """INSERT OR REPLACE INTO training_episodes
                (id,utterance,query_graph_id,candidate_bindings_json,
-                selected_binding_id,event_ids_json,construction_ids_json,
+                selected_bindings_json,binding_configuration_id,
+                event_ids_json,construction_ids_json,
                 slot_hypotheses_json,answer_status,validation_json,
                 user_correction_json,eligible_for_learning,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)""",
             (
                 episode_id,
                 text,
                 graph.id,
                 encode([item.as_dict() for item in accepted]),
-                selected.id,
+                encode([item.as_dict() for item in selected_bindings]),
+                binding_configuration.id if binding_configuration else None,
                 encode(supporting_event_ids),
                 encode(list(graph.construction_ids)),
                 encode(local_slot_ids),
@@ -501,35 +572,96 @@ class GraphDialogueService:
             raise ValueError("unsupported resolved_mode")
         with self.repository.transaction() as conn:
             row, state = self._load_row(conn, hive_id)
-        previous_graph, previous_binding = self._previous(state)
+        previous_graph, previous_bindings = self._previous(state)
         if resolved_mode == "NEW_QUERY":
             previous_graph = None
-            previous_binding = None
+            previous_bindings = ()
         next_turn = int(state.get("turn_index") or 0) + 1
         graph, analysis = self.builder.build(
             normalized_text,
             previous_graph=previous_graph,
-            previous_binding=previous_binding,
+            previous_bindings=previous_bindings,
             identity_context=f"{hive_id}:{next_turn}",
             conversation_id=str(row["conversation_id"]),
             turn_index=next_turn,
         )
         search = self.matcher.search(graph)
-        selected = search.get("selected")
+        selected_bindings = [
+            item for item in search.get("selected_bindings", [])
+            if isinstance(item, CandidateBinding)
+        ]
+        selected = selected_bindings[0] if selected_bindings else None
         event = None
         if isinstance(selected, CandidateBinding):
             with self.repository.transaction() as conn:
                 event = EventGraphPipeline.load_event(conn, selected.event_id)
         answer = self.responses.plan(graph, search, event=event)
+        answer["chat_text"] = self._chat_answer_text(answer, graph)
         accepted = list(search.get("accepted") or [])
         rejected = list(search.get("rejected") or [])
-        graph_dict = graph.as_dict()
-        selected_dict = selected.as_dict() if isinstance(selected, CandidateBinding) else None
-        selected_bindings = [
-            item for item in search.get("selected_bindings", [])
-            if isinstance(item, CandidateBinding)
+        swarm_trace = search.get("swarm") or {}
+        swarm_metrics = swarm_trace.setdefault("metrics", {})
+        swarm_metrics.update({
+            "candidate_bindings": len(accepted),
+            "binding_configurations": int(bool(selected_bindings)),
+            "graph_match_attempts": len({
+                item.event_id for item in accepted
+            }) + len({
+                str(item.get("event_id") or "")
+                for item in rejected
+                if item.get("event_id")
+            }),
+        })
+        swarm_metrics["events_scanned"] = swarm_metrics[
+            "graph_match_attempts"
         ]
+        self.matcher.swarms.record_outcome(
+            graph,
+            swarm_trace,
+            admitted_event_ids={
+                item.event_id for item in accepted
+                if isinstance(item, CandidateBinding)
+            },
+            selected_event_ids={
+                item.event_id for item in selected_bindings
+            },
+            validated=bool(answer.get("validation", {}).get("valid")),
+        )
+        graph_dict = graph.as_dict()
         selected_bindings_dict = [item.as_dict() for item in selected_bindings]
+        binding_configuration_model: Optional[BindingConfiguration] = None
+        if selected_bindings:
+            event_id = selected_bindings[0].event_id
+            all_required = {
+                    gap.id for gap in graph.target_gaps
+                } == {item.gap_node_id for item in selected_bindings}
+            distinct_node_count = len({
+                item.resolved_node_id for item in selected_bindings
+            })
+            configuration_valid = bool(
+                answer.get("validation", {}).get("valid")
+                and all_required
+                and distinct_node_count == len(selected_bindings)
+                and len({item.event_id for item in selected_bindings}) == 1
+            )
+            binding_configuration_model = BindingConfiguration(
+                id=stable_id("binding-configuration", graph.id, event_id),
+                query_graph_id=graph.id,
+                event_id=event_id,
+                bindings=tuple(selected_bindings),
+                all_required_gaps_bound=all_required,
+                distinct_node_count=distinct_node_count,
+                configuration_score=(
+                    sum(item.total_score for item in selected_bindings)
+                    / len(selected_bindings)
+                ),
+                graph_validation=answer.get("validation") or {},
+                status="SELECTED" if configuration_valid else "REJECTED",
+            )
+        binding_configuration = (
+            binding_configuration_model.as_dict()
+            if binding_configuration_model else None
+        )
         bindings_by_event: Dict[str, List[CandidateBinding]] = {}
         for binding in accepted:
             bindings_by_event.setdefault(binding.event_id, []).append(binding)
@@ -605,15 +737,16 @@ class GraphDialogueService:
             "accepted_events": sorted({
                 item.event_id for item in accepted
             }),
-            "selected_binding": selected_dict,
             "selected_bindings": selected_bindings_dict,
+            "binding_configuration": binding_configuration,
+            "swarm": swarm_trace,
             "response_plan": answer,
             "validation": answer.get("validation"),
         }
         next_state = {
             "query_graph": graph_dict,
-            "selected_binding": selected_dict,
             "selected_bindings": selected_bindings_dict,
+            "binding_configuration": binding_configuration,
             "candidate_bindings": [
                 item.as_dict() for item in accepted
             ],
@@ -630,19 +763,42 @@ class GraphDialogueService:
                 hive_id=hive_id,
                 search=search,
             )
+            if binding_configuration_model:
+                conn.execute(
+                    """INSERT OR REPLACE INTO binding_configurations
+                       (id,query_graph_id,event_id,bindings_json,
+                        all_required_gaps_bound,distinct_node_count,
+                        configuration_score,validation_json,status,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        binding_configuration_model.id,
+                        graph.id,
+                        binding_configuration_model.event_id,
+                        encode(selected_bindings_dict),
+                        int(binding_configuration_model.all_required_gaps_bound),
+                        binding_configuration_model.distinct_node_count,
+                        binding_configuration_model.configuration_score,
+                        encode(dict(binding_configuration_model.graph_validation)),
+                        binding_configuration_model.status,
+                        utcnow(),
+                    ),
+                )
             message_id = stable_id("dialogue-turn", hive_id, next_turn)
             conn.execute(
                 """INSERT INTO dialogue_turns
                    (id,hive_id,turn_index,speaker,raw_text,query_graph_id,
-                    selected_binding_id,answer_json,created_at)
-                   VALUES(?,? ,?,'user',?,?,?,?,?)""",
+                    selected_bindings_json,binding_configuration_id,
+                    answer_json,created_at)
+                   VALUES(?,? ,?,'user',?,?,?,?,?,?)""",
                 (
                     message_id,
                     hive_id,
                     next_turn,
                     normalized_text,
                     graph.id,
-                    selected.id if isinstance(selected, CandidateBinding) else None,
+                    encode(selected_bindings_dict),
+                    binding_configuration_model.id
+                    if binding_configuration_model else None,
                     encode(answer),
                     utcnow(),
                 ),
@@ -652,13 +808,14 @@ class GraphDialogueService:
                    updated_at=? WHERE id=?""",
                 (graph.id, encode(next_state), utcnow(), hive_id),
             )
-            if isinstance(selected, CandidateBinding):
+            if selected_bindings:
                 self._learn_confirmed_episode(
                     conn,
                     hive_id,
                     normalized_text,
                     graph,
-                    selected,
+                    selected_bindings,
+                    binding_configuration_model,
                     answer,
                     accepted,
                 )
@@ -667,8 +824,8 @@ class GraphDialogueService:
             "query_graph": graph_dict,
             "candidate_bindings": next_state["candidate_bindings"],
             "rejected_events": rejected,
-            "selected_binding": selected_dict,
             "selected_bindings": selected_bindings_dict,
+            "binding_configuration": binding_configuration,
             "answer": answer,
             "trace": trace,
             "hive": {

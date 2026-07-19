@@ -45,18 +45,31 @@ async def get_hive(
     return service.get_hive(hive_id)
 
 
+@router.delete("/{hive_id}")
+async def delete_hive(
+    hive_id: str,
+    service: HiveService = Depends(get_hive_service),
+) -> dict[str, Any]:
+    return service.delete(hive_id)
+
+
 @router.post("/{hive_id}/query")
 async def query_hive(
     hive_id: str,
     request: HiveQueryRequest,
     service: HiveService = Depends(get_hive_service),
 ) -> dict[str, Any]:
-    return service.query(
+    result = service.query(
         hive_id,
         request.text,
         request.resolved_mode,
         request.retrieval_scope,
     )
+    # Deprecated HTTP-only alias. Internal state and processing use the
+    # canonical selected_bindings array exclusively.
+    bindings = result.get("selected_bindings") or []
+    result["selected_binding"] = bindings[0] if bindings else None
+    return result
 
 
 @router.post("/{hive_id}/query/preview")
@@ -84,8 +97,12 @@ async def get_bindings(
 ) -> dict[str, Any]:
     state = service.query_working_state(hive_id)
     return {
+        "selected_bindings": state.get("selected_bindings") or [],
         "candidate_bindings": state.get("candidate_bindings") or [],
-        "selected_binding": state.get("selected_binding"),
+        "binding_configurations": (
+            [state["binding_configuration"]]
+            if state.get("binding_configuration") else []
+        ),
         "rejected_events": state.get("rejected_events") or [],
     }
 

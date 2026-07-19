@@ -23,6 +23,7 @@ from .graph_models import (
     SlotStatus,
 )
 from .graph_repository import decode, encode, stable_id, utcnow
+from .language.noun_phrase_parser import NOUN_POS
 
 
 def clamp(value: float) -> float:
@@ -145,7 +146,25 @@ class ObservationBuilder:
             token_start=min(retained_indices, default=mention.head),
             token_end=max(retained_indices, default=mention.head),
             token_indices=retained_indices,
-            features=dict(mention.features),
+            features={
+                **dict(mention.features),
+                # Retain the local alternatives so an eventual rejected-event
+                # diagnostic can show what morphology was discarded.
+                "morphology_alternatives": [
+                    {
+                        "lemma": item.lemma.casefold(),
+                        "case": item.features.get("case"),
+                        "confidence": float(item.confidence),
+                        "selected": bool(item.selected),
+                    }
+                    for item in head.analyses
+                    if item.pos in NOUN_POS
+                ],
+                "preposition_support": (
+                    mention.preposition.casefold()
+                    if mention.preposition else ""
+                ),
+            },
             components=tuple(components),
             preposition=mention.preposition.casefold(),
             entity_id=entity_id,

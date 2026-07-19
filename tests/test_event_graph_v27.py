@@ -234,9 +234,27 @@ def test_coordinated_question_binds_every_requested_gap_in_one_event():
     assert "target_gap" not in pattern
     assert len(pattern["implicit_gaps"]) == 0
     assert result["answer"]["surface"] == "Механик дал роботу болт."
+    assert result["answer"]["chat_text"] == "Механик дал роботу болт."
     assert [item["resolved_surface"] for item in result["selected_bindings"]] == [
         "Механик", "роботу", "болт",
     ]
+
+
+def test_each_requested_gap_has_a_deterministic_swarm_and_configuration():
+    repository, training, dialogue = services()
+    training.train("Механик дал роботу болт.", independent_key="swarm")
+    result = ask(dialogue, "Кто, кому и что дал?")
+
+    swarm = result["trace"]["swarm"]
+    assert len(swarm["gap_swarms"]) == 3
+    assert all(run["retrieval_mode"] == "INDEX_FALLBACK" for run in swarm["gap_swarms"])
+    assert all(run["missions"][0]["bee_type"] == "Scout" for run in swarm["gap_swarms"])
+    configuration = result["binding_configuration"]
+    assert configuration["all_required_gaps_bound"] is True
+    assert configuration["distinct_node_count"] == 3
+    with repository.transaction() as conn:
+        assert conn.execute("SELECT count(*) FROM swarm_runs").fetchone()[0] == 3
+        assert conn.execute("SELECT count(*) FROM binding_configurations").fetchone()[0] == 1
     assert result["answer"]["validation"]["all_requested_gaps_bound"]
 
 
@@ -253,11 +271,13 @@ def test_follow_up_rotates_gap_within_the_selected_event():
     assert first["answer"]["surface"] == "болт."
     assert second["answer"]["surface"] == "Механик."
     assert third["answer"]["surface"] == "болт."
+    assert first["answer"]["chat_text"] == "болт."
+    assert second["answer"]["chat_text"] == "Механик."
     assert second["query_graph"]["continuation_of"] == (
         first["query_graph"]["query_graph_id"]
     )
     assert second["query_graph"]["trace"]["event_anchor_id"] == (
-        first["selected_binding"]["event_id"]
+        first["selected_bindings"][0]["event_id"]
     )
     predicate = third["query_graph"]["event_pattern"]["predicate"]
     assert predicate["origin"] == "INHERITED"
@@ -267,6 +287,44 @@ def test_follow_up_rotates_gap_within_the_selected_event():
         node["head"]["lemma"]
         for node in third["query_graph"]["event_pattern"]["known_nodes"]
     } == {"механик", "робот"}
+
+
+def test_full_follow_up_keeps_current_predicate_and_uses_anchor_as_evidence():
+    _, training, dialogue = services()
+    training.train(
+        "Механик дал роботу болт.",
+        independent_key="referential-continuation",
+    )
+    hive_id = dialogue.create()["hive"]["id"]
+    dialogue.query(hive_id, "Что механик дал роботу?")
+    result = dialogue.query(
+        hive_id,
+        "А что получил робот от механика?",
+    )
+
+    pattern = result["query_graph"]["event_pattern"]
+    trace = result["query_graph"]["trace"]
+    assert result["answer"]["surface"] == "болт."
+    assert trace["continuation_mode"] == "REFERENTIAL"
+    assert trace["inherited_predicate"] is False
+    assert trace["event_anchor_inherited"] is True
+    assert trace["predicate_perspective_relation"] == {
+        "source_predicate": "дать",
+        "target_predicate": "получить",
+        "scope": "LOCAL_EVENT_ANCHOR",
+        "global_relation_used": False,
+    }
+    assert pattern["predicate"]["lemma"] == "получить"
+    assert pattern["predicate"]["origin"] == "CURRENT_EXPLICIT"
+    assert [node["head"]["lemma"] for node in pattern["known_nodes"]] == [
+        "робот", "механик",
+    ]
+    assert pattern["known_nodes"][1]["preposition"] == "от"
+    assert pattern["known_nodes"][1]["features"]["case"] == "gent"
+    assert pattern["implicit_gaps"] == []
+    assert result["selected_bindings"][0]["evidence"][0][
+        "anchored_event_evidence"
+    ] is True
 
 
 def test_bare_what_keeps_case_hypotheses_and_separates_implicit_agreement_gap():
@@ -464,7 +522,7 @@ def test_event_property_keeps_preposition_and_event_local_full_answer():
     assert result["answer"]["full_answer"] == (
         "На подоконнике лежит красный помидор."
     )
-    assert result["selected_binding"]["resolved_features"]["preposition"] == "на"
+    assert result["selected_bindings"][0]["resolved_features"]["preposition"] == "на"
 
 
 def test_bare_noun_follow_up_replaces_known_node_and_reuses_gap():
@@ -742,7 +800,7 @@ def test_versions_and_trace_are_saved_with_every_answer():
     trace = result["trace"]
     assert trace["final_query_graph"]
     assert trace["candidate_bindings"]
-    assert trace["selected_binding"]
+    assert trace["selected_bindings"]
     assert trace["validation"]["valid"] is True
 
 
@@ -798,6 +856,7 @@ def test_http_api_exposes_graph_contract(isolated_database):
         assert queried.status_code == 200
         payload = queried.json()
         assert payload["answer"]["surface"] == "Борис."
+        assert payload["selected_binding"] == payload["selected_bindings"][0]
         assert "query_graph" in payload
         health = client.get("/api/health").json()
         assert health == {

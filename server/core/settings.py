@@ -41,6 +41,31 @@ class Settings(BaseSettings):
     concept_retrieval_stop_threshold: float = 0.75
     retrieval_stage_limit: int = 64
 
+    # Deterministic GAP swarms
+    swarm_max_bees: int = 8
+    swarm_max_rounds: int = 4
+    swarm_max_vertical_transitions: int = 4
+    swarm_max_nectar_packets: int = 128
+    swarm_max_candidate_events_per_bee: int = 32
+    swarm_max_candidate_events_per_swarm: int = 128
+    swarm_max_dimension_projections_per_round: int = 128
+    swarm_max_index_hits_per_seed: int = 128
+    swarm_max_graph_match_attempts: int = 128
+
+    # Latent-dimension lifecycle and capacity
+    dimension_minimum_entity_support: int = 6
+    dimension_minimum_source_support: int = 4
+    dimension_minimum_domain_support: int = 2
+    dimension_minimum_stability: float = 0.75
+    dimension_minimum_stability_lower_bound: float = 0.55
+    max_candidate_dimensions_per_universe: int = 32
+    max_probation_dimensions_per_universe: int = 16
+    max_active_dimensions_per_universe: int = 16
+    max_clouds_per_dimension: int = 4
+    max_core_entities_per_cloud: int = 32
+    max_peripheral_entities_per_cloud: int = 128
+    dimension_discovery_checkpoint_interval: int = 4
+
     @field_validator("debug", mode="before")
     @classmethod
     def parse_debug_mode(cls, value: object) -> object:

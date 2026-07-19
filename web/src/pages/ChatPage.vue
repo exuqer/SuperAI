@@ -18,6 +18,9 @@
         <button class="ghost-button" :disabled="store.loading" @click="newDialogue">
           Новый диалог
         </button>
+        <button class="ghost-button danger" :disabled="!hive || store.loading" @click="clearChatSpace">
+          Очистить пространство
+        </button>
         <button class="ghost-button" :disabled="!hive || exportingSpace" @click="exportChatSpace">
           {{ exportingSpace ? 'Копирование…' : exportStatus || 'Копировать пространство' }}
         </button>
@@ -189,6 +192,23 @@
               </span>
             </div>
           </section>
+
+          <section v-if="targetGaps.length > 1" class="multi-gap-panel">
+            <div class="subhead">
+              <h3>Совместное заполнение GAP</h3>
+              <span>{{ targetGaps.length }} обязательных значения</span>
+            </div>
+            <div class="gap-map">
+              <article v-for="gap in targetGaps" :key="gap.node_id" class="gap-map-item">
+                <span>{{ gap.surface }}</span>
+                <i>→</i>
+                <b>{{ bindingForGap(gap.node_id)?.resolved_surface || 'ожидание' }}</b>
+              </article>
+            </div>
+            <p v-if="bindingConfiguration" class="configuration-state" :class="bindingConfiguration.status.toLowerCase()">
+              {{ bindingConfiguration.all_required_gaps_bound ? '✓ Одно событие и уникальные участники подтверждены' : '× Конфигурация не прошла строгую проверку' }}
+            </p>
+          </section>
         </div>
       </section>
 
@@ -218,6 +238,35 @@
               <small v-if="answer.provenance">
                 {{ answer.provenance.independent_source_count }} независимых источников
               </small>
+            </div>
+          </section>
+
+          <section v-if="swarmRuns.length" class="swarm-card">
+            <div class="answer-head">
+              <span>Поиск роем</span>
+              <b :class="retrievalModeClass">{{ retrievalModeLabel(retrievalMode) }}</b>
+            </div>
+            <p v-if="swarmFallbackReason" class="swarm-note">{{ fallbackLabel(swarmFallbackReason) }}</p>
+            <div class="swarm-runs">
+              <article v-for="(run, index) in swarmRuns" :key="run.id" class="swarm-run">
+                <span class="swarm-index">GAP {{ index + 1 }}</span>
+                <b>{{ gapLabel(run.gap_id) }}</b>
+                <small>{{ run.events_returned }} / {{ run.events_considered }} событий · {{ run.termination_reason }}</small>
+                <div class="mission-list">
+                  <div v-for="mission in run.missions" :key="mission.bee_id" class="mission-row">
+                    <strong>{{ mission.bee_type }}</strong>
+                    <small>{{ mission.mission_type }}</small>
+                    <div class="universe-route">
+                      <span v-for="universe in mission.visited_universes" :key="universe">{{ universe }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="run.nectar_packets?.length" class="packet-list">
+                  <small v-for="packet in run.nectar_packets" :key="packet.packet_id">
+                    Nectar {{ packet.source_universe }} → {{ packet.target_universe }} · {{ packet.event_ids.length }} событий
+                  </small>
+                </div>
+              </article>
             </div>
           </section>
 
@@ -290,7 +339,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useGraphStore } from '@/entities/graph/store';
-import type { AnswerStatus, GraphStatus, QueryMode } from '@/entities/graph/types';
+import type { AnswerStatus, GapNode, GraphStatus, QueryMode } from '@/entities/graph/types';
 import { api } from '@/shared/api/client';
 import { copyJsonToClipboard } from '@/shared/utils/clipboard';
 
@@ -302,6 +351,9 @@ const {
   answer,
   candidateBindings,
   rejectedEvents,
+  selectedBindings,
+  bindingConfiguration,
+  swarm,
   trace,
 } = storeToRefs(store);
 
@@ -313,6 +365,14 @@ const exportStatus = ref('');
 const canSubmit = computed(() =>
   Boolean(question.value.trim()) && !store.loading && !store.restoring,
 );
+const targetGaps = computed<GapNode[]>(() => {
+  const pattern = queryGraph.value?.event_pattern;
+  return pattern?.target_gaps?.length ? pattern.target_gaps : (pattern?.target_gap ? [pattern.target_gap] : []);
+});
+const swarmRuns = computed(() => swarm.value?.gap_swarms || []);
+const retrievalMode = computed(() => swarm.value?.retrieval_mode || swarmRuns.value[0]?.retrieval_mode || 'DIRECT_EVENT_LOOKUP');
+const swarmFallbackReason = computed(() => swarm.value?.fallback_reason || swarmRuns.value[0]?.fallback_reason || '');
+const retrievalModeClass = computed(() => retrievalMode.value.toLowerCase().replace(/_/g, '-'));
 
 function compactId(value: string): string {
   if (!value) return '—';
@@ -345,12 +405,37 @@ function readableSignature(value: string): string {
   return value.split('_').join(' ').split(':').join(' · ');
 }
 
+function bindingForGap(gapId: string) {
+  return selectedBindings.value.find((binding) => binding.gap_node_id === gapId);
+}
+
+function gapLabel(gapId: string): string {
+  return targetGaps.value.find((gap) => gap.node_id === gapId)?.surface || 'GAP';
+}
+
+function retrievalModeLabel(mode: string): string {
+  return {
+    SWARM_DIMENSIONAL: 'Размерный рой',
+    SWARM_MIXED: 'Смешанный рой',
+    INDEX_FALLBACK: 'Индексный fallback',
+    DIRECT_EVENT_LOOKUP: 'Прямой поиск',
+  }[mode] || mode;
+}
+
+function fallbackLabel(reason: string): string {
+  return {
+    NO_ACTIVE_DIMENSIONS: 'Нет активных измерений — используется индекс событий.',
+    NO_EVENT_DIMENSION_PROJECTION: 'Измерения не проецируются в события — используется индекс событий.',
+  }[reason] || reason;
+}
+
 async function exportChatSpace(): Promise<void> {
   if (!hive.value) return;
   exportingSpace.value = true;
   try {
-    const payload = await api.get(`/api/v2/hives/${hive.value.id}/space-export`);
-    if (!await copyJsonToClipboard(payload)) {
+    const payload = await api.get<Record<string, unknown>>(`/api/v2/hives/${hive.value.id}/space-export`);
+    const dialogueExport = { ...payload, chat_messages: store.messages };
+    if (!await copyJsonToClipboard(dialogueExport)) {
       throw new Error('Браузер не предоставил доступ к буферу обмена');
     }
     exportStatus.value = 'Скопировано';
@@ -421,6 +506,18 @@ async function newDialogue(): Promise<void> {
   await store.resetHive();
   question.value = '';
   mode.value = '';
+}
+
+async function clearChatSpace(): Promise<void> {
+  if (!hive.value || !window.confirm('Очистить внутреннее пространство этого чата? Его графы, ходы и результаты будут удалены.')) return;
+  try {
+    await api.delete(`/api/v2/hives/${hive.value.id}`);
+    await store.resetHive();
+    question.value = '';
+    mode.value = '';
+  } catch (cause) {
+    store.error = cause instanceof Error ? cause.message : 'Не удалось очистить пространство чата';
+  }
 }
 
 watch(() => store.messages.length, () => {
@@ -526,6 +623,71 @@ nav {
   &:hover { border-color: rgba(118, 232, 204, .45); color: #dffcf5; }
   &:disabled { opacity: .5; cursor: wait; }
 }
+
+.ghost-button.danger {
+  border-color: rgba(235, 122, 141, .45);
+  color: #f3aab5;
+
+  &:hover { border-color: #f18b9b; color: #ffe1e5; }
+}
+
+.multi-gap-panel,
+.swarm-card {
+  margin-top: 14px;
+  padding: 13px;
+  border: 1px solid rgba(115, 181, 255, .18);
+  border-radius: 11px;
+  background: rgba(19, 43, 72, .45);
+}
+
+.gap-map,
+.swarm-runs { display: grid; gap: 7px; margin-top: 10px; }
+
+.gap-map-item {
+  display: grid;
+  grid-template-columns: minmax(64px, .8fr) 20px minmax(90px, 1fr);
+  align-items: center;
+  gap: 5px;
+  padding: 8px 9px;
+  border-radius: 7px;
+  color: #b8c8dc;
+  background: rgba(5, 16, 30, .32);
+
+  i { color: #76ead0; font-style: normal; text-align: center; }
+  b { color: #edf7ff; overflow-wrap: anywhere; }
+}
+
+.configuration-state,
+.swarm-note { margin: 10px 0 0; color: #91a8c4; font-size: 11px; line-height: 1.45; }
+.configuration-state.selected { color: #79e7cd; }
+
+.swarm-card { border-color: rgba(118, 232, 204, .2); }
+.swarm-card .answer-head b { font-size: 10px; }
+.swarm-card .answer-head b.index-fallback { color: #f2c879; }
+.swarm-card .answer-head b.swarm-dimensional { color: #79e7cd; }
+
+.swarm-run {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 2px 8px;
+  padding: 9px;
+  border-left: 2px solid rgba(118, 232, 204, .55);
+  border-radius: 0 7px 7px 0;
+  background: rgba(5, 16, 30, .27);
+
+  b { color: #e2f4ef; font-size: 12px; }
+  > small { grid-column: 2; color: #8296b2; font-size: 10px; }
+}
+
+.swarm-index { grid-row: span 2; align-self: center; color: #76ead0; font-size: 9px; letter-spacing: .05em; }
+.mission-list,
+.packet-list { grid-column: 2; display: grid; gap: 5px; margin-top: 5px; }
+.mission-row { display: grid; grid-template-columns: 58px 1fr; gap: 3px 7px; }
+.mission-row strong { color: #76ead0; font-size: 10px; }
+.mission-row small { color: #8296b2; font-size: 10px; }
+.packet-list small { color: #9eb3cc; font-size: 9px; }
+.universe-route { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.universe-route span { padding: 2px 5px; border-radius: 4px; color: #a8bfda; background: rgba(106, 157, 220, .13); font-size: 9px; }
 
 .workspace {
   width: min(1880px, 100%);

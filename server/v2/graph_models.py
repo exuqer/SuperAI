@@ -276,7 +276,7 @@ class PredicateNode:
     concept_id: str
     token_index: Optional[int]
     features: Mapping[str, Any]
-    origin: str = "CURRENT"
+    origin: str = "CURRENT_EXPLICIT"
     source_token_index: Optional[int] = None
     inherited_from_query_graph_id: Optional[str] = None
 
@@ -290,6 +290,33 @@ class PredicateNode:
             "origin": self.origin,
             "source_token_index": self.source_token_index,
             "inherited_from_query_graph_id": self.inherited_from_query_graph_id,
+        }
+
+
+@dataclass(frozen=True)
+class PredicatePerspectiveRelation:
+    """Evidence-backed mapping between two predicate-local slot spaces.
+
+    It intentionally has no named semantic roles.  A relation is usable only
+    after its observed slot permutation has enough support; a dialogue anchor
+    remains a separate, local form of evidence.
+    """
+
+    source_predicate_concept_id: str
+    target_predicate_concept_id: str
+    slot_permutation: Mapping[str, str]
+    evidence_count: int
+    confidence: float
+    context_support: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "source_predicate_concept_id": self.source_predicate_concept_id,
+            "target_predicate_concept_id": self.target_predicate_concept_id,
+            "slot_permutation": _plain(self.slot_permutation),
+            "evidence_count": int(self.evidence_count),
+            "confidence": _clamp(self.confidence),
+            "context_support": _plain(self.context_support),
         }
 
 
@@ -380,6 +407,8 @@ class GapNode:
     # tense agreement may also reveal an omitted participant; that participant
     # is represented as an implicit, non-requested gap.
     requested: bool = True
+    required: bool = True
+    coordination_group_id: Optional[str] = None
     morphology_hypotheses: Mapping[str, float] = field(default_factory=dict)
     evidence: Mapping[str, Any] = field(default_factory=dict)
 
@@ -415,6 +444,8 @@ class GapNode:
                 self.compatible_slot_hypotheses
             ),
             "requested": self.requested,
+            "required": self.required,
+            "coordination_group_id": self.coordination_group_id,
             "morphology_hypotheses": dict(self.morphology_hypotheses),
             "evidence": _plain(self.evidence),
         }
@@ -427,6 +458,7 @@ class QueryGraph:
     known_nodes: Sequence[MentionNode]
     gap_node: GapNode
     target_gaps: Sequence[GapNode] = ()
+    question_operators: Sequence[Mapping[str, Any]] = ()
     required_edges: Sequence[Mapping[str, Any]] = ()
     exclusions: Sequence[Mapping[str, Any]] = ()
     status: GraphStatus = GraphStatus.READY
@@ -452,6 +484,7 @@ class QueryGraph:
             pattern["target_gap"] = target_gaps[0].as_dict()
         return {
             "query_graph_id": self.id,
+            "question_operators": _plain(self.question_operators),
             "event_pattern": pattern,
             "exclusions": _plain(self.exclusions),
             "status": self.status.value,
@@ -520,6 +553,37 @@ class CandidateBinding:
             "failed_constraint": self.failed_constraint,
             "slot_compatibility_state": self.slot_compatibility_state,
             "evidence": _plain(self.evidence),
+        }
+
+
+@dataclass(frozen=True)
+class BindingConfiguration:
+    """Atomic result for one or more requested GAPs in one event."""
+
+    id: str
+    query_graph_id: str
+    event_id: str
+    bindings: Sequence[CandidateBinding]
+    all_required_gaps_bound: bool
+    distinct_node_count: int
+    configuration_score: float
+    graph_validation: Mapping[str, Any]
+    status: str
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "configuration_id": self.id,
+            "query_graph_id": self.query_graph_id,
+            "event_id": self.event_id,
+            "bindings_by_gap": {
+                binding.gap_node_id: binding.as_dict()
+                for binding in self.bindings
+            },
+            "all_required_gaps_bound": self.all_required_gaps_bound,
+            "distinct_node_count": int(self.distinct_node_count),
+            "configuration_score": _clamp(self.configuration_score),
+            "graph_validation": _plain(self.graph_validation),
+            "status": self.status,
         }
 
 
@@ -695,11 +759,13 @@ def query_graph_from_dict(value: Mapping[str, Any]) -> QueryGraph:
         compatible_slot_hypotheses=dict(
             gap_value.get("compatible_slot_hypotheses") or {}
         ),
-        requested=bool(gap_value.get("requested", True)),
-        morphology_hypotheses=dict(
-            gap_value.get("morphology_hypotheses") or {}
-        ),
-        evidence=dict(gap_value.get("evidence") or {}),
+            requested=bool(gap_value.get("requested", True)),
+            required=bool(gap_value.get("required", True)),
+            coordination_group_id=gap_value.get("coordination_group_id"),
+            morphology_hypotheses=dict(
+                gap_value.get("morphology_hypotheses") or {}
+            ),
+            evidence=dict(gap_value.get("evidence") or {}),
         )
     target_gaps = tuple(parse_gap(item) for item in gap_values)
     gap = target_gaps[0]
@@ -717,6 +783,8 @@ def query_graph_from_dict(value: Mapping[str, Any]) -> QueryGraph:
                 item.get("compatible_slot_hypotheses") or {}
             ),
             requested=bool(item.get("requested", False)),
+            required=bool(item.get("required", False)),
+            coordination_group_id=item.get("coordination_group_id"),
             morphology_hypotheses=dict(
                 item.get("morphology_hypotheses") or {}
             ),
@@ -733,6 +801,7 @@ def query_graph_from_dict(value: Mapping[str, Any]) -> QueryGraph:
         ),
         gap_node=gap,
         target_gaps=target_gaps,
+        question_operators=tuple(value.get("question_operators") or ()),
         required_edges=tuple(pattern.get("required_edges") or ()),
         exclusions=tuple(value.get("exclusions") or ()),
         status=GraphStatus(str(value.get("status") or GraphStatus.READY.value)),

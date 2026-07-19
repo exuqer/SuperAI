@@ -28,6 +28,9 @@ class V2HiveService:
     def get_hive(self, hive_id: str) -> Dict[str, Any]:
         return self.query_scenes.get(hive_id)
 
+    def delete(self, hive_id: str) -> Dict[str, Any]:
+        return self.query_scenes.delete(hive_id)
+
     def preview(self, hive_id: str, text: str) -> Dict[str, Any]:
         state = self.query_scenes.get(hive_id)
         previous_graph, previous_binding = (

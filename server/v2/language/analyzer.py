@@ -159,10 +159,19 @@ class UniversalLanguageAnalyzer:
                         if grammatical_case in self.PREPOSITION_CASES[
                             governing_preposition
                         ]:
-                            score += .35
-                            evidence.append("preposition_case_government")
+                            # This is observable morphosyntactic compatibility,
+                            # not a semantic role assignment.  Surface forms
+                            # such as ``механика`` otherwise strongly prefer an
+                            # unrelated nominative lemma over ``механик`` in
+                            # the genitive after ``от``.
+                            score += 1.00
+                            evidence.extend([
+                                "preposition_case_compatibility",
+                                "preposition_case_government",
+                            ])
                         elif grammatical_case:
-                            score -= .15
+                            score -= .85
+                            evidence.append("preposition_case_conflict")
                 if analysis.pos == "PREP":
                     score += .35
                     evidence.append("function_word_pattern")

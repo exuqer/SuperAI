@@ -60,6 +60,9 @@ class QuerySceneService:
     def get(self, hive_id: str) -> Dict[str, Any]:
         return self.dialogue.get(hive_id)
 
+    def delete(self, hive_id: str) -> Dict[str, Any]:
+        return self.dialogue.delete(hive_id)
+
     def query_working_state(self, hive_id: str) -> Dict[str, Any]:
         return self.get(hive_id)
 

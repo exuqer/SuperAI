@@ -33,6 +33,12 @@ class HiveService:
         except KeyError as error:
             raise NotFoundError("hive", hive_id) from error
 
+    def delete(self, hive_id: str) -> dict[str, Any]:
+        try:
+            return self.facade.delete(hive_id)
+        except KeyError as error:
+            raise NotFoundError("hive", hive_id) from error
+
     def preview(self, hive_id: str, text: str) -> dict[str, Any]:
         try:
             return self.facade.preview(hive_id, text)

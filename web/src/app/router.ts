@@ -21,7 +21,8 @@ const router = createRouter({
     },
     {
       path: '/analytics',
-      redirect: { name: 'universe' },
+      name: 'analytics',
+      component: () => import('@/pages/AnalyticsPage.vue'),
     },
   ],
 });

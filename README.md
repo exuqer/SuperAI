@@ -55,10 +55,26 @@ python3 -m uvicorn server.server:app --reload
 ## Хранилище и совместимость
 
 SQLite-файл по умолчанию: `.superai/state.sqlite`. Текущая схема имеет
-`schema_version = 31` и `migration_version = fresh-v2.8-wordforms`.
+`schema_version = 33` и `migration_version = fresh-v2.8-wordforms`.
 Несовместимая база намеренно удаляется и создаётся заново: legacy-таблицы,
 ролевые аннотации и backfill не поддерживаются. Перед обновлением сохраните
 нужные данные через `GET /api/export/memory`.
+
+## Компактный воспроизводимый эксперимент
+
+Сценарий из `PLAN.md` запускается одной командой:
+
+```bash
+python3 -m server.v2.experiment \
+  --seed 1729 \
+  --output .superai/experiment-report.json
+```
+
+Он пересоздаёт чистую схему, выполняет train 48 → holdout 16 →
+continual 16 → повторный holdout → blind regression → smoke 25/50/100
+и сохраняет конфигурационный hash, порядок обучения, границы batch и
+итоговый JSON-отчёт. Smoke ограничен 100 событиями и не является
+доказательством масштабируемости на больших корпусах.
 
 `POST /api/reset` также разрушительно очищает граф и все микровселенные.
 

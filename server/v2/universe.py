@@ -14,6 +14,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from server.core.settings import settings
+
 from .graph_repository import GraphRepository, decode, encode, stable_id, utcnow
 
 
@@ -110,6 +112,15 @@ def _lexeme_features(observable: Mapping[str, float]) -> dict[str, float]:
     }
 
 
+def _feature_family(feature: str) -> str:
+    """Classify evidence without turning grammatical controls into meanings."""
+    return (
+        "semantic_structural"
+        if feature.startswith(("context:left:", "context:right:", "structural:"))
+        else "control"
+    )
+
+
 class DimensionDiscoverer:
     """Replaceable discovery contract used by every universe."""
 
@@ -128,6 +139,14 @@ class DimensionDiscoverer:
     def activate_candidate(self, conn: Any, dimension_id: str) -> str:
         raise NotImplementedError
 
+    def update_existing(
+        self,
+        conn: Any,
+        universe_id: str,
+        source_id: str,
+    ) -> int:
+        return 0
+
     def merge_dimensions(self, conn: Any, universe_id: str) -> int:
         return 0
 
@@ -138,8 +157,62 @@ class DimensionDiscoverer:
 class SparseResidualDiscoverer(DimensionDiscoverer):
     """First discoverer: sparse residual fields with evidence-based lifecycle."""
 
-    max_candidate_dimensions = 32
+    max_candidate_dimensions = settings.max_candidate_dimensions_per_universe
     minimum_evidence = 2
+
+    @staticmethod
+    def _feature_value(sample: Mapping[str, Any], field: str) -> float:
+        if field == "structural:source_cooccurrence":
+            return 1.0
+        return float(
+            decode(sample["context_vector_json"], {}).get(field, 0.0)
+        )
+
+    @staticmethod
+    def _domain_support(
+        conn: Any,
+        source_ids: set[str],
+    ) -> int:
+        if not source_ids:
+            return 0
+        rows = conn.execute(
+            """SELECT source_type,metadata_json FROM knowledge_sources
+               WHERE id IN ({})""".format(
+                ",".join("?" for _ in source_ids)
+            ),
+            sorted(source_ids),
+        ).fetchall()
+        domains = {
+            str(
+                decode(row["metadata_json"], {}).get("domain_key")
+                or row["source_type"]
+            )
+            for row in rows
+        }
+        return len(domains)
+
+    @staticmethod
+    def _split_support(
+        conn: Any,
+        source_ids: set[str],
+    ) -> dict[str, int]:
+        support = {"train": 0, "holdout": 0, "continual": 0}
+        if not source_ids:
+            return support
+        rows = conn.execute(
+            """SELECT independent_key FROM knowledge_sources
+               WHERE id IN ({})""".format(
+                ",".join("?" for _ in source_ids)
+            ),
+            sorted(source_ids),
+        ).fetchall()
+        for row in rows:
+            key = str(row["independent_key"])
+            for split in support:
+                if f":{split}:" in key:
+                    support[split] += 1
+                    break
+        return support
 
     def collect_samples(self, conn: Any, universe_id: str) -> list[Mapping[str, Any]]:
         return [
@@ -157,6 +230,9 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
             for key, value in decode(sample["context_vector_json"], {}).items():
                 if float(value) > 0:
                     fields[str(key)].append(sample)
+            # Source-local co-occurrence is structural evidence shared by
+            # distinct entities; it is not a morphology or position control.
+            fields["structural:source_cooccurrence"].append(sample)
         return fields
 
     def propose_candidates(self, conn: Any, universe_id: str) -> list[str]:
@@ -167,6 +243,7 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
                 (name, values)
                 for name, values in fields.items()
                 if len(values) >= self.minimum_evidence
+                and _feature_family(name) == "semantic_structural"
             ),
             key=lambda item: (-len(item[1]), item[0]),
         )[: self.max_candidate_dimensions]
@@ -178,42 +255,203 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
             entities = {str(value["entity_id"]) for value in values}
             sources = {str(value["source_id"]) for value in values}
             evidence = len(values)
-            diversity = min(len(entities), len(sources))
+            entity_support = len(entities)
+            source_support = len(sources)
+            domain_support = self._domain_support(conn, sources)
+            split_support = self._split_support(conn, sources)
+            diversity = min(entity_support, source_support)
             adapter = UniverseFeatureAdapter(universe_id)
             prediction = adapter.estimate_prediction_gain(evidence, diversity)
-            stability = _clamp(diversity / max(2, evidence))
-            strength = _clamp(sum(float(decode(value["context_vector_json"], {}).get(field, 0.0)) for value in values) / evidence)
-            status = "active" if evidence >= 4 and len(entities) >= 2 else "candidate"
+            stability = _clamp((
+                min(1.0, entity_support / max(
+                    1, settings.dimension_minimum_entity_support
+                ))
+                + min(1.0, source_support / max(
+                    1, settings.dimension_minimum_source_support
+                ))
+            ) / 2.0)
+            stability_lower_bound = _clamp(
+                stability - 1.0 / math.sqrt(max(2, evidence))
+            )
+            strength = _clamp(sum(
+                self._feature_value(value, field)
+                for value in values
+            ) / evidence)
             existing = conn.execute(
-                "SELECT status FROM latent_dimensions WHERE id=?", (dimension_id,)
+                """SELECT status,holdout_retrieval_gain
+                   FROM latent_dimensions WHERE id=?""",
+                (dimension_id,),
             ).fetchone()
+            qualifies_for_probation = (
+                entity_support >= settings.dimension_minimum_entity_support
+                and source_support >= settings.dimension_minimum_source_support
+                and domain_support >= settings.dimension_minimum_domain_support
+            )
+            can_activate = bool(
+                qualifies_for_probation
+                and stability >= settings.dimension_minimum_stability
+                and stability_lower_bound
+                >= settings.dimension_minimum_stability_lower_bound
+                and existing is not None
+                and float(existing["holdout_retrieval_gain"]) > 0
+            )
+            previous_status = str(existing["status"]) if existing else ""
+            status = (
+                previous_status
+                if previous_status in {"shared", "frozen"} else
+                "active" if can_activate else
+                "probation" if qualifies_for_probation else
+                "candidate"
+            )
+            canonical_id = stable_id(
+                "canonical-dimension", universe_id, field
+            )
             conn.execute(
                 """INSERT INTO latent_dimensions
-                   (id,universe_id,owner_scope,owner_id,representation_type,basis_json,
+                   (id,canonical_dimension_id,revision,universe_id,
+                    owner_scope,owner_id,representation_type,basis_json,
                     dimensionality,strength,stability,predictive_gain,retrieval_gain,
-                    compression_gain,memory_cost,usage_count,evidence_count,status,
-                    created_at,last_confirmed_at)
-                   VALUES(?,?, 'universe',NULL,'field',?,1,?,?,?,?,?,?,0,?,?,?,?)
+                    compression_gain,memory_cost,usage_count,
+                    projection_usage_count,retrieval_contribution_count,
+                    graph_admitted_contribution_count,
+                    validated_answer_contribution_count,evidence_count,
+                    entity_support,source_support,domain_support,
+                    train_support,holdout_support,continual_support,
+                    stability_lower_bound,status,created_at,last_updated_at,
+                    last_confirmed_at)
+                   VALUES(?,?,1,?, 'universe',NULL,'field',?,1,?,?,?,?,?,?,0,0,0,0,0,
+                          ?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET strength=excluded.strength,
                      stability=excluded.stability,predictive_gain=excluded.predictive_gain,
                      retrieval_gain=excluded.retrieval_gain,
                      compression_gain=excluded.compression_gain,
-                     evidence_count=excluded.evidence_count,status=excluded.status,
+                     evidence_count=excluded.evidence_count,
+                     entity_support=excluded.entity_support,
+                     source_support=excluded.source_support,
+                     domain_support=excluded.domain_support,
+                     train_support=excluded.train_support,
+                     holdout_support=excluded.holdout_support,
+                     continual_support=excluded.continual_support,
+                     stability_lower_bound=excluded.stability_lower_bound,
+                     status=excluded.status,last_updated_at=excluded.last_updated_at,
                      last_confirmed_at=excluded.last_confirmed_at""",
                 (
-                    dimension_id, universe_id, encode({"residual_feature": field}), strength,
+                    dimension_id, canonical_id, universe_id, encode({
+                        "residual_feature": field,
+                        "feature_family": "semantic_structural",
+                        "control_features_used": [],
+                    }), strength,
                     stability, prediction, prediction, prediction * 0.5, 0.02,
-                    evidence, status, now, now,
+                    evidence, entity_support, source_support, domain_support,
+                    split_support["train"],
+                    split_support["holdout"],
+                    split_support["continual"],
+                    stability_lower_bound, status, now, now, now,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO dimension_lineage
+                   (canonical_dimension_id,current_revision_id,
+                    parent_dimension_ids_json,merged_from_json,split_from_json,
+                    replaced_by,lineage_reason,updated_at)
+                   VALUES(?,?,'[]','[]','[]',NULL,?,?)
+                   ON CONFLICT(canonical_dimension_id) DO UPDATE SET
+                     current_revision_id=excluded.current_revision_id,
+                     lineage_reason=excluded.lineage_reason,
+                     updated_at=excluded.updated_at""",
+                (
+                    canonical_id,
+                    dimension_id,
+                    "candidate refreshed from structural evidence",
+                    now,
                 ),
             )
             if existing is None:
                 _record_event(conn, universe_id, "dimension_candidate_created", dimension_id, {"evidence": evidence})
-            elif str(existing["status"]) != status and status == "active":
+            elif previous_status != status and status == "active":
                 _record_event(conn, universe_id, "dimension_activated", dimension_id, {"evidence": evidence})
+                conn.execute(
+                    """UPDATE latent_dimensions
+                       SET activated_at=COALESCE(activated_at,?)
+                       WHERE id=?""",
+                    (now, dimension_id),
+                )
+            if existing is None or previous_status != status:
+                conn.execute(
+                    """INSERT INTO dimension_history
+                       (id,dimension_id,revision,status,snapshot_json,reason,created_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        stable_id(
+                            "dimension-history", dimension_id, status, now
+                        ),
+                        dimension_id,
+                        1,
+                        status,
+                        encode({
+                            "entity_support": entity_support,
+                            "source_support": source_support,
+                            "domain_support": domain_support,
+                            "stability": stability,
+                            "stability_lower_bound": stability_lower_bound,
+                        }),
+                        "structural discovery evaluation",
+                        now,
+                    ),
+                )
             self._write_projections(conn, dimension_id, field, values, now)
             self._write_dimension_cloud(conn, dimension_id, field, values, stability, now)
         self._write_relations(conn, universe_id, candidates)
+        self._enforce_capacity(conn, universe_id)
         return dimension_ids
+
+    def update_existing(
+        self,
+        conn: Any,
+        universe_id: str,
+        source_id: str,
+    ) -> int:
+        """Project one source without re-running global candidate discovery."""
+        samples = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT id,entity_id,source_id,context_id,
+                          context_vector_json
+                   FROM universe_occurrences
+                   WHERE universe_id=? AND source_id=?""",
+                (universe_id, source_id),
+            ).fetchall()
+        ]
+        if not samples:
+            return 0
+        dimensions = conn.execute(
+            """SELECT id,basis_json FROM latent_dimensions
+               WHERE universe_id=? AND status NOT IN ('merged','pruned')""",
+            (universe_id,),
+        ).fetchall()
+        now = utcnow()
+        updated = 0
+        for dimension in dimensions:
+            field = str(
+                decode(dimension["basis_json"], {}).get(
+                    "residual_feature"
+                ) or ""
+            )
+            matching = [
+                sample for sample in samples
+                if self._feature_value(sample, field) > 0
+            ]
+            if not matching:
+                continue
+            self._write_projections(
+                conn,
+                str(dimension["id"]),
+                field,
+                matching,
+                now,
+            )
+            updated += 1
+        return updated
 
     def _write_relations(
         self,
@@ -223,22 +461,98 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
     ) -> None:
         """Relate co-supported fields; no field is assumed to contain another."""
         for index, (left_field, left_values) in enumerate(candidates):
-            left_ids = {str(value["id"]) for value in left_values}
+            left_by_id = {
+                str(value["id"]): value for value in left_values
+            }
+            left_ids = set(left_by_id)
             for right_field, right_values in candidates[index + 1:]:
-                right_ids = {str(value["id"]) for value in right_values}
+                right_by_id = {
+                    str(value["id"]): value for value in right_values
+                }
+                right_ids = set(right_by_id)
                 overlap = left_ids & right_ids
                 if len(overlap) < self.minimum_evidence:
+                    continue
+                overlap_sources = {
+                    str(left_by_id[item]["source_id"])
+                    for item in overlap
+                } | {
+                    str(right_by_id[item]["source_id"])
+                    for item in overlap
+                }
+                # A source-local coincidence is not evidence for a stable
+                # cross-source dimension relation.
+                if len(overlap_sources) < 2:
                     continue
                 weight = _clamp(len(overlap) / max(len(left_ids), len(right_ids)))
                 left_id = stable_id("dimension", universe_id, left_field)
                 right_id = stable_id("dimension", universe_id, right_field)
+                relation_type = (
+                    "merged_from" if weight >= 0.98 else
+                    "overlapping" if weight >= 0.30 else
+                    "correlated"
+                )
                 conn.execute(
                     """INSERT INTO dimension_relations
                        (source_dimension_id,target_dimension_id,relation_type,weight,confidence,evidence_count)
-                       VALUES(?,?, 'correlated',?,?,?)
+                       VALUES(?,?,?,?,?,?)
                        ON CONFLICT(source_dimension_id,target_dimension_id,relation_type) DO UPDATE SET
                          weight=excluded.weight,confidence=excluded.confidence,evidence_count=excluded.evidence_count""",
-                    (left_id, right_id, weight, weight, len(overlap)),
+                    (
+                        left_id,
+                        right_id,
+                        relation_type,
+                        weight,
+                        weight,
+                        len(overlap),
+                    ),
+                )
+                if relation_type == "merged_from":
+                    conn.execute(
+                        """UPDATE latent_dimensions SET status='merged',
+                           last_updated_at=? WHERE id=? AND status IN
+                           ('candidate','probation','weak')""",
+                        (utcnow(), right_id),
+                    )
+                    _record_event(
+                        conn,
+                        universe_id,
+                        "dimension_merged",
+                        right_id,
+                        {"merged_into": left_id, "overlap_score": weight},
+                    )
+
+    @staticmethod
+    def _enforce_capacity(conn: Any, universe_id: str) -> None:
+        limits = {
+            "candidate": settings.max_candidate_dimensions_per_universe,
+            "probation": settings.max_probation_dimensions_per_universe,
+            "active": settings.max_active_dimensions_per_universe,
+        }
+        for status, limit in limits.items():
+            rows = conn.execute(
+                """SELECT id FROM latent_dimensions
+                   WHERE universe_id=? AND status=?
+                   ORDER BY stability DESC,retrieval_gain DESC,
+                            evidence_count DESC,id""",
+                (universe_id, status),
+            ).fetchall()
+            for row in rows[max(0, limit):]:
+                conn.execute(
+                    """UPDATE latent_dimensions SET status='weak',
+                       last_updated_at=? WHERE id=?""",
+                    (utcnow(), row["id"]),
+                )
+                _record_event(
+                    conn,
+                    universe_id,
+                    "dimension_pruned",
+                    str(row["id"]),
+                    {
+                        "reason": "capacity_limit",
+                        "previous_status": status,
+                        "configured_limit": limit,
+                    },
                 )
 
     def _write_projections(
@@ -246,7 +560,7 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
     ) -> None:
         entity_values: dict[str, list[float]] = defaultdict(list)
         for sample in values:
-            membership = _clamp(float(decode(sample["context_vector_json"], {}).get(field, 0.0)))
+            membership = _clamp(self._feature_value(sample, field))
             entity_values[str(sample["entity_id"])].append(membership)
             conn.execute(
                 """INSERT INTO projections
@@ -279,7 +593,10 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
         self, conn: Any, dimension_id: str, field: str,
         values: Sequence[Mapping[str, Any]], stability: float, now: str,
     ) -> None:
-        memberships = [float(decode(item["context_vector_json"], {}).get(field, 0.0)) for item in values]
+        memberships = [
+            self._feature_value(item, field)
+            for item in values
+        ]
         density = sum(memberships) / max(1, len(memberships))
         conn.execute(
             """INSERT INTO dimension_clouds
@@ -309,9 +626,34 @@ class SparseResidualDiscoverer(DimensionDiscoverer):
         return {"utility": utility, "stability": float(row["stability"]), "evidence": float(row["evidence_count"])}
 
     def activate_candidate(self, conn: Any, dimension_id: str) -> str:
-        values = self.evaluate_candidate(conn, dimension_id)
-        status = "active" if values["utility"] >= 0.45 and values["evidence"] >= 4 else "probation"
-        conn.execute("UPDATE latent_dimensions SET status=? WHERE id=?", (status, dimension_id))
+        row = conn.execute(
+            """SELECT stability,stability_lower_bound,holdout_retrieval_gain,
+                      entity_support,source_support,domain_support
+               FROM latent_dimensions WHERE id=?""",
+            (dimension_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(dimension_id)
+        status = "active" if (
+            float(row["stability"]) >= settings.dimension_minimum_stability
+            and float(row["stability_lower_bound"])
+            >= settings.dimension_minimum_stability_lower_bound
+            and float(row["holdout_retrieval_gain"]) > 0
+            and int(row["entity_support"])
+            >= settings.dimension_minimum_entity_support
+            and int(row["source_support"])
+            >= settings.dimension_minimum_source_support
+            and int(row["domain_support"])
+            >= settings.dimension_minimum_domain_support
+        ) else "probation"
+        now = utcnow()
+        conn.execute(
+            """UPDATE latent_dimensions SET status=?,
+               activated_at=CASE WHEN ?='active'
+                 THEN COALESCE(activated_at,?) ELSE activated_at END,
+               last_updated_at=? WHERE id=?""",
+            (status, status, now, now, dimension_id),
+        )
         return status
 
     def prune_dimensions(self, conn: Any, universe_id: str) -> int:
@@ -399,7 +741,12 @@ class UniverseService:
             "tables": payload,
         }
 
-    def ingest_source(self, source_id: str) -> dict[str, Any]:
+    def ingest_source(
+        self,
+        source_id: str,
+        *,
+        discover_dimensions: bool = True,
+    ) -> dict[str, Any]:
         """Materialise confirmed graph evidence into the generic universe model."""
         touched: set[str] = set()
         with self.repository.transaction() as conn:
@@ -546,8 +893,14 @@ class UniverseService:
                 event_entity = stable_id("universe-entity", "events", str(event["predicate_lemma"]))
                 self._transition(conn, "events", "scenes", "entity", event_entity, "occurrence", scene_occurrence, source_id)
             for universe_id in touched:
-                self.discoverer.propose_candidates(conn, universe_id)
-                self._refresh_clouds(conn, universe_id)
+                if discover_dimensions:
+                    self.discoverer.propose_candidates(conn, universe_id)
+                else:
+                    self.discoverer.update_existing(
+                        conn, universe_id, source_id
+                    )
+                if discover_dimensions:
+                    self._refresh_clouds(conn, universe_id)
                 self._refresh_statistics(conn, universe_id)
             active_dimensions = conn.execute(
                 """SELECT id,universe_id,basis_json FROM latent_dimensions
@@ -568,8 +921,16 @@ class UniverseService:
                                  str(dimension["id"]), "entity", abstraction_id, source_id)
                 touched.add("abstractions")
             if "abstractions" in touched:
-                self.discoverer.propose_candidates(conn, "abstractions")
-                self._refresh_clouds(conn, "abstractions")
+                if discover_dimensions:
+                    self.discoverer.propose_candidates(
+                        conn, "abstractions"
+                    )
+                else:
+                    self.discoverer.update_existing(
+                        conn, "abstractions", source_id
+                    )
+                if discover_dimensions:
+                    self._refresh_clouds(conn, "abstractions")
                 self._refresh_statistics(conn, "abstractions")
         return {"source_id": source_id, "ingested": True, "universes": sorted(touched)}
 
@@ -805,11 +1166,39 @@ class UniverseService:
                 active = conn.execute("SELECT COUNT(*) FROM latent_dimensions WHERE universe_id=? AND status IN ('active','shared')", (row["id"],)).fetchone()[0]
                 candidates = conn.execute("SELECT COUNT(*) FROM latent_dimensions WHERE universe_id=? AND status='candidate'", (row["id"],)).fetchone()[0]
                 stability = conn.execute("SELECT COALESCE(AVG(stability),0) FROM universe_entities WHERE universe_id=?", (row["id"],)).fetchone()[0]
-                result.append({"id": row["id"], "name": row["name"], "scale": row["scale"],
-                    "entity_count": int(stats.get("entity_count", 0)), "occurrence_count": int(stats.get("occurrence_count", 0)),
-                    "cloud_count": int(stats.get("cloud_count", 0)), "dimension_count": int(stats.get("dimension_count", 0)),
-                    "active_dimension_count": int(active), "candidate_dimension_count": int(candidates),
-                    "bee_count": 0, "stability": round(float(stability or 0), 6)})
+                result.append({
+                    "id": row["id"],
+                    "name": row["name"],
+                    "scale": row["scale"],
+                    "entity_count": int(stats.get("entity_count", 0)),
+                    "occurrence_count": int(stats.get("occurrence_count", 0)),
+                    "cloud_count": int(stats.get("cloud_count", 0)),
+                    "dimension_count": int(stats.get("dimension_count", 0)),
+                    "active_dimension_count": int(active),
+                    "candidate_dimension_count": int(candidates),
+                    "last_swarm_run_id": stats.get("last_swarm_run_id"),
+                    "visited_in_last_query": bool(
+                        stats.get("visited_in_last_query", False)
+                    ),
+                    "last_query_bee_count": int(
+                        stats.get("last_query_bee_count", 0)
+                    ),
+                    "active_bee_count": int(
+                        stats.get("active_bee_count", 0)
+                    ),
+                    "successful_bee_count": int(
+                        stats.get("successful_bee_count", 0)
+                    ),
+                    "terminated_bee_count": int(
+                        stats.get("terminated_bee_count", 0)
+                    ),
+                    "fallback_bee_count": int(
+                        stats.get("fallback_bee_count", 0)
+                    ),
+                    "retrieval_mode": stats.get("retrieval_mode"),
+                    "bee_count": int(stats.get("last_query_bee_count", 0)),
+                    "stability": round(float(stability or 0), 6),
+                })
             return {"universes": result}
 
     def base_space(self, universe_id: str, *, limit: int = 200, min_mass: float = 0.0, min_stability: float = 0.0, selected_context: str = "") -> dict[str, Any]:
@@ -834,11 +1223,14 @@ class UniverseService:
     def dimensions(self, universe_id: str, *, status: str = "", scope: str = "", min_stability: float = 0.0, min_utility: float = 0.0, owner_cloud_id: str = "") -> dict[str, Any]:
         clauses, params = ["universe_id=?", "stability>=?"], [universe_id, min_stability]
         if status:
-            clauses.append("status=?"); params.append(status)
+            clauses.append("status=?")
+            params.append(status)
         if scope:
-            clauses.append("owner_scope=?"); params.append(scope)
+            clauses.append("owner_scope=?")
+            params.append(scope)
         if owner_cloud_id:
-            clauses.append("owner_id=?"); params.append(owner_cloud_id)
+            clauses.append("owner_id=?")
+            params.append(owner_cloud_id)
         with self.repository.transaction() as conn:
             self._require_universe(conn, universe_id)
             rows = conn.execute("SELECT d.*,a.alias FROM latent_dimensions d LEFT JOIN dimension_aliases a ON a.dimension_id=d.id WHERE " + " AND ".join(clauses) + " ORDER BY stability DESC,evidence_count DESC", params).fetchall()
@@ -856,13 +1248,64 @@ class UniverseService:
                    WHERE p.dimension_id=? AND p.source_type='entity' ORDER BY p.membership DESC LIMIT 12""", (dimension_id,),
             ).fetchall()
             relations = conn.execute("SELECT * FROM dimension_relations WHERE source_dimension_id=? OR target_dimension_id=?", (dimension_id, dimension_id)).fetchall()
-            return {"metadata": self._dimension(row), "representation_type": row["representation_type"],
-                    "scope": {"owner_scope": row["owner_scope"], "owner_id": row["owner_id"]},
-                    "core": decode(core["core_vector_json"], {}) if core else {},
-                    "core_examples": [self._projection(item) for item in projections if float(item["membership"]) >= .66],
-                    "peripheral_examples": [self._projection(item) for item in projections if .3 <= float(item["membership"]) < .66],
-                    "boundary_examples": [self._projection(item) for item in projections if float(item["membership"]) < .3],
-                    "related_dimensions": [dict(item) for item in relations], "history": self.history(dimension_id=dimension_id)["events"]}
+            lineage = conn.execute(
+                """SELECT * FROM dimension_lineage
+                   WHERE canonical_dimension_id=?""",
+                (row["canonical_dimension_id"],),
+            ).fetchone()
+            evaluations = conn.execute(
+                """SELECT * FROM dimension_evaluations
+                   WHERE dimension_id=? ORDER BY created_at DESC""",
+                (dimension_id,),
+            ).fetchall()
+            shadows = conn.execute(
+                """SELECT * FROM shadow_retrieval_runs
+                   WHERE dimension_id=? ORDER BY created_at DESC LIMIT 20""",
+                (dimension_id,),
+            ).fetchall()
+            history = conn.execute(
+                """SELECT * FROM dimension_history
+                   WHERE dimension_id=? ORDER BY created_at DESC""",
+                (dimension_id,),
+            ).fetchall()
+            return {
+                "metadata": self._dimension(row),
+                "representation_type": row["representation_type"],
+                "scope": {
+                    "owner_scope": row["owner_scope"],
+                    "owner_id": row["owner_id"],
+                },
+                "semantic_basis": decode(row["basis_json"], {}),
+                "control_features": decode(
+                    row["basis_json"], {}
+                ).get("control_features_used", []),
+                "core": decode(core["core_vector_json"], {}) if core else {},
+                "core_examples": [
+                    self._projection(item) for item in projections
+                    if float(item["membership"]) >= .66
+                ],
+                "peripheral_examples": [
+                    self._projection(item) for item in projections
+                    if .3 <= float(item["membership"]) < .66
+                ],
+                "boundary_examples": [
+                    self._projection(item) for item in projections
+                    if float(item["membership"]) < .3
+                ],
+                "related_dimensions": [dict(item) for item in relations],
+                "lineage": (
+                    self._export_row(lineage) if lineage else None
+                ),
+                "evaluations": [
+                    self._export_row(item) for item in evaluations
+                ],
+                "shadow_evaluations": [
+                    self._export_row(item) for item in shadows
+                ],
+                "history": [
+                    self._export_row(item) for item in history
+                ],
+            }
 
     def projections(self, dimension_id: str, *, source_type: str = "", limit: int = 100, min_membership: float = 0.0, context_id: str = "", sort: str = "membership") -> dict[str, Any]:
         if source_type and source_type not in {"entity", "occurrence"}:
@@ -874,9 +1317,11 @@ class UniverseService:
                 raise KeyError(dimension_id)
             clauses, params = ["dimension_id=?", "membership>=?"], [dimension_id, min_membership]
             if source_type:
-                clauses.append("source_type=?"); params.append(source_type)
+                clauses.append("source_type=?")
+                params.append(source_type)
             if context_id:
-                clauses.append("context_id=?"); params.append(context_id)
+                clauses.append("context_id=?")
+                params.append(context_id)
             rows = conn.execute("SELECT * FROM projections WHERE " + " AND ".join(clauses) + " ORDER BY " + order + " LIMIT ?", [*params, max(1, min(limit, 2000))]).fetchall()
             return {"dimension_id": dimension_id, "projections": [self._projection(row) for row in rows]}
 
@@ -999,7 +1444,8 @@ class UniverseService:
         with self.repository.transaction() as conn:
             clauses, params = ["source_universe_id=?"], [universe_id]
             if entity_id:
-                clauses.append("source_id=?"); params.append(entity_id)
+                clauses.append("source_id=?")
+                params.append(entity_id)
             rows = conn.execute("SELECT * FROM universe_transitions WHERE " + " AND ".join(clauses) + " ORDER BY weight DESC LIMIT ?", [*params, max(1, min(limit, 2000))]).fetchall()
             return {"transitions": [dict(row) for row in rows]}
 
@@ -1007,9 +1453,11 @@ class UniverseService:
         with self.repository.transaction() as conn:
             clauses, params = [], []
             if universe_id:
-                clauses.append("universe_id=?"); params.append(universe_id)
+                clauses.append("universe_id=?")
+                params.append(universe_id)
             if dimension_id:
-                clauses.append("subject_id=?"); params.append(dimension_id)
+                clauses.append("subject_id=?")
+                params.append(dimension_id)
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             rows = conn.execute("SELECT * FROM universe_training_events" + where + " ORDER BY created_at DESC LIMIT ?", [*params, max(1, min(limit, 2000))]).fetchall()
             return {"events": [{**dict(row), "payload": decode(row["payload_json"], {})} for row in rows]}
@@ -1044,7 +1492,50 @@ class UniverseService:
     @staticmethod
     def _dimension(row: Mapping[str, Any]) -> dict[str, Any]:
         utility = _clamp(float(row["predictive_gain"]) + float(row["retrieval_gain"]) + float(row["compression_gain"]) - float(row["memory_cost"]))
-        return {"id": row["id"], "universe_id": row["universe_id"], "alias": row["alias"] if "alias" in row.keys() else None, "owner_scope": row["owner_scope"], "owner_id": row["owner_id"], "representation_type": row["representation_type"], "basis": decode(row["basis_json"], {}), "dimensionality": row["dimensionality"], "strength": row["strength"], "stability": row["stability"], "predictive_gain": row["predictive_gain"], "retrieval_gain": row["retrieval_gain"], "compression_gain": row["compression_gain"], "memory_cost": row["memory_cost"], "usage_count": row["usage_count"], "evidence_count": row["evidence_count"], "utility": utility, "status": row["status"]}
+        return {
+            "id": row["id"],
+            "canonical_dimension_id": row["canonical_dimension_id"],
+            "revision": row["revision"],
+            "universe_id": row["universe_id"],
+            "alias": row["alias"] if "alias" in row.keys() else None,
+            "owner_scope": row["owner_scope"],
+            "owner_id": row["owner_id"],
+            "representation_type": row["representation_type"],
+            "basis": decode(row["basis_json"], {}),
+            "dimensionality": row["dimensionality"],
+            "strength": row["strength"],
+            "stability": row["stability"],
+            "stability_lower_bound": row["stability_lower_bound"],
+            "predictive_gain": row["predictive_gain"],
+            "retrieval_gain": row["retrieval_gain"],
+            "holdout_retrieval_gain": row["holdout_retrieval_gain"],
+            "shadow_retrieval_gain": row["shadow_retrieval_gain"],
+            "compression_gain": row["compression_gain"],
+            "memory_cost": row["memory_cost"],
+            "usage_count": row["usage_count"],
+            "projection_usage_count": row["projection_usage_count"],
+            "retrieval_contribution_count": (
+                row["retrieval_contribution_count"]
+            ),
+            "graph_admitted_contribution_count": (
+                row["graph_admitted_contribution_count"]
+            ),
+            "validated_answer_contribution_count": (
+                row["validated_answer_contribution_count"]
+            ),
+            "evidence_count": row["evidence_count"],
+            "entity_support": row["entity_support"],
+            "source_support": row["source_support"],
+            "domain_support": row["domain_support"],
+            "train_support": row["train_support"],
+            "holdout_support": row["holdout_support"],
+            "continual_support": row["continual_support"],
+            "utility": utility,
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "activated_at": row["activated_at"],
+            "last_updated_at": row["last_updated_at"],
+        }
 
     @staticmethod
     def _projection(row: Mapping[str, Any]) -> dict[str, Any]:

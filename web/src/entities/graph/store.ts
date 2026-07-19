@@ -10,7 +10,9 @@ import type {
   HiveState,
   QueryMode,
   RetrievalScope,
+  SwarmTrace,
 } from './types';
+import { getChatAnswerText } from './answerText';
 
 interface ChatCache {
   hiveId: string;
@@ -25,14 +27,6 @@ function messageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function assistantText(state: Pick<HiveState, 'answer'>): string {
-  const answer = state.answer;
-  return answer?.full_answer
-    || answer?.surface
-    || answer?.short_answer
-    || 'Ответ не удалось сформировать.';
-}
-
 export const useGraphStore = defineStore('graph-v27', () => {
   const state = ref<HiveState | null>(null);
   const messages = ref<ChatMessage[]>([]);
@@ -45,7 +39,11 @@ export const useGraphStore = defineStore('graph-v27', () => {
   const answer = computed(() => state.value?.answer || null);
   const candidateBindings = computed(() => state.value?.candidate_bindings || []);
   const rejectedEvents = computed(() => state.value?.rejected_events || []);
-  const selectedBinding = computed(() => state.value?.selected_binding || null);
+  const selectedBindings = computed(() => state.value?.selected_bindings || []);
+  const bindingConfiguration = computed(() => state.value?.binding_configuration || null);
+  const swarm = computed<SwarmTrace | null>(() => (
+    state.value?.swarm || state.value?.trace?.swarm as SwarmTrace | null
+  ));
   const trace = computed(() => state.value?.trace || {});
 
   function applyState(next: HiveState): void {
@@ -64,7 +62,11 @@ export const useGraphStore = defineStore('graph-v27', () => {
   function restoreMessages(hiveId: string): void {
     const cached = storage.getChatCache() as ChatCache | null;
     messages.value = cached?.hiveId === hiveId && Array.isArray(cached.messages)
-      ? cached.messages
+      ? cached.messages.map((message: ChatMessage) => (
+        message.role === 'assistant' && message.answer
+          ? { ...message, text: getChatAnswerText(message.answer, message.queryGraph) }
+          : message
+      ))
       : [];
   }
 
@@ -168,10 +170,12 @@ export const useGraphStore = defineStore('graph-v27', () => {
       messages.value.push({
         id: result.message_id || messageId('assistant'),
         role: 'assistant',
-        text: assistantText(result),
+        text: getChatAnswerText(result.answer, result.query_graph),
         createdAt: now(),
         status: result.answer?.status || 'UNRESOLVED',
         queryGraphId: result.query_graph?.query_graph_id,
+        answer: result.answer,
+        queryGraph: result.query_graph,
       });
       persistMessages();
       return result;
@@ -210,7 +214,9 @@ export const useGraphStore = defineStore('graph-v27', () => {
     answer,
     candidateBindings,
     rejectedEvents,
-    selectedBinding,
+    selectedBindings,
+    bindingConfiguration,
+    swarm,
     trace,
     createHive,
     restoreHive,
