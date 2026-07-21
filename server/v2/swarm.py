@@ -204,22 +204,27 @@ class GapSwarmCoordinator:
                 (plan.event_anchor_id,),
             ).fetchone()
             return [str(row["id"])] if row else []
-        if not plan.seed_predicates:
+        # Implicit relational questions have no lexical predicate to seed.
+        # Their explicit relation node remains a safe observable index
+        # constraint, so they may enter the fallback stage without inventing
+        # a predicate lemma.
+        if not plan.seed_predicates and not plan.known_entity_ids:
             return []
         known_clauses, known_params = (
             cls._known_participant_filter(plan, event_alias="e")
             if constrain_known_nodes else
             ([], [])
         )
+        predicate_clause = " AND e.predicate_concept_id=?" if plan.seed_predicates else ""
         rows = conn.execute(
             """SELECT e.id FROM graph_events e
                JOIN knowledge_sources s ON s.id=e.source_id
-               WHERE e.predicate_concept_id=? AND e.actuality='ACTUAL'
+               WHERE e.actuality='ACTUAL'
                  AND s.status='CONFIRMED'
-               """ + "".join(known_clauses) + """
+               """ + predicate_clause + "".join(known_clauses) + """
                ORDER BY e.confidence DESC,e.created_at,e.id LIMIT ?""",
             (
-                plan.seed_predicates[0],
+                *((plan.seed_predicates[0],) if plan.seed_predicates else ()),
                 *known_params,
                 int(plan.budget["max_index_hits_per_seed"]),
             ),
@@ -543,7 +548,20 @@ class GapSwarmCoordinator:
 
     def discover(self, graph: Any) -> Dict[str, Any]:
         """Return candidate events plus a persisted, auditable swarm trace."""
-        if not graph.predicate or not graph.target_gaps:
+        implicit_relation = bool(
+            (graph.trace.get("predicate_hypothesis") or {}).get(
+                "predicate_origin"
+            ) == "IMPLICIT_RELATIONAL"
+        )
+        component_anchor_query = bool(
+            graph.gap_node.gap_kind.value == "NODE_COMPONENT"
+            and graph.gap_node.attached_to_node_id
+            and graph.known_nodes
+        )
+        if (
+            (not graph.predicate and not implicit_relation and not component_anchor_query)
+            or not graph.target_gaps
+        ):
             return {
                 "query_plan": {},
                 "gap_swarms": [],
@@ -766,6 +784,20 @@ class GapSwarmCoordinator:
                     "events_returned": len(candidate_event_ids),
                     "retrieval_mode": retrieval_mode,
                     "fallback_reason": fallback_reason,
+                    # Keep semantic discovery and the last-resort index path
+                    # separately observable; a correct fallback answer must
+                    # never be reported as a Scout success.
+                    "semantic_candidate_count": len(dimensional_event_ids),
+                    "index_candidate_count": len(index_event_ids),
+                    "semantic_selected": retrieval_mode in {
+                        "SWARM_DIMENSIONAL", "SWARM_MIXED",
+                    },
+                    "fallback_used": retrieval_mode == "INDEX_FALLBACK",
+                    "scout_success": bool(dimensional_event_ids),
+                    "worker_added_candidates": len(
+                        set(dimensional_event_ids) - set(index_event_ids)
+                    ),
+                    "assembly_candidate_count": len(candidate_event_ids),
                     "dimension_evidence_ratio": (
                         1.0 if retrieval_mode == "SWARM_DIMENSIONAL"
                         else len(dimensional_event_ids)
@@ -825,6 +857,17 @@ class GapSwarmCoordinator:
             "shadow_dimension_events": shadow_by_dimension,
             "shadow_candidate_event_ids": shadow_event_ids,
             "retrieval_baseline_event_ids": retrieval_baseline_event_ids,
+            "semantic_candidate_count": len(dimensional_event_ids),
+            "index_candidate_count": len(index_event_ids),
+            "semantic_selected": retrieval_mode in {
+                "SWARM_DIMENSIONAL", "SWARM_MIXED",
+            },
+            "fallback_used": retrieval_mode == "INDEX_FALLBACK",
+            "scout_success": bool(dimensional_event_ids),
+            "worker_added_candidates": len(
+                set(dimensional_event_ids) - set(index_event_ids)
+            ),
+            "assembly_candidate_count": len(coordinated),
             "metrics": {
                 "events_total": len(retrieval_baseline_event_ids),
                 "events_indexed": len(index_event_ids),

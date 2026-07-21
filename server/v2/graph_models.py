@@ -520,6 +520,11 @@ class CandidateBinding:
     failed_constraint: Optional[str] = None
     evidence: Sequence[Mapping[str, Any]] = ()
     slot_compatibility_state: str = "fallback"
+    # Selection answers "was this candidate returned?"; support answers
+    # "how well is the returned value evidenced?".  They intentionally do
+    # not collapse into the historical BindingStatus enum.
+    selection_status: str = ""
+    support_status: str = ""
 
     def __post_init__(self) -> None:
         if self.slot_compatibility_state not in {
@@ -532,6 +537,21 @@ class CandidateBinding:
                 "slot_compatibility_state must be compatible, "
                 "below_threshold, fallback, or rejected"
             )
+        if self.support_status and self.support_status not in {
+            "SUPPORTED", "WEAK_SUPPORTED", "BELOW_THRESHOLD",
+            "FALLBACK_ONLY", "CONFLICTING", "REJECTED",
+        }:
+            raise ValueError("unsupported binding support_status")
+
+    def _support_status(self) -> str:
+        if self.support_status:
+            return self.support_status
+        return {
+            "compatible": "SUPPORTED",
+            "below_threshold": "WEAK_SUPPORTED",
+            "fallback": "FALLBACK_ONLY",
+            "rejected": "REJECTED",
+        }[self.slot_compatibility_state]
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -551,6 +571,8 @@ class CandidateBinding:
                 "total": _clamp(self.total_score),
             },
             "status": self.status.value,
+            "selection_status": self.selection_status or self.status.value,
+            "support_status": self._support_status(),
             "failed_constraint": self.failed_constraint,
             "slot_compatibility_state": self.slot_compatibility_state,
             "evidence": _plain(self.evidence),
@@ -841,4 +863,6 @@ def candidate_binding_from_dict(
         slot_compatibility_state=str(
             value.get("slot_compatibility_state") or "fallback"
         ),
+        selection_status=str(value.get("selection_status") or ""),
+        support_status=str(value.get("support_status") or ""),
     )

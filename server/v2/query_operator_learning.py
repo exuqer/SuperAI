@@ -319,6 +319,7 @@ class QueryOperatorLearner:
         accepted_bindings: Sequence[CandidateBinding],
         rejected: Sequence[Mapping[str, Any]],
         answer: Mapping[str, Any],
+        observational_only: bool = False,
     ) -> None:
         """Persist every occurrence and update profiles only after validation."""
         status = str(answer.get("status") or "")
@@ -342,9 +343,10 @@ class QueryOperatorLearner:
             prediction = dict(gap.evidence.get("learned_gap_profile") or {})
             profile_id = (
                 self._upsert_profile(conn, graph, gap, selected, accepted=confirmed)
-                if selected else prediction.get("profile_id")
+                if selected and not observational_only else prediction.get("profile_id")
             )
             occurrence_status = (
+                "OBSERVED_UNTRUSTED" if observational_only else
                 "VALIDATED" if selected and confirmed else
                 "REJECTED" if selected else
                 "OBSERVED"
@@ -383,8 +385,9 @@ class QueryOperatorLearner:
                         stable_id("query-operator-experience", occurrence_id, "selected"),
                         occurrence_id,
                         profile_id,
+                        "OBSERVED_UNTRUSTED" if observational_only else
                         "VALIDATED_BINDING" if confirmed else "REJECTED_BINDING",
-                        int(confirmed),
+                        0 if observational_only else int(confirmed),
                         encode(selected.as_dict()),
                         "{}",
                         utcnow(),

@@ -74,6 +74,16 @@ class QueryGraphBuilder:
         question: Optional[Any] = None,
     ) -> GapKind:
         question = question or analysis.question_operator
+        if (
+            question
+            and str(getattr(question, "operator_type", "")) == "NODE_COMPONENT"
+            and not (
+                question.type_constraint_token_index is not None
+                and question.token_indices[0] > 0
+                and analysis.tokens[question.token_indices[0] - 1].pos == "PREP"
+            )
+        ):
+            return GapKind.NODE_COMPONENT
         if question and question.type_constraint_token_index is not None:
             question_index = question.token_indices[0]
             if (
@@ -325,6 +335,42 @@ class QueryGraphBuilder:
             score += 0.10
         return min(1.0, score)
 
+    @staticmethod
+    def _self_contained_relational_evidence(
+        analysis: Any,
+        questions: Sequence[Any],
+        known_nodes: Sequence[MentionNode],
+        predicate_token: Optional[Any],
+    ) -> Dict[str, Any]:
+        """Recognise a complete relation question with an omitted predicate.
+
+        This is deliberately grammatical rather than lexical: a question
+        operator plus a prepositional noun phrase is enough to form a local
+        relation frame.  The returned predicate family is an opaque retrieval
+        hint, never a substituted verb such as ``находиться``.
+        """
+        relation_nodes = [node for node in known_nodes if node.preposition]
+        evidence = []
+        if questions:
+            evidence.append("question_operator")
+        if relation_nodes:
+            evidence.append("prepositional_phrase")
+        if any(node.head_lemma for node in relation_nodes):
+            evidence.append("preposition_object")
+        if not predicate_token:
+            evidence.append("no_explicit_predicate")
+        confidence = min(1.0, 0.20 * len(evidence))
+        return {
+            "is_self_contained_relational": bool(
+                questions and relation_nodes and not predicate_token
+            ),
+            "predicate_origin": "IMPLICIT_RELATIONAL",
+            "predicate_family": "existence_or_location",
+            "surface": None,
+            "confidence": confidence,
+            "evidence": evidence,
+        }
+
     def build(
         self,
         text: str,
@@ -409,6 +455,9 @@ class QueryGraphBuilder:
         completeness = self._current_clause_completeness(
             analysis, predicate_token, questions, current_known_nodes,
         )
+        implicit_relation = self._self_contained_relational_evidence(
+            analysis, questions, current_known_nodes, predicate_token,
+        )
         first_token = (
             analysis.tokens[0].normalized.casefold()
             if analysis.tokens else ""
@@ -420,6 +469,7 @@ class QueryGraphBuilder:
         continuation_mode = (
             "REFERENTIAL" if previous_graph and has_referential_marker
             and completeness >= 0.90 else
+            "NONE" if implicit_relation["is_self_contained_relational"] else
             "STRUCTURAL" if previous_graph and completeness < 0.90 else
             "NONE"
         )
@@ -449,7 +499,11 @@ class QueryGraphBuilder:
                         else inherited_predicate.token_index
                     ),
                     inherited_from_query_graph_id=previous_graph.id,
-                ) if inherited_predicate and previous_graph else None
+                ) if (
+                    inherited_predicate
+                    and previous_graph
+                    and is_structural_continuation
+                ) else None
             )
         )
         known_nodes = list(current_known_nodes)
@@ -627,6 +681,18 @@ class QueryGraphBuilder:
             analysis,
             gap_kind=inferred_gap_kind,
         )
+        # The structural signature is strictly surface-observed.  An omitted
+        # relational predicate may be useful as a weak retrieval hypothesis,
+        # but it must never be recorded as an observed VERB and later learned
+        # as though it occurred in the utterance.
+        observed_features = structural.as_dict()
+        inferred_features = (
+            {
+                "implicit_predicate_family:existence_or_location": 0.80,
+                "equivalent_full_construction_support": 0.45,
+            }
+            if implicit_relation["is_self_contained_relational"] else {}
+        )
         question_signature = self.observations.question_signature(
             analysis, questions[0] if questions else None
         )
@@ -744,7 +810,7 @@ class QueryGraphBuilder:
             })
         status = (
             GraphStatus.READY
-            if predicate and (
+            if (predicate or implicit_relation["is_self_contained_relational"]) and (
                 question is not None
                 or gap_kind == GapKind.BOOLEAN_RESULT
             )
@@ -770,7 +836,15 @@ class QueryGraphBuilder:
             implicit_gaps=implicit_gaps,
             trace={
                 "preliminary_gap_kind": inferred_gap_kind.value,
-                "structural_signature": structural.as_dict(),
+                "structural_signature": observed_features,
+                "structural_features": {
+                    "observed_features": observed_features,
+                    "inferred_features": inferred_features,
+                    "memory_projected_features": {},
+                    # Learning continues to consume only this conservative
+                    # observed view until holdout validation permits more.
+                    "selected_effective_features": observed_features,
+                },
                 "query_polarity": (
                     str(
                         getattr(
@@ -791,6 +865,11 @@ class QueryGraphBuilder:
                 ),
                 "current_clause_completeness": completeness,
                 "inherited_predicate": bool(is_structural_continuation),
+                "predicate_hypothesis": (
+                    implicit_relation
+                    if implicit_relation["is_self_contained_relational"]
+                    else None
+                ),
                 "inherited_previous_binding": inherited_binding,
                 "event_anchor_id": (
                     canonical_previous_bindings[0].event_id
@@ -832,7 +911,10 @@ class QueryGraphBuilder:
                 ),
                 "released_previous_node": released_node.as_dict()
                 if released_node else None,
-                "gap_release_diagnostic": release_diagnostic,
+                # Pre-build release scoring is intentionally not promoted to
+                # a trace diagnostic.  It has no execution/hypothesis owner;
+                # only post-selection, owned diagnostics may leave the
+                # service layer.
                 "memory_feedback_limited_to_existing_hypotheses": True,
                 "query_operator_shadow": shadow_predictions,
                 "target_gap_requested": True,
@@ -1380,7 +1462,19 @@ class GraphMatcher:
         *,
         limit: int = 128,
     ) -> Dict[str, Any]:
-        if graph.status != GraphStatus.READY or not graph.predicate:
+        implicit_relation = bool(
+            (graph.trace.get("predicate_hypothesis") or {}).get("predicate_origin")
+            == "IMPLICIT_RELATIONAL"
+        )
+        component_anchor_query = bool(
+            graph.gap_node.gap_kind == GapKind.NODE_COMPONENT
+            and graph.gap_node.attached_to_node_id
+            and graph.known_nodes
+        )
+        if graph.status != GraphStatus.READY or (
+            not graph.predicate and not implicit_relation
+            and not component_anchor_query
+        ):
             return {
                 "accepted": [],
                 "rejected": [],
@@ -1404,13 +1498,17 @@ class GraphMatcher:
                 anchor_id
                 and graph.trace.get("continuation_mode") == "REFERENTIAL"
             )
-            predicate_clause = "" if anchored_perspective_check else (
+            predicate_clause = "" if (
+                anchored_perspective_check or implicit_relation or component_anchor_query
+            ) else (
                 " AND e.predicate_concept_id=?"
             )
             known_clause, known_params = self._known_event_prefilter(
                 graph.known_nodes
             )
-            params: tuple[Any, ...] = () if anchored_perspective_check else (
+            params: tuple[Any, ...] = () if (
+                anchored_perspective_check or implicit_relation or component_anchor_query
+            ) else (
                 graph.predicate.concept_id,
             )
             params += known_params
@@ -1927,7 +2025,11 @@ class GraphResponsePlanner:
             "surface": short if validation["valid"] else None,
             "selected_bindings": [selected.as_dict()],
             "provenance": {
-                "source_event_ids": sorted({
+                # The selected answer is causally grounded in the selected
+                # event.  Corroborating events remain evidence, but cannot be
+                # mixed into answer provenance or downstream learning lineage.
+                "source_event_ids": [selected.event_id],
+                "supporting_event_ids": sorted({
                     event_id
                     for evidence in selected.evidence
                     for event_id in evidence.get("supporting_event_ids", [])

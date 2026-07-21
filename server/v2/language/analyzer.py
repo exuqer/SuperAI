@@ -250,7 +250,45 @@ class UniversalLanguageAnalyzer:
                 and following.pos in NOUN_POS
                 else candidates
             )
-            winner = max(pool, key=lambda item: item.confidence)
+            # A typed interrogative is a modifier, so select it jointly with
+            # its head noun.  Choosing ``какой`` in isolation can preserve an
+            # attractive feminine/prepositional parse even when the visible
+            # noun is masculine nominative (``какой ключ``).
+            noun_pool: List[MorphAnalysis] = []
+            if following is not None and following.pos in NOUN_POS:
+                noun_pool = [
+                    item for item in following.analyses
+                    if item.pos in NOUN_POS
+                ]
+            if pool and noun_pool:
+                pairs = [
+                    (
+                        modifier.confidence + noun.confidence
+                        + (1.0 if self._agreement(modifier, noun) else -1.0),
+                        modifier,
+                        noun,
+                    )
+                    for modifier in pool
+                    for noun in noun_pool
+                ]
+                _, winner, noun_winner = max(
+                    pairs,
+                    key=lambda item: (item[0], item[1].confidence, item[2].confidence),
+                )
+                for hypothesis in following.analyses:
+                    hypothesis.selected = hypothesis is noun_winner
+                following.lemma = noun_winner.lemma
+                following.pos = noun_winner.pos
+                following.features = {
+                    **dict(noun_winner.features),
+                    "sentence_index": following.features.get("sentence_index", 0),
+                    "token_index_in_sentence": following.features.get(
+                        "token_index_in_sentence", following.index,
+                    ),
+                }
+                noun_winner.evidence.append("joint_question_modifier_noun_selection")
+            else:
+                winner = max(pool, key=lambda item: item.confidence)
             for hypothesis in token.analyses:
                 hypothesis.selected = hypothesis is winner
             if "question_operator_function" not in winner.evidence:

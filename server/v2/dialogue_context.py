@@ -25,6 +25,8 @@ class DialogueContextState:
 
     unresolved_turn_ids: List[str] = field(default_factory=list)
     context_strength: float = 0.0
+    current_focus: Mapping[str, Any] = field(default_factory=dict)
+    background_context: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
     created_at: str = ""
     updated_at: str = ""
@@ -38,6 +40,8 @@ class DialogueContextState:
             "active_event_binding_frame_id": self.active_event_binding_frame_id,
             "unresolved_turn_ids": list(self.unresolved_turn_ids),
             "context_strength": self.context_strength,
+            "current_focus": dict(self.current_focus),
+            "background_context": [dict(item) for item in self.background_context],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -56,6 +60,8 @@ class DialogueContextState:
         turn_id: str,
         binding_configuration_id: str,
         frame_id: Optional[str] = None,
+        current_focus: Optional[Mapping[str, Any]] = None,
+        background_context: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         """Mark a turn as resolved and update context state."""
         self.last_turn_id = turn_id
@@ -63,6 +69,9 @@ class DialogueContextState:
         self.last_valid_binding_configuration_id = binding_configuration_id
         if frame_id:
             self.active_event_binding_frame_id = frame_id
+        if current_focus:
+            self.current_focus = dict(current_focus)
+        self.background_context = tuple(dict(item) for item in background_context)
         self.context_strength = min(1.0, self.context_strength + 0.15)
         self.updated_at = utcnow()
 
@@ -122,6 +131,7 @@ class DialogueContextManager:
         ).fetchone()
         if not row:
             return DialogueContextState.create(conversation_id)
+        state_json = __import__("json").loads(row["state_json"] or "{}")
         return DialogueContextState(
             conversation_id=str(row["conversation_id"]),
             last_turn_id=row["last_turn_id"],
@@ -132,6 +142,8 @@ class DialogueContextManager:
                 __import__("json").loads(row["unresolved_turn_ids_json"] or "[]")
             ),
             context_strength=float(row["context_strength"] or 0.0),
+            current_focus=dict(state_json.get("current_focus") or {}),
+            background_context=tuple(state_json.get("background_context") or ()),
             created_at=str(row["created_at"] or ""),
             updated_at=str(row["updated_at"] or ""),
         )
@@ -157,7 +169,12 @@ class DialogueContextManager:
                 state.active_event_binding_frame_id,
                 json.dumps(state.unresolved_turn_ids, ensure_ascii=False),
                 state.context_strength,
-                "{}",
+                json.dumps({
+                    "current_focus": dict(state.current_focus),
+                    "background_context": [
+                        dict(item) for item in state.background_context
+                    ],
+                }, ensure_ascii=False),
                 state.created_at or now,
                 now,
             ),

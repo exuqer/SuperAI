@@ -34,6 +34,7 @@ from server.v2.dialogue_context import (
     DialogueContextState,
     DialogueContextManager,
 )
+from server.v2.query_execution import QueryExecutionContext
 
 
 def services():
@@ -328,6 +329,50 @@ class TestScenarioC_StandaloneWhere:
         third = dialogue.query(third_hive, "Где находится батарея?")
         assert third["answer"]["surface"] == "Под крышкой."
 
+    def test_relational_ellipsis_blocks_unrelated_predicate_inheritance(self):
+        """A complete prepositional relation is its own query frame."""
+        _, training, dialogue = services()
+        training.train(
+            "В мастерской стоит робот. Под крышкой находится батарея.",
+            independent_key="scenario-c-implicit-relation",
+        )
+        hive_id = dialogue.create()["hive"]["id"]
+
+        dialogue.query(hive_id, "Где стоит робот?")
+        result = dialogue.query(hive_id, "Что под крышкой?")
+
+        query_trace = result["query_graph"]["trace"]
+        assert result["answer"]["surface"].casefold() == "батарея."
+        assert result["query_graph"]["continuation_of"] is None
+        assert result["query_graph"]["event_pattern"]["predicate"] is None
+        assert query_trace["predicate_hypothesis"] == {
+            "predicate_origin": "IMPLICIT_RELATIONAL",
+            "predicate_family": "existence_or_location",
+            "surface": None,
+            "confidence": 0.8,
+            "evidence": [
+                "question_operator",
+                "prepositional_phrase",
+                "preposition_object",
+                "no_explicit_predicate",
+            ],
+            "is_self_contained_relational": True,
+        }
+        assert query_trace["context_inheritance_gate"]["decision"] == "BLOCK"
+        assert query_trace["interpretation_competition"][
+            "selected_interpretation"
+        ] == "SELF_CONTAINED_RELATIONAL"
+        assert result["selected_bindings"][0]["selection_status"] == "SELECTED"
+        assert result["selected_bindings"][0]["support_status"] in {
+            "SUPPORTED", "WEAK_SUPPORTED",
+        }
+        swarm = result["trace"]["swarm"]
+        assert swarm["semantic_candidate_count"] == 0
+        assert swarm["index_candidate_count"] == 1
+        assert swarm["semantic_selected"] is False
+        assert swarm["fallback_used"] is True
+        assert result["answer"]["resolution_class"] == "FALLBACK_RESOLVED"
+
     def test_unresolved_does_not_contaminate_next_query(self):
         """After UNRESOLVED, the next query should be standalone."""
         _, training, dialogue = services()
@@ -344,3 +389,74 @@ class TestScenarioC_StandaloneWhere:
         # Next query about a known entity should work standalone
         second = dialogue.query(hive_id, "Где стоит робот?")
         assert second["answer"]["surface"] == "В мастерской."
+
+
+class TestIsolationAttributeAndMorphology:
+    def test_self_contained_relation_has_no_previous_frame_or_diagnostic(self):
+        _, training, dialogue = services()
+        training.train(
+            "После замены робот включился. Под крышкой находится батарея.",
+            independent_key="isolation-sequential-scenes",
+        )
+        hive_id = dialogue.create()["hive"]["id"]
+        first = dialogue.query(hive_id, "Когда включился робот?")
+        second = dialogue.query(hive_id, "Что под крышкой?")
+
+        assert first["trace"]["execution_context"]["execution_id"] != (
+            second["trace"]["execution_context"]["execution_id"]
+        )
+        assert second["trace"]["selected_hypothesis"]["interpretation_type"] == (
+            "SELF_CONTAINED_RELATIONAL"
+        )
+        assert second["trace"]["selected_gap_release_diagnostics"] == {}
+        assert second["trace"]["final_trace_consistency_validation"]["passed"]
+        assert all(
+            binding["event_id"]
+            == second["binding_configuration"]["event_id"]
+            for binding in second["selected_bindings"]
+        )
+
+    def test_attribute_focus_and_unresolved_attribute(self):
+        _, training, dialogue = services()
+        training.train(
+            "Под панелью находится новая батарея.",
+            independent_key="attribute-focus",
+        )
+        hive_id = dialogue.create()["hive"]["id"]
+        dialogue.query(hive_id, "Что под панелью?")
+        result = dialogue.query(hive_id, "Какая?")
+        gap = result["query_graph"]["event_pattern"]["target_gap"]
+
+        assert result["answer"]["surface"] == "новая."
+        assert gap["gap_kind"] == "NODE_COMPONENT"
+        assert gap["attached_to_node_id"]
+        assert result["query_graph"]["trace"]["attribute_anchor"]["lemma"] == "батарея"
+
+    def test_joint_question_modifier_noun_morphology_and_consistency_rejection(self):
+        _, _, dialogue = services()
+        parsed = dialogue.parse("Какой ключ?")
+        operator = parsed["query_graph"]["question_operators"][0]
+        gap = parsed["query_graph"]["event_pattern"]["target_gap"]
+        assert operator["grammatical_features"]["gender"] == "masc"
+        assert set(gap["morphology_hypotheses"]) >= {"case:nomn", "case:accs"}
+        assert "gender:femn" not in gap["morphology_hypotheses"]
+
+        execution = QueryExecutionContext.create(
+            conversation_id="test", turn_id="turn", query_graph_id="graph",
+        )
+        validation = GraphDialogueService._final_trace_consistency_validation(
+            execution=execution,
+            selected_hypothesis={"hypothesis_id": "h", "admitted_event_ids": ["event-a"]},
+            selected_bindings=(),
+            binding_configuration=None,
+            answer={"provenance": {"source_event_ids": ["event-other"]}},
+            selected_diagnostics={
+                "gap": {
+                    "execution_id": "wrong", "query_graph_id": "graph",
+                    "hypothesis_id": "h", "gap_id": "gap", "event_id": "event-a",
+                },
+            },
+            requested_gap_ids=["gap"],
+        )
+        assert validation["passed"] is False
+        assert validation["failures"] == ["DIAGNOSTIC_OWNER_MISMATCH:gap"]

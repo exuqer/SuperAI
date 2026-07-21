@@ -18,7 +18,7 @@ from .graph_models import (
 # Query-operator evidence is an additive extension to V2.8's graph schema.
 # Keeping this version stable lets existing V2.8 databases gain the tables
 # below through CREATE IF NOT EXISTS instead of being reset.
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 36
 
 
 def _reset_incompatible_schema(conn: sqlite3.Connection) -> None:
@@ -667,7 +667,8 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             token_indices_json TEXT NOT NULL DEFAULT '[]',
             context_json TEXT NOT NULL DEFAULT '{}',
             prediction_json TEXT NOT NULL DEFAULT '{}',
-            status TEXT NOT NULL CHECK(status IN ('OBSERVED','VALIDATED','REJECTED')),
+            status TEXT NOT NULL CHECK(status IN
+                ('OBSERVED','OBSERVED_UNTRUSTED','VALIDATED','REJECTED')),
             created_at TEXT NOT NULL,
             FOREIGN KEY(query_graph_id) REFERENCES query_graphs(id)
                 ON DELETE CASCADE,
@@ -683,7 +684,7 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             occurrence_id TEXT NOT NULL,
             profile_id TEXT,
             outcome TEXT NOT NULL CHECK(outcome IN
-                ('VALIDATED_BINDING','REJECTED_BINDING',
+                ('OBSERVED_UNTRUSTED','VALIDATED_BINDING','REJECTED_BINDING',
                  'UNSELECTED_CANDIDATE','REJECTED_EVENT')),
             validated INTEGER NOT NULL DEFAULT 0 CHECK(validated IN (0,1)),
             binding_json TEXT NOT NULL DEFAULT '{}',
@@ -1181,6 +1182,10 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS gap_release_diagnostics (
             id TEXT PRIMARY KEY,
             query_graph_id TEXT NOT NULL,
+            execution_id TEXT NOT NULL DEFAULT '',
+            hypothesis_id TEXT NOT NULL DEFAULT '',
+            gap_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'SELECTED',
             frame_id TEXT,
             event_id TEXT,
             question_family_key TEXT,

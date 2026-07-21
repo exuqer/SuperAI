@@ -307,16 +307,56 @@ class ObservationBuilder:
             if hypothesis.pos == "NPRO"
             and hypothesis.features.get("case") in {"nomn", "accs"}
         }
+        # For ``какой <noun>`` the modifier and head are chosen jointly, but
+        # a masculine/neuter inanimate noun may still be surface-syncretic in
+        # nominative/accusative.  Preserve those compatible pair alternatives
+        # instead of pretending the selected modifier form resolved the role.
+        typed_cases: set[str] = set()
+        if question.type_constraint_token_index is not None:
+            head = analysis.tokens[int(question.type_constraint_token_index)]
+            for hypothesis in token.analyses:
+                if hypothesis.pos != "ADJF":
+                    continue
+                if hypothesis.features.get("case") not in {"nomn", "accs"}:
+                    continue
+                if all(
+                    not hypothesis.features.get(feature)
+                    or not head.features.get(feature)
+                    or hypothesis.features.get(feature) == head.features.get(feature)
+                    for feature in ("gender", "number")
+                ):
+                    typed_cases.add(str(hypothesis.features["case"]))
         for feature in ("case", "number", "gender", "animacy"):
-            if feature == "case" and ambiguous_cases == {"nomn", "accs"}:
+            if feature == "case" and (
+                ambiguous_cases == {"nomn", "accs"}
+                or typed_cases == {"nomn", "accs"}
+            ):
+                for case in sorted(typed_cases or ambiguous_cases):
+                    values[f"morph:case:{case}"] = 0.93
                 continue
             value = token.features.get(feature)
             if value:
                 values[f"morph:{feature}:{value}"] = 0.93
         for hypothesis in token.analyses:
+            if (
+                question.type_constraint_token_index is not None
+                and hypothesis.pos == "ADJF"
+                and not all(
+                    not hypothesis.features.get(feature)
+                    or not head.features.get(feature)
+                    or hypothesis.features.get(feature) == head.features.get(feature)
+                    for feature in ("gender", "number")
+                )
+            ):
+                # Rejected modifier/head pair; retain it in morphology
+                # diagnostics but never turn it into a gap constraint.
+                continue
             hypothesis_strength = clamp(float(hypothesis.confidence))
             for feature in ("case", "number", "gender", "animacy"):
-                if feature == "case" and ambiguous_cases == {"nomn", "accs"}:
+                if feature == "case" and (
+                    ambiguous_cases == {"nomn", "accs"}
+                    or typed_cases == {"nomn", "accs"}
+                ):
                     continue
                 value = hypothesis.features.get(feature)
                 if value:

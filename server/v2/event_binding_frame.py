@@ -119,6 +119,14 @@ class EventBindingFrame:
     event_id: str
     predicate_concept_id: str
 
+    # A frame is persisted dialogue history, but a query may use it only after
+    # explicitly adopting it.  These fields record that adoption and prevent a
+    # stale "last frame" from masquerading as current-query evidence.
+    owner_execution_id: str = ""
+    owner_query_graph_id: str = ""
+    owner_hypothesis_id: str = ""
+    created_for_gap_ids: Sequence[str] = ()
+
     status: FrameStatus = FrameStatus.ACTIVE
     confidence: float = 0.0
     created_at: str = ""
@@ -134,6 +142,10 @@ class EventBindingFrame:
             "latest_query_graph_id": self.latest_query_graph_id,
             "event_id": self.event_id,
             "predicate_concept_id": self.predicate_concept_id,
+            "owner_execution_id": self.owner_execution_id,
+            "owner_query_graph_id": self.owner_query_graph_id,
+            "owner_hypothesis_id": self.owner_hypothesis_id,
+            "created_for_gap_ids": list(self.created_for_gap_ids),
             "status": self.status.value,
             "confidence": self.confidence,
             "created_at": self.created_at,

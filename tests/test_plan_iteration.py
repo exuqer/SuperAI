@@ -6,6 +6,7 @@ from pathlib import Path
 from server.core.settings import settings
 from server.v2.experiment import CompactExperiment, ExperimentConfig
 from server.v2.graph_repository import GraphRepository, decode
+from server.v2.graph_schema import SCHEMA_VERSION
 from server.v2.graph_service import GraphDialogueService, GraphTrainingService
 
 
@@ -103,7 +104,8 @@ def test_future_graph_schema_is_not_silently_downgraded_as_compatible():
     with repository.transaction() as conn:
         conn.execute("CREATE TABLE future_only_marker(id TEXT PRIMARY KEY)")
         conn.execute(
-            "UPDATE graph_meta SET value='34' WHERE key='schema_version'"
+            "UPDATE graph_meta SET value=? WHERE key='schema_version'",
+            (str(SCHEMA_VERSION + 1),),
         )
 
     recreated = GraphRepository()
@@ -116,10 +118,10 @@ def test_future_graph_schema_is_not_silently_downgraded_as_compatible():
             "SELECT value FROM graph_meta WHERE key='schema_version'"
         ).fetchone()[0]
     assert marker is None
-    assert str(schema_version) == "33"
+    assert str(schema_version) == str(SCHEMA_VERSION)
 
 
-def test_query_operator_profiles_are_shadow_learned_from_validated_bindings():
+def test_query_operator_profiles_are_observed_without_reinforcement_while_suspended():
     repository, training, dialogue = services()
     training.train(
         "Механик дал роботу болт.",
@@ -151,19 +153,20 @@ def test_query_operator_profiles_are_shadow_learned_from_validated_bindings():
         ).fetchall()
         experiences = conn.execute(
             """SELECT outcome,validated FROM query_operator_experiences
-               WHERE outcome='VALIDATED_BINDING'"""
+               WHERE occurrence_id IN (
+                   SELECT id FROM query_operator_occurrences
+                   WHERE operator_normalized='что'
+               )"""
         ).fetchall()
     assert {
         "query_operator_profiles",
         "query_operator_occurrences",
         "query_operator_experiences",
     } <= tables
-    assert profile["status"] == "SHADOW"
-    assert int(profile["validated_count"]) == 1
-    assert decode(profile["compatible_slots_json"], {})
-    assert [row["status"] for row in occurrences] == ["VALIDATED"]
+    assert profile is None
+    assert [row["status"] for row in occurrences] == ["OBSERVED_UNTRUSTED"]
     assert [(row["outcome"], row["validated"]) for row in experiences] == [
-        ("VALIDATED_BINDING", 1),
+        ("OBSERVED_UNTRUSTED", 0),
     ]
 
     second = dialogue.query(
@@ -175,14 +178,11 @@ def test_query_operator_profiles_are_shadow_learned_from_validated_bindings():
     ]["learned_gap_profile"]
     assert second["answer"]["surface"] == "болт."
     assert shadow["mode"] == "SHADOW"
-    assert shadow["support_count"] == 1
-    assert shadow["compatible_local_slots"]
-    assert "D-Q-local_slot-" in shadow["projection_dimensions"][
-        "local_slot"
-    ]["dimension_id"]
+    assert shadow["support_count"] == 0
+    assert not shadow["compatible_local_slots"]
 
 
-def test_query_operator_support_alone_never_promotes_shadow_profile():
+def test_query_operator_observations_do_not_create_profile_support_while_suspended():
     repository, training, dialogue = services()
     training.train(
         "Механик дал роботу болт.",
@@ -200,8 +200,13 @@ def test_query_operator_support_alone_never_promotes_shadow_profile():
             """SELECT validated_count,status
                FROM query_operator_profiles WHERE profile_key='surface:что'"""
         ).fetchone()
-    assert int(profile["validated_count"]) == 3
-    assert profile["status"] == "SHADOW"
+        occurrences = conn.execute(
+            "SELECT status FROM query_operator_occurrences"
+        ).fetchall()
+    assert profile is None
+    assert [row["status"] for row in occurrences] == [
+        "OBSERVED_UNTRUSTED",
+    ] * 3
 
 
 def test_active_instrument_construction_does_not_override_passive_structure():
@@ -257,12 +262,12 @@ def test_multi_gap_query_creates_an_independent_operator_occurrence_per_gap():
                WHERE outcome='VALIDATED_BINDING'"""
         ).fetchall()
     assert [(row["operator_normalized"], row["status"]) for row in rows] == [
-        ("кому", "VALIDATED"),
-        ("кто", "VALIDATED"),
-        ("что", "VALIDATED"),
+        ("кому", "OBSERVED_UNTRUSTED"),
+        ("кто", "OBSERVED_UNTRUSTED"),
+        ("что", "OBSERVED_UNTRUSTED"),
     ]
-    assert len({row["occurrence_id"] for row in experiences}) == 3
-    assert all(decode(row["compatible_slots_json"], {}) for row in profiles)
+    assert not experiences
+    assert not profiles
 
 
 def test_multi_gap_contract_is_canonical_and_learns_one_configuration():

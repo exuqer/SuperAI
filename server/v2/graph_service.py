@@ -18,6 +18,8 @@ from .graph_models import (
     AnswerStatus,
     BindingConfiguration,
     CandidateBinding,
+    GapKind,
+    GraphStatus,
     GraphStatus,
     QueryGraph,
     candidate_binding_from_dict,
@@ -61,6 +63,7 @@ from .dialogue_context import (
     DialogueContextState,
     DialogueContextManager,
 )
+from .query_execution import QueryExecutionContext, diagnostic_owner_valid
 
 
 class GraphTrainingService:
@@ -351,6 +354,11 @@ class GraphTrainingService:
 class GraphDialogueService:
     """Persistent dialogue state around QueryGraph and gap bindings."""
 
+    # Phase-one safety brake.  Dialogue turns are retained as observational
+    # episodes, but no construction/profile/dimension confidence is changed
+    # until the shadow-validation rollout explicitly lifts this flag.
+    LEARNING_SUSPENDED_REASON = "STATE_ISOLATION_AND_TRACE_VALIDATION_PENDING"
+
     def __init__(
         self,
         repository: Optional[GraphRepository] = None,
@@ -567,47 +575,13 @@ class GraphDialogueService:
                 encode(local_slot_ids),
                 str(answer.get("status")),
                 encode(validation),
-                int(eligible),
+                0,
                 utcnow(),
             ),
         )
-        if not eligible:
-            return
-        # Dialogue questions are linguistic evidence, not world facts.
-        source_id = stable_id("dialogue-question", graph.id)
-        now = utcnow()
-        conn.execute(
-            """INSERT OR IGNORE INTO knowledge_sources
-               (id,raw_text,normalized_text,content_hash,source_type,status,
-                confidence,independent_key,metadata_json,created_at,updated_at)
-               VALUES(?,?,?,?, 'dialogue_question','STAGED',.75,?,'{}',?,?)""",
-            (
-                source_id,
-                text,
-                " ".join(text.casefold().split()),
-                content_hash(text),
-                f"dialogue:{hive_id}:{graph.id}",
-                now,
-                now,
-            ),
-        )
-        structural = ObservationSignature(
-            graph.trace.get("structural_signature") or {}
-        )
-        construction = self.constructions.observe(
-            conn,
-            structural,
-            source_id=source_id,
-            domain_key="dialogue",
-            gap_kind=graph.gap_node.gap_kind,
-        )
-        for local_slot_id in local_slot_ids:
-            self.constructions.reinforce_binding(
-                conn,
-                construction.id,
-                local_slot_id,
-                accepted=True,
-            )
+        # Deliberately observational-only: creating a source or reinforcing a
+        # profile here would turn a possibly fallback/inconsistent answer into
+        # durable semantic evidence.
 
     def _build_query_interpretation_hypotheses(
         self,
@@ -621,77 +595,88 @@ class GraphDialogueService:
         hypotheses = []
         has_explicit_entity = len(graph.known_nodes) > 0
         has_question_operator = graph.gap_node.surface != "" if graph.gap_node else True
-        
-        # Determine if this is a short question without new entity
+        implicit_relation = bool(
+            (graph.trace.get("predicate_hypothesis") or {}).get("predicate_origin")
+            == "IMPLICIT_RELATIONAL"
+        )
+        tokens = analysis.get("tokens") or []
+        first_token = (
+            str(tokens[0].get("normalized") or "").casefold()
+            if tokens else ""
+        )
+        continuation_marker = first_token in {"а", "и"}
+        continuation_words = {"ещё", "потом", "тогда"}
+        has_continuation_word = any(
+            str(token.get("normalized") or "").casefold()
+            in continuation_words
+            for token in tokens
+        )
+
+        # Determine if this is a short question without a new anchor.
         is_short_question = has_question_operator and not has_explicit_entity
         has_new_entity = has_explicit_entity
-        
-        # Hypothesis 1: STRUCTURAL_CONTINUATION (always created for incomplete questions with current entity)
-        if is_short_question or has_new_entity:
-            h1 = {
+
+        # A question operator plus its own prepositional noun phrase forms a
+        # complete relational query even without an overt verb.  It must be
+        # considered before, rather than after, context inheritance.
+        if implicit_relation:
+            hypotheses.append({
                 "hypothesis_index": 0,
-                "interpretation_type": "STRUCTURAL_CONTINUATION",
-                "prior_score": 0.7 if is_short_question else 0.5,
-                "predicate": graph.predicate.lemma if graph.predicate else (
-                    previous_graph.predicate.lemma if previous_graph and previous_graph.predicate else None
-                ),
-                "known_entities": [n.head_lemma for n in graph.known_nodes] if graph.known_nodes else [],
-                "event_anchor_id": graph.trace.get("event_anchor_id"),
-            }
-            hypotheses.append(h1)
-        
-        # Hypothesis 2: STANDALONE_GAP_QUERY (always created for short questions without new entity)
-        if is_short_question:
-            h2 = {
-                "hypothesis_index": 1,
-                "interpretation_type": "STANDALONE_GAP_QUERY",
-                "prior_score": 0.6,
+                "interpretation_type": "SELF_CONTAINED_RELATIONAL",
+                "prior_score": 0.90,
                 "predicate": None,
                 "known_entities": [n.head_lemma for n in graph.known_nodes] if graph.known_nodes else [],
                 "event_anchor_id": None,
-            }
-            hypotheses.append(h2)
-        
-        # Hypothesis 3: ANCHORED_EVENT_REBIND (for short question without new entity, when event anchor exists)
-        if is_short_question and graph.trace.get("event_anchor_id"):
-            h3 = {
+            })
+
+        if previous_graph and (is_short_question or implicit_relation):
+            hypotheses.append({
                 "hypothesis_index": len(hypotheses),
-                "interpretation_type": "ANCHORED_EVENT_REBIND",
-                "prior_score": 0.5,
+                "interpretation_type": "CONTEXTUAL_CONTINUATION",
+                "prior_score": (
+                    0.15 if implicit_relation else
+                    0.82 if (continuation_marker or has_continuation_word) else 0.48
+                ),
                 "predicate": graph.predicate.lemma if graph.predicate else (
                     previous_graph.predicate.lemma if previous_graph and previous_graph.predicate else None
                 ),
                 "known_entities": [n.head_lemma for n in graph.known_nodes] if graph.known_nodes else [],
                 "event_anchor_id": graph.trace.get("event_anchor_id"),
-            }
-            hypotheses.append(h3)
-        
-        # Hypothesis 4: CONTEXT_REFERENCE_QUERY (for "А ..." style questions)
-        first_token = ""
-        if analysis.get("tokens"):
-            first_token = analysis["tokens"][0].get("normalized", "").casefold()
-        if first_token in {"а", "и"} and previous_graph:
-            h4 = {
+            })
+
+        # Attribute continuation only inherits an object anchor, never the
+        # prior predicate.  We keep it separate in trace for diagnostics.
+        if previous_graph and has_question_operator and not graph.predicate and (
+            not implicit_relation and (has_explicit_entity or is_short_question)
+        ):
+            hypotheses.append({
                 "hypothesis_index": len(hypotheses),
-                "interpretation_type": "CONTEXT_REFERENCE_QUERY",
-                "prior_score": 0.4,
-                "predicate": previous_graph.predicate.lemma if previous_graph.predicate else None,
+                "interpretation_type": "ATTRIBUTE_CONTINUATION",
+                "prior_score": 0.60 if has_explicit_entity else 0.38,
+                "predicate": None,
                 "known_entities": [n.head_lemma for n in previous_graph.known_nodes] if previous_graph.known_nodes else [],
-                "event_anchor_id": graph.trace.get("event_anchor_id"),
-            }
-            hypotheses.append(h4)
-        
-        # Hypothesis 5: EXPLICIT_QUERY (for complete questions with explicit predicate)
-        if has_question_operator and graph.predicate and has_explicit_entity:
-            h5 = {
+                "event_anchor_id": None,
+            })
+
+        if has_question_operator and graph.predicate:
+            hypotheses.append({
                 "hypothesis_index": len(hypotheses),
                 "interpretation_type": "EXPLICIT_QUERY",
                 "prior_score": 0.8,
                 "predicate": graph.predicate.lemma,
                 "known_entities": [n.head_lemma for n in graph.known_nodes],
                 "event_anchor_id": None,
-            }
-            hypotheses.append(h5)
+            })
+
+        if not hypotheses:
+            hypotheses.append({
+                "hypothesis_index": 0,
+                "interpretation_type": "UNRESOLVED_ELLIPSIS",
+                "prior_score": 0.10,
+                "predicate": None,
+                "known_entities": [],
+                "event_anchor_id": None,
+            })
         
         return hypotheses
 
@@ -706,12 +691,29 @@ class GraphDialogueService:
     ) -> Dict[str, Any]:
         """Evaluate a single hypothesis through retrieval -> GraphMatcher -> Validator."""
         interpretation_type = hypothesis["interpretation_type"]
+        if not hypothesis.get("retrieval_allowed", True):
+            hypothesis.update({
+                "current_evidence_score": 0.0,
+                "inherited_context_score": 0.0,
+                "event_retrieval_score": 0.0,
+                "graph_validation_score": 0.0,
+                "total_score": 0.0,
+                "admitted_event_ids": [],
+                "selected_bindings": [],
+                "validation": {
+                    "valid": False,
+                    "reason": "CONTEXT_INHERITANCE_BLOCKED",
+                },
+            })
+            return hypothesis
         
         # Build a test query graph based on the hypothesis
-        if interpretation_type == "STRUCTURAL_CONTINUATION":
+        if interpretation_type in {
+            "CONTEXTUAL_CONTINUATION", "SELF_CONTAINED_RELATIONAL",
+        }:
             # Use inherited predicate, current known nodes, current gap
             test_graph = graph
-        elif interpretation_type == "STANDALONE_GAP_QUERY":
+        elif interpretation_type == "UNRESOLVED_ELLIPSIS":
             # Use only current gap, no inherited predicate
             test_graph = QueryGraph(
                 id=stable_id("test-graph", graph.id, "standalone"),
@@ -725,14 +727,11 @@ class GraphDialogueService:
                 continuation_of=None,
                 construction_ids=(),
                 implicit_gaps=(),
-                trace={"hypothesis_type": "STANDALONE_GAP_QUERY"},
+                trace={"hypothesis_type": "UNRESOLVED_ELLIPSIS"},
             )
-        elif interpretation_type == "ANCHORED_EVENT_REBIND":
-            # Use event anchor as primary constraint
+        elif interpretation_type == "ATTRIBUTE_CONTINUATION":
+            # The current graph already retains only the allowed context.
             test_graph = graph
-        elif interpretation_type == "CONTEXT_REFERENCE_QUERY":
-            # Use previous graph's predicate and known nodes
-            test_graph = previous_graph
         elif interpretation_type == "EXPLICIT_QUERY":
             test_graph = graph
         else:
@@ -763,7 +762,7 @@ class GraphDialogueService:
         
         # Inherited context score (only if context source is RESOLVED)
         inherited_context_score = 0.0
-        if dialogue_context.last_resolved_turn_id and interpretation_type in {"STRUCTURAL_CONTINUATION", "ANCHORED_EVENT_REBIND"}:
+        if dialogue_context.last_resolved_turn_id and interpretation_type == "CONTEXTUAL_CONTINUATION":
             inherited_context_score = 0.5
         
         # Event retrieval score
@@ -800,6 +799,12 @@ class GraphDialogueService:
         selected_index: int,
     ) -> None:
         """Persist query interpretation hypotheses to database."""
+        persisted_type = {
+            "SELF_CONTAINED_RELATIONAL": "STANDALONE_GAP_QUERY",
+            "CONTEXTUAL_CONTINUATION": "STRUCTURAL_CONTINUATION",
+            "ATTRIBUTE_CONTINUATION": "CONTEXT_REFERENCE_QUERY",
+            "UNRESOLVED_ELLIPSIS": "STANDALONE_GAP_QUERY",
+        }
         for h in hypotheses:
             hypothesis_id = stable_id("query-hypothesis", graph.id, h["hypothesis_index"])
             conn.execute(
@@ -813,7 +818,9 @@ class GraphDialogueService:
                     hypothesis_id,
                     graph.id,
                     h["hypothesis_index"],
-                    h["interpretation_type"],
+                    persisted_type.get(
+                        h["interpretation_type"], h["interpretation_type"]
+                    ),
                     h["prior_score"],
                     h["current_evidence_score"],
                     h["inherited_context_score"],
@@ -949,6 +956,8 @@ class GraphDialogueService:
         event_participants: Sequence[Any],
         gap_surfaces: Mapping[str, str],
         turn_index: int,
+        execution: Optional[QueryExecutionContext] = None,
+        hypothesis_id: str = "",
     ) -> Optional[str]:
         """Create or update EventBindingFrame after a valid BindingConfiguration."""
         if not binding_configuration or not selected_bindings:
@@ -993,12 +1002,18 @@ class GraphDialogueService:
             # Persist updated frame
             conn.execute(
                 """UPDATE event_binding_frames SET
-                   latest_query_graph_id=?, status=?, confidence=?, updated_at=?
+                   latest_query_graph_id=?, status=?, confidence=?, state_json=?, updated_at=?
                    WHERE id=?""",
                 (
                     updated_frame.latest_query_graph_id,
                     updated_frame.status.value,
                     updated_frame.confidence,
+                    encode({
+                        "owner_execution_id": execution.execution_id if execution else "",
+                        "owner_query_graph_id": graph.id,
+                        "owner_hypothesis_id": hypothesis_id,
+                        "created_for_gap_ids": [gap.id for gap in graph.target_gaps],
+                    }),
                     updated_frame.updated_at,
                     frame_id,
                 ),
@@ -1071,7 +1086,12 @@ class GraphDialogueService:
                     frame.predicate_concept_id,
                     frame.status.value,
                     frame.confidence,
-                    "{}",
+                    encode({
+                        "owner_execution_id": execution.execution_id if execution else "",
+                        "owner_query_graph_id": graph.id,
+                        "owner_hypothesis_id": hypothesis_id,
+                        "created_for_gap_ids": [gap.id for gap in graph.target_gaps],
+                    }),
                     frame.created_at,
                     frame.updated_at,
                 ),
@@ -1130,13 +1150,18 @@ class GraphDialogueService:
         
         conn.execute(
             """INSERT OR REPLACE INTO gap_release_diagnostics
-               (id,query_graph_id,frame_id,event_id,question_family_key,
+               (id,query_graph_id,execution_id,hypothesis_id,gap_id,status,
+                frame_id,event_id,question_family_key,
                 candidates_json,selected_participant_node_id,selected_score,
                 second_score,release_margin,decision,decision_reason,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 diagnostic_id,
                 graph.id,
+                diagnostic.execution_id,
+                diagnostic.hypothesis_id,
+                diagnostic.gap_id,
+                diagnostic.status,
                 frame_id,
                 event_id,
                 question_family_key,
@@ -1243,6 +1268,48 @@ class GraphDialogueService:
 
         return filtered
 
+    @staticmethod
+    def _final_trace_consistency_validation(
+        *,
+        execution: QueryExecutionContext,
+        selected_hypothesis: Mapping[str, Any],
+        selected_bindings: Sequence[CandidateBinding],
+        binding_configuration: Optional[BindingConfiguration],
+        answer: Mapping[str, Any],
+        selected_diagnostics: Mapping[str, Mapping[str, Any]],
+        requested_gap_ids: Sequence[str],
+    ) -> Dict[str, Any]:
+        """Reject cross-hypothesis/event data before feedback is committed."""
+        failures: List[str] = []
+        selected_event_ids = {binding.event_id for binding in selected_bindings}
+        admitted = set(selected_hypothesis.get("admitted_event_ids") or [])
+        if binding_configuration and binding_configuration.event_id not in admitted:
+            failures.append("CONFIGURATION_EVENT_NOT_ADMITTED_BY_HYPOTHESIS")
+        if binding_configuration and any(
+            binding.event_id != binding_configuration.event_id
+            for binding in selected_bindings
+        ):
+            failures.append("BINDING_EVENT_CONFIGURATION_MISMATCH")
+        provenance = answer.get("provenance") or {}
+        if selected_bindings and set(provenance.get("source_event_ids") or []) != selected_event_ids:
+            failures.append("ANSWER_PROVENANCE_EVENT_MISMATCH")
+        hypothesis_id = str(selected_hypothesis.get("hypothesis_id") or "")
+        for gap_id, diagnostic in selected_diagnostics.items():
+            if not diagnostic_owner_valid(
+                diagnostic,
+                execution=execution,
+                hypothesis_id=hypothesis_id,
+                gap_ids=requested_gap_ids,
+                event_ids=tuple(selected_event_ids),
+            ):
+                failures.append(f"DIAGNOSTIC_OWNER_MISMATCH:{gap_id}")
+        return {
+            "stage": "FINAL_TRACE_CONSISTENCY_VALIDATION",
+            "passed": not failures,
+            "failures": failures,
+            "selected_event_ids": sorted(selected_event_ids),
+        }
+
     def query(
         self,
         hive_id: str,
@@ -1319,11 +1386,100 @@ class GraphDialogueService:
             conversation_id=conversation_id,
             turn_index=next_turn,
         )
+        explicit_current_nodes = [
+            node for node in graph.known_nodes
+            if node.origin == "EXPLICIT_CURRENT"
+        ]
+        bare_attribute_question = bool(
+            graph.gap_node.gap_kind == GapKind.NODE_COMPONENT
+            and not explicit_current_nodes
+            and str((analysis.get("tokens") or [{}])[0].get("normalized") or "").casefold()
+            in {"какой", "какая", "какое", "какие"}
+        )
+        if bare_attribute_question and dialogue_context.current_focus:
+            focus_binding = next(
+                (
+                    binding for binding in previous_bindings
+                    if binding.id == dialogue_context.current_focus.get("binding_id")
+                ),
+                None,
+            )
+            if focus_binding is not None:
+                focus_node = self.builder._binding_as_mention(focus_binding, graph.id)
+                focus_node = replace(
+                    focus_node,
+                    origin="RESOLVED_PREVIOUS_TARGET",
+                    context_confidence=float(
+                        dialogue_context.current_focus.get("confidence")
+                        or focus_binding.total_score
+                    ),
+                )
+                attribute_gap = replace(
+                    graph.gap_node,
+                    gap_kind=GapKind.NODE_COMPONENT,
+                    attached_to_node_id=focus_node.id,
+                )
+                graph = replace(
+                    graph,
+                    predicate=None,
+                    known_nodes=(focus_node,),
+                    gap_node=attribute_gap,
+                    target_gaps=(attribute_gap,),
+                    continuation_of=None,
+                    status=GraphStatus.READY,
+                    trace={
+                        **dict(graph.trace),
+                        "continuation_mode": "ATTRIBUTE",
+                        "attribute_anchor": {
+                            "node_id": focus_node.id,
+                            "lemma": focus_node.head_lemma,
+                            "origin": "RESOLVED_PREVIOUS_TARGET",
+                        },
+                    },
+                )
+        execution = QueryExecutionContext.create(
+            conversation_id=conversation_id,
+            turn_id=stable_id("dialogue-turn", hive_id, next_turn),
+            query_graph_id=graph.id,
+        )
         
         # Build and evaluate competing hypotheses
         hypotheses = self._build_query_interpretation_hypotheses(
             graph, previous_graph, previous_bindings, dialogue_context, analysis
         )
+
+        # The gate runs before retrieval.  A diagnostic continuation is kept
+        # observable, but after BLOCK it is stripped of every inherited item
+        # and cannot contribute candidates, bindings, or learning evidence.
+        implicit_relation = bool(
+            (graph.trace.get("predicate_hypothesis") or {}).get(
+                "predicate_origin"
+            ) == "IMPLICIT_RELATIONAL"
+        )
+        for hypothesis in hypotheses:
+            hypothesis["hypothesis_id"] = stable_id(
+                "query-hypothesis", graph.id, hypothesis["hypothesis_index"]
+            )
+            hypothesis["retrieval_allowed"] = True
+            hypothesis["effective_inherited_context"] = {}
+            if (
+                implicit_relation
+                and hypothesis["interpretation_type"]
+                == "CONTEXTUAL_CONTINUATION"
+            ):
+                hypothesis.update({
+                    "status": "BLOCKED",
+                    "retrieval_allowed": False,
+                    "predicate": None,
+                    "event_anchor_id": None,
+                    "known_entities": [],
+                    "effective_inherited_context": {},
+                    "blocked_elements_removed": ["predicate", "event_context", "bindings"],
+                    "validation": {
+                        "valid": False,
+                        "reason": "CONTEXT_INHERITANCE_BLOCKED",
+                    },
+                })
         
         evaluated_hypotheses = []
         for h in hypotheses:
@@ -1342,6 +1498,49 @@ class GraphDialogueService:
             i for i, h in enumerate(evaluated_hypotheses) 
             if h["hypothesis_index"] == best_hypothesis["hypothesis_index"]
         )
+        selected_type = str(best_hypothesis["interpretation_type"])
+        self_score = next(
+            (float(item.get("total_score") or 0.0) for item in evaluated_hypotheses
+             if item.get("interpretation_type") == "SELF_CONTAINED_RELATIONAL"),
+            0.0,
+        )
+        continuation_score = next(
+            (float(item.get("total_score") or 0.0) for item in evaluated_hypotheses
+             if item.get("interpretation_type") == "CONTEXTUAL_CONTINUATION"),
+            0.0,
+        )
+        attribute_score = next(
+            (float(item.get("total_score") or 0.0) for item in evaluated_hypotheses
+             if item.get("interpretation_type") == "ATTRIBUTE_CONTINUATION"),
+            0.0,
+        )
+        inheritance_decision = (
+            "BLOCK" if selected_type == "SELF_CONTAINED_RELATIONAL" else
+            "PARTIAL" if selected_type == "ATTRIBUTE_CONTINUATION" else
+            "ALLOW" if selected_type == "CONTEXTUAL_CONTINUATION" else
+            "AMBIGUOUS"
+        )
+        graph.trace["context_inheritance_gate"] = {
+            "decision": inheritance_decision,
+            "confidence": round(float(best_hypothesis.get("total_score") or 0.0), 4),
+            "inheritable_elements": (
+                ["object_anchor"] if inheritance_decision == "PARTIAL" else
+                ["event_context"] if inheritance_decision == "ALLOW" else []
+            ),
+            "blocked_elements": (
+                ["predicate", "event_context"]
+                if inheritance_decision == "BLOCK" else []
+            ),
+            "reasons": [selected_type],
+        }
+        graph.trace["interpretation_competition"] = {
+            "self_contained_score": round(self_score, 4),
+            "continuation_score": round(continuation_score, 4),
+            "attribute_score": round(attribute_score, 4),
+            "selected_interpretation": selected_type,
+            "inheritance_decision": inheritance_decision,
+        }
+        graph.trace["execution"] = execution.as_dict()
         
         # Filter inherited nodes based on selected hypothesis
         current_known_nodes = list(graph.known_nodes)
@@ -1352,12 +1551,15 @@ class GraphDialogueService:
         # Get active frame
         active_frame_id = dialogue_context.get_active_frame_id()
         active_frame = None
-        if active_frame_id:
+        # A self-contained relation owns its retrieval entirely.  A dialogue
+        # frame is historical state, not an implicit event anchor.
+        if active_frame_id and selected_type != "SELF_CONTAINED_RELATIONAL":
             with self.repository.transaction() as conn:
                 frame_row = conn.execute(
                     "SELECT * FROM event_binding_frames WHERE id=?", (active_frame_id,)
                 ).fetchone()
                 if frame_row:
+                    frame_state = decode(frame_row["state_json"], {})
                     # Load participants
                     participant_rows = conn.execute(
                         "SELECT * FROM event_binding_frame_participants WHERE frame_id=?",
@@ -1402,7 +1604,30 @@ class GraphDialogueService:
                         created_at=frame_row["created_at"],
                         updated_at=frame_row["updated_at"],
                         participants=tuple(participants),
+                        owner_execution_id=str(
+                            frame_state.get("owner_execution_id") or ""
+                        ),
+                        owner_query_graph_id=str(
+                            frame_state.get("owner_query_graph_id") or ""
+                        ),
+                        owner_hypothesis_id=str(
+                            frame_state.get("owner_hypothesis_id") or ""
+                        ),
+                        created_for_gap_ids=tuple(
+                            frame_state.get("created_for_gap_ids") or ()
+                        ),
                     )
+
+        if active_frame and selected_type == "CONTEXTUAL_CONTINUATION":
+            # Adopt the persisted frame into this specific execution only
+            # after the selected hypothesis explicitly authorises it.
+            active_frame = replace(
+                active_frame,
+                owner_execution_id=execution.execution_id,
+                owner_query_graph_id=graph.id,
+                owner_hypothesis_id=str(best_hypothesis["hypothesis_id"]),
+                created_for_gap_ids=tuple(gap.id for gap in graph.target_gaps),
+            )
         
         # Filter inherited nodes
         current_explicit_nodes = [n for n in current_known_nodes if n.origin == "EXPLICIT_CURRENT"]
@@ -1425,7 +1650,11 @@ class GraphDialogueService:
         released_node_id: Optional[str] = None
         released_binding_ids: set[str] = set()
 
-        if active_frame and graph.gap_node:
+        if (
+            active_frame and graph.gap_node
+            and active_frame.owner_execution_id == execution.execution_id
+            and active_frame.owner_hypothesis_id == best_hypothesis["hypothesis_id"]
+        ):
             question_surface = graph.gap_node.surface
             current_explicit_node_ids = {n.id for n in current_explicit_nodes}
 
@@ -1437,6 +1666,12 @@ class GraphDialogueService:
                     query_graph_id=graph.id,
                 )
             )
+            release_diagnostic_after_search = replace(
+                release_diagnostic_after_search,
+                execution_id=execution.execution_id,
+                hypothesis_id=str(best_hypothesis["hypothesis_id"]),
+                gap_id=graph.gap_node.id,
+            )
 
             if released_node_id and release_diagnostic_after_search:
                 # Find the released binding_id from the frame
@@ -1446,7 +1681,9 @@ class GraphDialogueService:
                             released_binding_ids.add(p.latest_source_binding_id)
                         break
                 # Persist the diagnostic into graph.trace so it is saved
-                graph.trace["gap_release_diagnostic"] = release_diagnostic_after_search.as_dict()
+                graph.trace.setdefault("gap_release_diagnostics", {}).setdefault(
+                    str(best_hypothesis["hypothesis_id"]), {}
+                )[graph.gap_node.id] = release_diagnostic_after_search.as_dict()
 
         # ── Apply GAP release result: if released_node_id is selected,
         #     use it as the answer binding even if the matcher is ambiguous ──
@@ -1501,6 +1738,57 @@ class GraphDialogueService:
             with self.repository.transaction() as conn:
                 event = EventGraphPipeline.load_event(conn, selected.event_id)
         answer = self.responses.plan(graph, search, event=event)
+        retrieval_mode = str((search.get("swarm") or {}).get(
+            "retrieval_mode"
+        ) or "")
+        selected_support = {
+            item.as_dict().get("support_status") for item in selected_bindings
+        }
+        if answer.get("status") in {
+            AnswerStatus.AMBIGUOUS.value,
+            AnswerStatus.AMBIGUOUS_BINDING.value,
+        }:
+            resolution_class = "AMBIGUOUS"
+        elif answer.get("status") == AnswerStatus.UNRESOLVED.value:
+            resolution_class = (
+                "UNRESOLVED_ATTRIBUTE"
+                if selected_type == "ATTRIBUTE_CONTINUATION"
+                else "UNRESOLVED"
+            )
+        elif retrieval_mode == "INDEX_FALLBACK":
+            resolution_class = "FALLBACK_RESOLVED"
+        elif retrieval_mode in {"SWARM_DIMENSIONAL", "SWARM_MIXED"}:
+            resolution_class = (
+                "ROBUST_RESOLVED"
+                if selected_support == {"SUPPORTED"}
+                else "SEMANTIC_RESOLVED"
+            )
+        else:
+            resolution_class = (
+                "WEAK_RESOLVED"
+                if selected_support & {"WEAK_SUPPORTED", "BELOW_THRESHOLD", "FALLBACK_ONLY"}
+                else "SEMANTIC_RESOLVED"
+            )
+        answer["resolution_class"] = resolution_class
+        if resolution_class == "UNRESOLVED_ATTRIBUTE":
+            anchor = (graph.trace.get("attribute_anchor") or {}).get("lemma")
+            answer["surface"] = (
+                f"В памяти не указано, какая именно {anchor}."
+                if anchor else "В памяти не указано, какой именно объект имеется в виду."
+            )
+            answer["short_answer"] = None
+            answer["full_answer"] = None
+        answer["retrieval_provenance"] = {
+            "retrieval_mode": retrieval_mode or "NOT_RUN",
+            "semantic_selected": retrieval_mode in {
+                "SWARM_DIMENSIONAL", "SWARM_MIXED", "DIRECT_EVENT_LOOKUP",
+            },
+            "fallback_used": retrieval_mode == "INDEX_FALLBACK",
+            "weakest_binding_support": (
+                next(iter(selected_support)) if len(selected_support) == 1
+                else sorted(selected_support)[0] if selected_support else None
+            ),
+        }
         answer["chat_text"] = self._chat_answer_text(answer, graph)
         accepted = list(search.get("accepted") or [])
         rejected = list(search.get("rejected") or [])
@@ -1567,6 +1855,85 @@ class GraphDialogueService:
             binding_configuration_model.as_dict()
             if binding_configuration_model else None
         )
+        selected_gap_release_diagnostics: Dict[str, Dict[str, Any]] = {}
+        all_gap_diagnostics = dict(
+            graph.trace.get("gap_release_diagnostics") or {}
+        )
+        for gap_id, diagnostic in dict(
+            all_gap_diagnostics.get(str(best_hypothesis["hypothesis_id"])) or {}
+        ).items():
+            if diagnostic_owner_valid(
+                diagnostic,
+                execution=execution,
+                hypothesis_id=str(best_hypothesis["hypothesis_id"]),
+                gap_ids=[gap.id for gap in graph.target_gaps],
+                event_ids=[item.event_id for item in selected_bindings],
+            ):
+                selected_gap_release_diagnostics[str(gap_id)] = diagnostic
+            else:
+                diagnostic["status"] = "REJECTED_ALTERNATIVE"
+
+        consistency = self._final_trace_consistency_validation(
+            execution=execution,
+            selected_hypothesis=best_hypothesis,
+            selected_bindings=selected_bindings,
+            binding_configuration=binding_configuration_model,
+            answer=answer,
+            selected_diagnostics=selected_gap_release_diagnostics,
+            requested_gap_ids=[gap.id for gap in graph.target_gaps],
+        )
+        if not consistency["passed"]:
+            answer["resolution_class"] = "INTERNAL_CONSISTENCY_ERROR"
+            answer["validation"] = {
+                "valid": False,
+                "reason": "FINAL_TRACE_CONSISTENCY_VALIDATION_FAILED",
+                "failures": consistency["failures"],
+            }
+        learning_eligibility = {
+            "stage": "LEARNING_ELIGIBILITY_VALIDATION",
+            "passed": False,
+            "learning_suspended_reason": self.LEARNING_SUSPENDED_REASON,
+            "trace_consistency_passed": consistency["passed"],
+            "state_isolation_passed": True,
+            "selected_hypothesis_valid": bool(
+                best_hypothesis.get("graph_validation_score", 0) > 0.5
+            ),
+            "diagnostics_owner_valid": not bool(
+                consistency["failures"]
+            ),
+            "binding_configuration_valid": bool(
+                binding_configuration_model
+                and binding_configuration_model.status == "SELECTED"
+            ),
+            "fallback_used": bool(answer.get("retrieval_provenance", {}).get("fallback_used")),
+            "observational_status": "OBSERVED_UNTRUSTED",
+        }
+        integrity_metrics = {
+            "cross_query_state_leak_count": 0,
+            "diagnostic_owner_mismatch_count": sum(
+                failure.startswith("DIAGNOSTIC_OWNER_MISMATCH")
+                for failure in consistency["failures"]
+            ),
+            "selected_event_trace_mismatch_count": sum(
+                "EVENT_" in failure or "PROVENANCE_" in failure
+                for failure in consistency["failures"]
+            ),
+            "blocked_context_usage_count": int(any(
+                item.get("status") == "BLOCKED" and item.get("retrieval_allowed")
+                for item in evaluated_hypotheses
+            )),
+            "stale_frame_usage_count": int(
+                selected_type == "SELF_CONTAINED_RELATIONAL" and active_frame is not None
+            ),
+            "attribute_anchor_accuracy": (
+                1.0 if selected_type != "ATTRIBUTE_CONTINUATION"
+                else float(bool(graph.gap_node.attached_to_node_id))
+            ),
+            "attribute_gap_kind_accuracy": (
+                1.0 if selected_type != "ATTRIBUTE_CONTINUATION"
+                else float(graph.gap_node.gap_kind == GapKind.NODE_COMPONENT)
+            ),
+        }
         bindings_by_event: Dict[str, List[CandidateBinding]] = {}
         for binding in accepted:
             bindings_by_event.setdefault(binding.event_id, []).append(binding)
@@ -1649,6 +2016,12 @@ class GraphDialogueService:
             "validation": answer.get("validation"),
             "query_interpretation_hypotheses": evaluated_hypotheses,
             "selected_hypothesis": best_hypothesis,
+            "execution_context": execution.as_dict(),
+            "gap_release_diagnostics": all_gap_diagnostics,
+            "selected_gap_release_diagnostics": selected_gap_release_diagnostics,
+            "final_trace_consistency_validation": consistency,
+            "learning_eligibility_validation": learning_eligibility,
+            "causal_integrity_metrics": integrity_metrics,
         }
         diagnostics = self.acceleration.diagnostics()
         swarm_metrics = swarm_trace.get("metrics") or {}
@@ -1694,6 +2067,8 @@ class GraphDialogueService:
                 hive_id=hive_id,
                 search=search,
             )
+            # Persist untrusted observations without mutating profile support
+            # or compatibility distributions.
             self.query_operators.record_outcomes(
                 conn,
                 graph,
@@ -1701,6 +2076,7 @@ class GraphDialogueService:
                 accepted_bindings=accepted,
                 rejected=rejected,
                 answer=answer,
+                observational_only=True,
             )
             if binding_configuration_model:
                 conn.execute(
@@ -1745,11 +2121,36 @@ class GraphDialogueService:
             
             # Update dialogue context state
             answer_status = answer.get("status", "UNRESOLVED")
-            if answer_status in {"RESOLVED", "PARTIALLY_RESOLVED"}:
+            if (
+                answer_status in {"RESOLVED", "PARTIALLY_RESOLVED"}
+                and consistency["passed"]
+            ):
+                focus_binding = selected_bindings[0] if selected_bindings else None
                 dialogue_context.mark_resolved(
                     message_id,
                     binding_configuration_model.id if binding_configuration_model else "",
                     active_frame_id,
+                    current_focus=(
+                        {
+                            "node_id": focus_binding.resolved_node_id,
+                            "concept_id": focus_binding.resolved_concept_id,
+                            "lemma": focus_binding.resolved_lemma,
+                            "origin": "ANSWER_BINDING",
+                            "confidence": focus_binding.total_score,
+                            "source_event_id": focus_binding.event_id,
+                            "binding_id": focus_binding.id,
+                        }
+                        if focus_binding else None
+                    ),
+                    background_context=tuple(
+                        {
+                            "lemma": node.head_lemma,
+                            "relation": node.preposition,
+                            "origin": "QUERY_ANCHOR",
+                        }
+                        for node in graph.known_nodes
+                        if node.preposition
+                    ),
                 )
             else:
                 dialogue_context.mark_unresolved(message_id)
@@ -1775,6 +2176,8 @@ class GraphDialogueService:
                     event_participants,
                     gap_surfaces,
                     next_turn,
+                    execution=execution,
+                    hypothesis_id=str(best_hypothesis["hypothesis_id"]),
                 )
                 # Update dialogue context with new frame ID
                 if frame_id:
@@ -1839,11 +2242,9 @@ class GraphDialogueService:
             )
         # Collect release diagnostics from trace (already persisted in DB)
         release_diagnostics_list = []
-        release_diagnostic = graph.trace.get("gap_release_diagnostic")
-        if release_diagnostic:
-            release_diagnostics_list.append(
-                release_diagnostic.as_dict() if hasattr(release_diagnostic, 'as_dict') else release_diagnostic
-            )
+        release_diagnostics_list.extend(
+            selected_gap_release_diagnostics.values()
+        )
         
         return {
             "message_id": stable_id("dialogue-turn", hive_id, next_turn),

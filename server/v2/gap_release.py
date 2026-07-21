@@ -107,6 +107,10 @@ class GapReleaseDiagnostic:
     frame_id: Optional[str]
     event_id: Optional[str]
     question_family_key: Optional[str]
+    execution_id: str = ""
+    hypothesis_id: str = ""
+    gap_id: str = ""
+    status: str = "SELECTED"
 
     candidates: Sequence[GapReleaseCandidate] = ()
 
@@ -121,6 +125,10 @@ class GapReleaseDiagnostic:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "query_graph_id": self.query_graph_id,
+            "execution_id": self.execution_id,
+            "hypothesis_id": self.hypothesis_id,
+            "gap_id": self.gap_id,
+            "status": self.status,
             "frame_id": self.frame_id,
             "event_id": self.event_id,
             "question_family_key": self.question_family_key,

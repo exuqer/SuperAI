@@ -754,7 +754,7 @@ def test_boolean_gap_checks_polarity():
     )
 
 
-def test_resolved_answer_creates_dependent_training_episode_not_world_event():
+def test_resolved_answer_is_observed_without_learning_or_world_event_mutation():
     repository, training, dialogue = services()
     training.train("Борис настроил датчик.", independent_key="episode")
     result = ask(dialogue, "Кто настроил датчик?")
@@ -764,11 +764,11 @@ def test_resolved_answer_creates_dependent_training_episode_not_world_event():
             """SELECT eligible_for_learning,event_ids_json
                FROM training_episodes"""
         ).fetchone()
-        assert int(episode["eligible_for_learning"]) == 1
+        assert int(episode["eligible_for_learning"]) == 0
         assert conn.execute(
             """SELECT COUNT(*) FROM knowledge_sources
                WHERE source_type='dialogue_question' AND status='STAGED'"""
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
         assert conn.execute(
             "SELECT COUNT(*) FROM graph_events"
         ).fetchone()[0] == 1
