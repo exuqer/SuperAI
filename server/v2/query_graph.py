@@ -69,14 +69,74 @@ class QueryGraphBuilder:
         self.query_operators = QueryOperatorLearner()
 
     @staticmethod
+    def _passive_perspective_relation(
+        analysis: Any,
+        predicate: Optional[PredicateNode],
+        known_nodes: Sequence[MentionNode],
+        questions: Sequence[Any],
+    ) -> Dict[str, Any]:
+        """Classify passive-result evidence without changing stored events."""
+        if predicate is None or predicate.token_index is None:
+            return {
+                "passive_perspective_status": "REJECTED",
+                "predicate_perspective_relation": None,
+            }
+        token = analysis.tokens[predicate.token_index]
+        has_question = bool(questions)
+        instrumental = any(
+            node.features.get("case") == "ablt"
+            for node in known_nodes
+        )
+        if token.pos == "PRTS" and has_question and instrumental:
+            return {
+                "passive_perspective_status": "CONFIRMED",
+                "predicate_perspective_relation": {
+                    "perspective": "PASSIVE_RESULT",
+                    "origin": "MORPHOLOGICAL",
+                    "confidence": 0.85,
+                    "evidence": [
+                        "short_passive_participle",
+                        "question_operator",
+                        "predicate_position",
+                        "instrumental_participant",
+                    ],
+                },
+            }
+        if token.pos == "PRTF" or (
+            token.pos == "PRTS"
+            and any(item.lemma == "быть" and item.index < token.index
+                    for item in analysis.tokens)
+        ):
+            return {
+                "passive_perspective_status": "SHADOW",
+                "predicate_perspective_relation": None,
+            }
+        return {
+            "passive_perspective_status": (
+                "AMBIGUOUS" if token.pos == "PRTS" else "REJECTED"
+            ),
+            "predicate_perspective_relation": None,
+        }
+
+    @staticmethod
     def _default_gap_kind(
         analysis: Any,
         question: Optional[Any] = None,
     ) -> GapKind:
         question = question or analysis.question_operator
+        # A typed interrogative noun phrase is an attribute question only
+        # when it is self-contained.  Once the clause supplies a predicate,
+        # the noun constrains the missing event participant instead of naming
+        # an already resolved node (``Какие кусочки лежат...``).
+        typed_event_question = bool(
+            question
+            and question.type_constraint_token_index is not None
+            and getattr(analysis, "predicate", None) is not None
+        )
         if (
             question
             and str(getattr(question, "operator_type", "")) == "NODE_COMPONENT"
+            and not typed_event_question
             and not (
                 question.type_constraint_token_index is not None
                 and question.token_indices[0] > 0
@@ -91,6 +151,8 @@ class QueryGraphBuilder:
                 and analysis.tokens[question_index - 1].pos == "PREP"
             ):
                 return GapKind.RELATION_VALUE
+            if typed_event_question:
+                return GapKind.EVENT_ATTACHMENT
             return GapKind.NODE_COMPONENT
         if question:
             token = analysis.tokens[question.token_indices[0]]
@@ -159,7 +221,7 @@ class QueryGraphBuilder:
                     and int(question.type_constraint_token_index)
                     in mention.token_indices for question in questions)
             )
-            if typed_head and gap_kind == GapKind.RELATION_VALUE:
+            if typed_head and gap_kind != GapKind.NODE_COMPONENT:
                 continue
             if (
                 set(mention.token_indices).issubset(question_indices)
@@ -420,7 +482,17 @@ class QueryGraphBuilder:
             )
             graph = QueryGraph(
                 id=graph_id,
-                predicate=previous_graph.predicate,
+                predicate=replace(
+                    previous_graph.predicate,
+                    token_index=None,
+                    origin="INHERITED",
+                    source_token_index=(
+                        previous_graph.predicate.source_token_index
+                        if previous_graph.predicate.source_token_index is not None
+                        else previous_graph.predicate.token_index
+                    ),
+                    inherited_from_query_graph_id=previous_graph.id,
+                ),
                 known_nodes=tuple(previous_graph.known_nodes),
                 gap_node=gap,
                 target_gaps=(gap,),
@@ -506,6 +578,12 @@ class QueryGraphBuilder:
                 ) else None
             )
         )
+        passive_perspective = self._passive_perspective_relation(
+            analysis,
+            predicate,
+            current_known_nodes,
+            questions,
+        )
         known_nodes = list(current_known_nodes)
         if previous_graph and not predicate_token and known_nodes and not questions:
             # A bare noun after an answered question replaces the known node
@@ -518,7 +596,17 @@ class QueryGraphBuilder:
             )
             graph = QueryGraph(
                 id=graph_id,
-                predicate=previous_graph.predicate,
+                predicate=replace(
+                    previous_graph.predicate,
+                    token_index=None,
+                    origin="INHERITED",
+                    source_token_index=(
+                        previous_graph.predicate.source_token_index
+                        if previous_graph.predicate.source_token_index is not None
+                        else previous_graph.predicate.token_index
+                    ),
+                    inherited_from_query_graph_id=previous_graph.id,
+                ),
                 known_nodes=tuple(known_nodes),
                 gap_node=gap,
                 target_gaps=(gap,),
@@ -721,10 +809,28 @@ class QueryGraphBuilder:
         )
         for index, operator in enumerate(questions or (None,)):
             signature = self.observations.question_signature(analysis, operator)
-            current_kind = gap_kind if index == 0 else self._default_gap_kind(
-                analysis, operator
+            operator_kind = self._default_gap_kind(analysis, operator)
+            typed_event = bool(
+                operator
+                and operator.type_constraint_token_index is not None
+                and operator_kind == GapKind.EVENT_ATTACHMENT
+            )
+            # A learned construction may refine ordinary questions, but it
+            # must not turn the observed ``typed NP + predicate`` structure
+            # back into an attribute lookup.
+            current_kind = (
+                operator_kind
+                if typed_event or index > 0 else gap_kind
             )
             slots = compatible_slots if index == 0 else {}
+            type_constraint: Dict[str, Any] = {}
+            if operator and operator.type_constraint_token_index is not None:
+                type_token = analysis.tokens[int(operator.type_constraint_token_index)]
+                type_constraint = {
+                    "lemma": type_token.lemma.casefold(),
+                    "number": type_token.features.get("number"),
+                    "origin": "EXPLICIT_TYPED_QUESTION",
+                }
             target_gaps.append(GapNode(
                 id=stable_id("gap", graph_id, index),
                 gap_kind=current_kind,
@@ -741,6 +847,8 @@ class QueryGraphBuilder:
                     "question_surface": operator.surface if operator else "",
                     "requested": True,
                     "operator_index": index,
+                    "type_constraint": type_constraint or None,
+                    "type_constraint_lemma": type_constraint.get("lemma", ""),
                 },
             ))
         # The learned query-operator model is intentionally shadow-only in
@@ -898,7 +1006,9 @@ class QueryGraphBuilder:
                     and is_referential_continuation else None
                 ),
                 "predicate_perspective_relation": (
-                    {
+                    passive_perspective["predicate_perspective_relation"]
+                    if passive_perspective["predicate_perspective_relation"]
+                    else {
                         "source_predicate": previous_graph.predicate.lemma,
                         "target_predicate": predicate.lemma if predicate else "",
                         "scope": "LOCAL_EVENT_ANCHOR",
@@ -909,6 +1019,12 @@ class QueryGraphBuilder:
                     and previous_graph.predicate.concept_id != predicate.concept_id
                     else None
                 ),
+                # A direct short-passive query has a local morphological
+                # perspective.  Referential predicate changes retain their
+                # established relation above; the two are never merged.
+                "passive_perspective_status": passive_perspective[
+                    "passive_perspective_status"
+                ],
                 "released_previous_node": released_node.as_dict()
                 if released_node else None,
                 # Pre-build release scoring is intentionally not promoted to
@@ -1167,6 +1283,39 @@ class GraphMatcher:
         return 1.0 / min(distances) if distances else 0.0
 
     @staticmethod
+    def _passive_perspective_fit(
+        graph: QueryGraph,
+        participant: Optional[Any],
+    ) -> tuple[float, float, float]:
+        """Return local support/conflict/pivot scores for a short passive.
+
+        The calculation intentionally uses only observed morphology of the
+        current event.  It is a query-local projection, never a role written
+        back to the event graph.
+        """
+        relation = graph.trace.get("predicate_perspective_relation") or {}
+        if (
+            relation.get("perspective") != "PASSIVE_RESULT"
+            or participant is None
+        ):
+            return 0.0, 0.0, 0.0
+        observed_cases = {
+            str(item.get("case") or "")
+            for item in participant.mention.features.get(
+                "morphology_alternatives", []
+            )
+        }
+        observed_cases.add(str(participant.mention.features.get("case") or ""))
+        # Surface-syncretic inanimate nouns retain their accusative analysis;
+        # do not discard it merely because the parser chose nominative as its
+        # default standalone reading.
+        if "accs" in observed_cases:
+            return 1.0, 0.0, 0.90
+        if "nomn" in observed_cases:
+            return 0.0, 1.0, 0.0
+        return 0.0, 0.0, 0.0
+
+    @staticmethod
     def _question_morphology_fit(
         graph: QueryGraph,
         signature: Optional[ObservationSignature],
@@ -1269,6 +1418,31 @@ class GraphMatcher:
         return candidates
 
     @staticmethod
+    def _type_constraint(gap: GapNode) -> Mapping[str, Any]:
+        if gap.gap_kind != GapKind.EVENT_ATTACHMENT:
+            return {}
+        value = gap.evidence.get("type_constraint") or {}
+        return value if isinstance(value, Mapping) else {}
+
+    @classmethod
+    def _matches_type_constraint(
+        cls,
+        gap: GapNode,
+        *,
+        lemma: str,
+        features: Mapping[str, Any],
+    ) -> bool:
+        constraint = cls._type_constraint(gap)
+        required_lemma = str(constraint.get("lemma") or "").casefold()
+        if required_lemma and str(lemma).casefold() != required_lemma:
+            return False
+        required_number = str(constraint.get("number") or "")
+        actual_number = str(features.get("number") or "")
+        return not (
+            required_number and actual_number and required_number != actual_number
+        )
+
+    @staticmethod
     def _required_relation(graph: QueryGraph) -> Mapping[str, Any]:
         return next(
             (
@@ -1288,7 +1462,7 @@ class GraphMatcher:
         """Bind all requested gaps as one distinct participant configuration."""
         accepted: List[CandidateBinding] = []
         rejected: List[Dict[str, Any]] = []
-        configurations: List[tuple[float, List[CandidateBinding]]] = []
+        configurations: List[tuple[float, List[CandidateBinding], str]] = []
         anchor_id = str(graph.trace.get("event_anchor_id") or "")
         with self.repository.transaction() as conn:
             where_anchor = " AND e.id=?" if anchor_id else ""
@@ -1323,6 +1497,7 @@ class GraphMatcher:
                 alternatives: List[List[tuple[Any, float, float]]] = []
                 for gap in graph.target_gaps:
                     choices: List[tuple[Any, float, float]] = []
+                    type_constraint = self._type_constraint(gap)
                     cases = {
                         key.removeprefix("morph:case:")
                         for key in gap.question_signature.values
@@ -1330,6 +1505,12 @@ class GraphMatcher:
                     }
                     for participant in event.participants:
                         if participant.id in unavailable:
+                            continue
+                        if type_constraint and not self._matches_type_constraint(
+                            gap,
+                            lemma=participant.mention.head_lemma,
+                            features=participant.mention.features,
+                        ):
                             continue
                         observed_case = str(
                             participant.mention.features.get("case") or ""
@@ -1346,7 +1527,12 @@ class GraphMatcher:
                     rejected.append({
                         "event_id": event.id,
                         "status": "REJECTED",
-                        "failed_constraint": "GAP_BINDING",
+                        "failed_constraint": (
+                            "TYPE_CONSTRAINT"
+                            if any(self._type_constraint(gap) and not choices
+                                   for gap, choices in zip(graph.target_gaps, alternatives))
+                            else "GAP_BINDING"
+                        ),
                         "reason": "NOT_ALL_REQUESTED_GAPS_BOUND",
                     })
                     continue
@@ -1414,7 +1600,7 @@ class GraphMatcher:
                         best, best_score = bindings, score
                 if best:
                     accepted.extend(best)
-                    configurations.append((best_score, best))
+                    configurations.append((best_score, best, event.source_surface))
         if not configurations:
             return {
                 "accepted": accepted,
@@ -1425,27 +1611,45 @@ class GraphMatcher:
             }
         configuration_event_ids = {
             bindings[0].event_id
-            for _, bindings in configurations
+            for _, bindings, _ in configurations
             if bindings
         }
-        if (
-            len(configuration_event_ids) > 1
-            and not graph.known_nodes
-            and not anchor_id
-        ):
-            return {
-                "accepted": accepted,
-                "rejected": rejected,
-                "selected_bindings": [],
-                "status": AnswerStatus.AMBIGUOUS_BINDING.value,
-                "reason": "MULTIPLE_UNCONSTRAINED_EVENTS",
-            }
-        _, selected_bindings = max(configurations, key=lambda item: item[0])
-        selected_bindings = [replace(item, status=BindingStatus.SELECTED)
-                             for item in selected_bindings]
+        selected_configurations = (
+            configurations if len(configuration_event_ids) > 1
+            else [max(configurations, key=lambda item: item[0])]
+        )
+        selected_bindings: List[CandidateBinding] = []
+        configuration_views: List[Dict[str, Any]] = []
+        for score, bindings, source_surface in selected_configurations:
+            event_id = bindings[0].event_id
+            configuration_id = stable_id("binding-configuration", graph.id, event_id)
+            scoped_bindings = [replace(
+                binding,
+                status=BindingStatus.SELECTED,
+                selection_status="SELECTED",
+                configuration_id=configuration_id,
+            ) for binding in bindings]
+            selected_bindings.extend(scoped_bindings)
+            configuration_views.append({
+                "configuration_id": configuration_id,
+                "query_graph_id": graph.id,
+                "event_id": event_id,
+                "bindings_by_gap": {
+                    binding.gap_node_id: binding.as_dict()
+                    for binding in scoped_bindings
+                },
+                "all_required_gaps_bound": True,
+                "distinct_node_count": len({
+                    binding.resolved_node_id for binding in scoped_bindings
+                }),
+                "configuration_score": max(0.0, min(1.0, score)),
+                "status": "SELECTED",
+                "source_surface": source_surface,
+            })
         selected_ids = {item.id for item in selected_bindings}
         accepted = [
-            replace(item, status=BindingStatus.SELECTED) if item.id in selected_ids else item
+            next((selected for selected in selected_bindings if selected.id == item.id), item)
+            if item.id in selected_ids else item
             for item in accepted
         ]
         result = {
@@ -1453,6 +1657,10 @@ class GraphMatcher:
             "rejected": rejected,
             "selected_bindings": selected_bindings,
             "status": AnswerStatus.RESOLVED.value,
+            "selection_scope": (
+                "MULTI_EVENT" if len(configuration_views) > 1 else "SINGLE_EVENT"
+            ),
+            "binding_configurations": configuration_views,
         }
         return result
 
@@ -1612,6 +1820,7 @@ class GraphMatcher:
                             else slot_score
                         )
                         candidates.append({
+                            "participant": participant,
                             "node_id": participant.id,
                             "concept_id": (
                                 participant.mention.entity_id
@@ -1649,6 +1858,26 @@ class GraphMatcher:
                         "reason": "NO_COMPATIBLE_UNBOUND_NODE",
                     })
                     continue
+                type_constraint = self._type_constraint(graph.gap_node)
+                if type_constraint:
+                    typed_candidates = [
+                        candidate for candidate in candidates
+                        if self._matches_type_constraint(
+                            graph.gap_node,
+                            lemma=str(candidate["lemma"]),
+                            features=dict(candidate.get("features") or {}),
+                        )
+                    ]
+                    if not typed_candidates:
+                        rejected.append({
+                            "event_id": event.id,
+                            "status": "REJECTED",
+                            "failed_constraint": "TYPE_CONSTRAINT",
+                            "reason": "TYPED_EVENT_ATTACHMENT_MISMATCH",
+                            "type_constraint": dict(type_constraint),
+                        })
+                        continue
+                    candidates = typed_candidates
                 for candidate in candidates:
                     if self._excluded(
                         graph,
@@ -1685,6 +1914,11 @@ class GraphMatcher:
                             candidate.get("signature"),
                         )
                     )
+                    perspective_support, perspective_conflict, surface_pivot_support = (
+                        self._passive_perspective_fit(
+                            graph, candidate.get("participant"),
+                        )
+                    )
                     requested_gap_conflict = (
                         0.12 * (1.0 - structural_attachment_fit)
                         if candidate.get("slot_compatibility_state")
@@ -1700,7 +1934,10 @@ class GraphMatcher:
                         + 0.16 * evidence_score
                         + 0.12 * morphology_fit
                         + 0.06 * structural_attachment_fit
+                        + 0.18 * perspective_support
+                        + 0.06 * surface_pivot_support
                         - 0.28 * morphology_conflict
+                        - 0.34 * perspective_conflict
                         - requested_gap_conflict,
                     ))
                     binding = CandidateBinding(
@@ -1744,6 +1981,9 @@ class GraphMatcher:
                                 "structural_attachment": structural_attachment_fit,
                                 "morphology_conflict": morphology_conflict,
                                 "requested_gap_conflict": requested_gap_conflict,
+                                "perspective_support": perspective_support,
+                                "perspective_conflict": perspective_conflict,
+                                "surface_pivot_support": surface_pivot_support,
                             },
                             "question_morphology_evidence": morphology_evidence,
                             "slot_compatibility": {
@@ -1930,10 +2170,27 @@ class GraphResponsePlanner:
         ]
         selected = selected_bindings[0] if selected_bindings else None
         status = str(search.get("status") or AnswerStatus.UNRESOLVED.value)
+        selection_scope = str(search.get("selection_scope") or "SINGLE_EVENT")
         if status in {
             AnswerStatus.AMBIGUOUS.value,
             AnswerStatus.AMBIGUOUS_BINDING.value,
         }:
+            ambiguity_candidates = [
+                binding for binding in search.get("accepted", [])
+                if isinstance(binding, CandidateBinding)
+            ]
+            gap_ids = {binding.gap_node_id for binding in ambiguity_candidates}
+            if len(gap_ids) > 1:
+                return {
+                    "status": AnswerStatus.CONFLICTED.value,
+                    "short_answer": None,
+                    "full_answer": None,
+                    "surface": None,
+                    "validation": {
+                        "valid": False,
+                        "reason": "CROSS_GAP_AMBIGUITY_ERROR",
+                    },
+                }
             alternatives = [
                 binding.resolved_surface
                 for binding in search.get("accepted", [])[:2]
@@ -1954,6 +2211,49 @@ class GraphResponsePlanner:
                         or "leading bindings have no stable margin"
                     ),
                 },
+            }
+        if (
+            status == AnswerStatus.RESOLVED.value
+            and selection_scope == "MULTI_EVENT"
+        ):
+            configurations = list(search.get("binding_configurations") or [])
+            surfaces = [
+                self._punctuate(str(item.get("source_surface") or ""))
+                for item in configurations
+                if item.get("source_surface")
+            ]
+            complete = all(
+                bool(item.get("all_required_gaps_bound"))
+                and len(item.get("bindings_by_gap") or {}) == len(graph.target_gaps)
+                for item in configurations
+            )
+            # Keep each source event intact: a concise stylistic realization
+            # can be added later, but no renderer may split a pair into
+            # cross-GAP alternatives.
+            surface = " ".join(surfaces)
+            valid = bool(surfaces) and complete
+            return {
+                "status": AnswerStatus.RESOLVED.value if valid else AnswerStatus.BUILD_FAILED.value,
+                "short_answer": surface if valid else None,
+                "full_answer": surface if valid else None,
+                "surface": surface if valid else None,
+                "resolution_class": "MULTI_EVENT_RESOLVED" if valid else "",
+                "selection_scope": "MULTI_EVENT",
+                "binding_configurations": configurations,
+                "selected_bindings": [item.as_dict() for item in selected_bindings],
+                "provenance": {
+                    "source_event_ids": [
+                        str(item.get("event_id")) for item in configurations
+                    ],
+                    "independent_source_count": len(configurations),
+                },
+                "validation": {
+                    "valid": valid,
+                    "configuration_count": len(configurations),
+                    "all_configurations_complete": complete,
+                    "selection_scope": "MULTI_EVENT",
+                },
+                "versions": ModelVersions().as_dict(),
             }
         if not isinstance(selected, CandidateBinding):
             return {

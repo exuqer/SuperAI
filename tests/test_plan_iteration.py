@@ -303,6 +303,73 @@ def test_multi_gap_contract_is_canonical_and_learns_one_configuration():
     assert decode(configuration["validation_json"], {})["valid"] is True
 
 
+def test_passive_typed_and_multi_event_regressions_are_structural():
+    _, training, dialogue = services()
+    training.train(
+        "Девочка нарезала помидор ножом.",
+        independent_key="passive-result",
+    )
+    passive = dialogue.query(
+        dialogue.create()["hive"]["id"],
+        "Что нарезано ножом?",
+    )
+    assert passive["answer"]["surface"] == "помидор."
+    assert passive["query_graph"]["trace"]["passive_perspective_status"] == "CONFIRMED"
+    components = {
+        item["resolved_lemma"]: item["evidence"][0]["score_components"]
+        for item in passive["trace"]["candidate_bindings"]
+    }
+    assert components["помидор"]["perspective_support"] > 0
+    assert components["девочка"]["perspective_conflict"] > 0
+
+    training.train(
+        "Кусочки помидора лежат в миске.",
+        independent_key="typed-components",
+    )
+    typed = dialogue.query(
+        dialogue.create()["hive"]["id"],
+        "Какие кусочки лежат в миске?",
+    )
+    gap = typed["query_graph"]["event_pattern"]["target_gap"]
+    assert gap["gap_kind"] == "EVENT_ATTACHMENT"
+    assert gap["evidence"]["type_constraint"]["lemma"] == "кусочек"
+    assert typed["answer"]["surface"] == "Кусочки помидора."
+    assert typed["query_graph"]["event_pattern"]["known_nodes"][0]["head"]["lemma"] == "миска"
+
+    training.train("Яблоко упало со стола.", independent_key="fall-apple")
+    training.train("Помидор упал с подоконника.", independent_key="fall-tomato")
+    multi = dialogue.query(
+        dialogue.create()["hive"]["id"],
+        "Откуда и что упало?",
+    )
+    assert multi["answer"]["status"] == "RESOLVED"
+    assert multi["answer"]["resolution_class"] == "MULTI_EVENT_RESOLVED"
+    assert multi["selection_scope"] == "MULTI_EVENT"
+    assert len(multi["binding_configurations"]) == 2
+    assert len(multi["selected_bindings"]) == 4
+    assert multi["trace"]["final_trace_consistency_validation"]["passed"]
+
+
+def test_anchored_direct_lookup_is_not_reported_as_semantic_retrieval():
+    _, training, dialogue = services()
+    training.train(
+        "Механик дал роботу болт.",
+        independent_key="anchored-direct",
+    )
+    hive_id = dialogue.create()["hive"]["id"]
+    dialogue.query(hive_id, "Кто дал роботу болт?")
+    follow_up = dialogue.query(hive_id, "Кому?")
+
+    provenance = follow_up["answer"]["retrieval_provenance"]
+    assert provenance["retrieval_class"] == "ANCHORED_DIRECT"
+    assert provenance["semantic_selected"] is False
+    assert provenance["event_anchor_used"] is True
+    assert (
+        follow_up["trace"]["swarm"]["gap_swarms"][0]["termination_reason"]
+        == "DIRECT_EVENT_LOOKUP_COMPLETED"
+    )
+
+
 def test_incomplete_multi_gap_configuration_stays_unresolved():
     _, training, dialogue = services()
     training.train(

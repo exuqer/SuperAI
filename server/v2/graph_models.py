@@ -205,6 +205,9 @@ class MentionComponent:
     token_index: int
     attachment_signature: ObservationSignature
     required: bool = True
+    grammatical_features: Mapping[str, Any] = field(default_factory=dict)
+    evidence: Sequence[str] = ()
+    confidence: float = 0.82
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -214,6 +217,9 @@ class MentionComponent:
             "token_index": self.token_index,
             "attachment_signature": self.attachment_signature.as_dict(),
             "required": bool(self.required),
+            "grammatical_features": _plain(self.grammatical_features),
+            "evidence": list(self.evidence),
+            "confidence": _clamp(self.confidence),
         }
 
 
@@ -525,6 +531,7 @@ class CandidateBinding:
     # not collapse into the historical BindingStatus enum.
     selection_status: str = ""
     support_status: str = ""
+    configuration_id: str = ""
 
     def __post_init__(self) -> None:
         if self.slot_compatibility_state not in {
@@ -573,6 +580,7 @@ class CandidateBinding:
             "status": self.status.value,
             "selection_status": self.selection_status or self.status.value,
             "support_status": self._support_status(),
+            "configuration_id": self.configuration_id or None,
             "failed_constraint": self.failed_constraint,
             "slot_compatibility_state": self.slot_compatibility_state,
             "evidence": _plain(self.evidence),
@@ -731,6 +739,9 @@ def mention_node_from_dict(value: Mapping[str, Any]) -> MentionNode:
                     item.get("attachment_signature") or {}
                 ),
                 required=bool(item.get("required", True)),
+                grammatical_features=dict(item.get("grammatical_features") or {}),
+                evidence=tuple(item.get("evidence") or ()),
+                confidence=float(item.get("confidence") or 0.82),
             )
             for item in value.get("components") or ()
         ),
@@ -865,4 +876,5 @@ def candidate_binding_from_dict(
         ),
         selection_status=str(value.get("selection_status") or ""),
         support_status=str(value.get("support_status") or ""),
+        configuration_id=str(value.get("configuration_id") or ""),
     )

@@ -396,7 +396,7 @@ def test_permutation_uses_known_node_and_gap_signatures_together():
     assert result["candidate_bindings"][1]["scores"]["structural"] < 1.0
 
 
-def test_node_component_gap_returns_observed_modifier():
+def test_typed_event_gap_returns_observed_full_mention():
     _, training, dialogue = services()
     training.train(
         "Бабочки живут короткую жизнь.",
@@ -404,9 +404,9 @@ def test_node_component_gap_returns_observed_modifier():
     )
     result = ask(dialogue, "Какую жизнь живут бабочки?")
     assert result["query_graph"]["event_pattern"]["gap_node"]["gap_kind"] == (
-        "NODE_COMPONENT"
+        "EVENT_ATTACHMENT"
     )
-    assert result["answer"]["surface"] == "короткую."
+    assert result["answer"]["surface"] == "короткую жизнь."
 
 
 def test_required_mention_component_rejects_conflicting_event():

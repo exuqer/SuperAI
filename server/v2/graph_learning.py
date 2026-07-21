@@ -123,6 +123,27 @@ class ObservationBuilder:
                 token_index=token.index,
                 attachment_signature=ObservationSignature(attachment),
             ))
+        # A following genitive noun is not an adjective-like modifier.  It is
+        # nevertheless a visible component of the maximal noun phrase and
+        # must survive event persistence (``кусочки помидора``).
+        if mention.owner_token is not None:
+            owner = tokens[int(mention.owner_token)]
+            components.append(MentionComponent(
+                id=stable_id("component", namespace, owner.index, owner.lemma),
+                lemma=owner.lemma.casefold(),
+                surface=owner.surface,
+                token_index=owner.index,
+                attachment_signature=ObservationSignature({
+                    "construction:noun_genitive_dependency": 0.96,
+                    "position:after_head": 0.90,
+                }),
+                grammatical_features=dict(owner.features),
+                evidence=(
+                    "noun_genitive_dependency",
+                    "adjacent_noun_phrase",
+                ),
+                confidence=float(getattr(mention, "confidence", 0.82)),
+            ))
         head = tokens[mention.head]
         entity_id = stable_id("entity", head.lemma.casefold())
         retained_indices = tuple(

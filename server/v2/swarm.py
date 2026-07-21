@@ -679,10 +679,13 @@ class GapSwarmCoordinator:
             for gap_id in plan.requested_gap_ids:
                 run_id = stable_id("swarm-run", graph.id, gap_id)
                 termination = (
-                    "GRAPH_ADMITTED_RESULT"
+                    "DIRECT_EVENT_LOOKUP_COMPLETED"
+                    if candidate_event_ids
+                    and retrieval_mode == "DIRECT_EVENT_LOOKUP"
+                    else "DIMENSION_SEMANTIC_COMPLETED"
                     if candidate_event_ids
                     and retrieval_mode == "SWARM_DIMENSIONAL"
-                    else "STABLE_CANDIDATES"
+                    else "DIMENSION_SEMANTIC_COMPLETED"
                     if candidate_event_ids
                     and retrieval_mode == "SWARM_MIXED"
                     else "INDEX_FALLBACK_COMPLETED"

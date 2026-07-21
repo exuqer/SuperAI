@@ -808,6 +808,11 @@ class EventGraphPipeline:
                         item.get("attachment_signature") or {}
                     ),
                     required=bool(item.get("required", True)),
+                    grammatical_features=dict(
+                        item.get("grammatical_features") or {}
+                    ),
+                    evidence=tuple(item.get("evidence") or ()),
+                    confidence=float(item.get("confidence") or 0.82),
                 )
                 for item in components
             )
@@ -920,6 +925,11 @@ class EventGraphPipeline:
                         item.get("attachment_signature") or {}
                     ),
                     required=bool(item.get("required", True)),
+                    grammatical_features=dict(
+                        item.get("grammatical_features") or {}
+                    ),
+                    evidence=tuple(item.get("evidence") or ()),
+                    confidence=float(item.get("confidence") or 0.82),
                 )
                 for item in components
             )

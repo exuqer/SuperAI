@@ -593,7 +593,9 @@ class GraphDialogueService:
     ) -> List[Dict[str, Any]]:
         """Build competing query interpretation hypotheses for the current query."""
         hypotheses = []
-        has_explicit_entity = len(graph.known_nodes) > 0
+        has_explicit_entity = any(
+            node.origin == "EXPLICIT_CURRENT" for node in graph.known_nodes
+        )
         has_question_operator = graph.gap_node.surface != "" if graph.gap_node else True
         implicit_relation = bool(
             (graph.trace.get("predicate_hypothesis") or {}).get("predicate_origin")
@@ -629,13 +631,21 @@ class GraphDialogueService:
                 "event_anchor_id": None,
             })
 
-        if previous_graph and (is_short_question or implicit_relation):
+        has_inherited_predicate = bool(
+            graph.predicate and graph.predicate.origin == "INHERITED"
+        )
+        if previous_graph and (
+            is_short_question or implicit_relation or continuation_marker
+            or has_inherited_predicate
+        ):
             hypotheses.append({
                 "hypothesis_index": len(hypotheses),
                 "interpretation_type": "CONTEXTUAL_CONTINUATION",
                 "prior_score": (
                     0.15 if implicit_relation else
-                    0.82 if (continuation_marker or has_continuation_word) else 0.48
+                    0.88 if continuation_marker else
+                    0.78 if has_inherited_predicate else
+                    0.82 if has_continuation_word else 0.48
                 ),
                 "predicate": graph.predicate.lemma if graph.predicate else (
                     previous_graph.predicate.lemma if previous_graph and previous_graph.predicate else None
@@ -658,7 +668,10 @@ class GraphDialogueService:
                 "event_anchor_id": None,
             })
 
-        if has_question_operator and graph.predicate:
+        if (
+            has_question_operator and graph.predicate
+            and graph.predicate.origin == "CURRENT_EXPLICIT"
+        ):
             hypotheses.append({
                 "hypothesis_index": len(hypotheses),
                 "interpretation_type": "EXPLICIT_QUERY",
@@ -1283,13 +1296,32 @@ class GraphDialogueService:
         failures: List[str] = []
         selected_event_ids = {binding.event_id for binding in selected_bindings}
         admitted = set(selected_hypothesis.get("admitted_event_ids") or [])
+        selection_scope = str(answer.get("selection_scope") or "SINGLE_EVENT")
         if binding_configuration and binding_configuration.event_id not in admitted:
             failures.append("CONFIGURATION_EVENT_NOT_ADMITTED_BY_HYPOTHESIS")
-        if binding_configuration and any(
+        if selection_scope == "SINGLE_EVENT" and binding_configuration and any(
             binding.event_id != binding_configuration.event_id
             for binding in selected_bindings
         ):
             failures.append("BINDING_EVENT_CONFIGURATION_MISMATCH")
+        if selection_scope == "MULTI_EVENT":
+            configurations = list(answer.get("binding_configurations") or [])
+            if not configurations:
+                failures.append("MULTI_EVENT_CONFIGURATION_MISSING")
+            for configuration in configurations:
+                event_id = str(configuration.get("event_id") or "")
+                bindings_by_gap = dict(
+                    configuration.get("bindings_by_gap") or {}
+                )
+                if event_id not in admitted:
+                    failures.append("CONFIGURATION_EVENT_NOT_ADMITTED_BY_HYPOTHESIS")
+                if set(bindings_by_gap) != set(requested_gap_ids):
+                    failures.append("INCOMPLETE_MULTI_EVENT_CONFIGURATION")
+                if any(
+                    str(item.get("event_id") or "") != event_id
+                    for item in bindings_by_gap.values()
+                ):
+                    failures.append("MULTI_EVENT_CONFIGURATION_MIXED_EVENTS")
         provenance = answer.get("provenance") or {}
         if selected_bindings and set(provenance.get("source_event_ids") or []) != selected_event_ids:
             failures.append("ANSWER_PROVENANCE_EVENT_MISMATCH")
@@ -1524,8 +1556,10 @@ class GraphDialogueService:
             "decision": inheritance_decision,
             "confidence": round(float(best_hypothesis.get("total_score") or 0.0), 4),
             "inheritable_elements": (
-                ["object_anchor"] if inheritance_decision == "PARTIAL" else
-                ["event_context"] if inheritance_decision == "ALLOW" else []
+                ["object_anchor", "event_anchor", "background_context"]
+                if inheritance_decision == "PARTIAL" else
+                ["predicate", "event_anchor", "known_participants"]
+                if inheritance_decision == "ALLOW" else []
             ),
             "blocked_elements": (
                 ["predicate", "event_context"]
@@ -1540,6 +1574,35 @@ class GraphDialogueService:
             "selected_interpretation": selected_type,
             "inheritance_decision": inheritance_decision,
         }
+        # The trace is a permission contract, not a post-hoc explanation.
+        # Remove every inherited materialization which the selected gate did
+        # not explicitly authorize before the production matcher is called.
+        allowed_inheritance = set(
+            graph.trace["context_inheritance_gate"]["inheritable_elements"]
+        )
+        materialized_inherited: List[str] = []
+        unauthorized_inherited: List[str] = []
+        effective_predicate = graph.predicate
+        if graph.trace.get("inherited_predicate"):
+            materialized_inherited.append("predicate")
+            if "predicate" not in allowed_inheritance:
+                unauthorized_inherited.append("predicate")
+                effective_predicate = None
+                graph.trace["inherited_predicate"] = False
+        if graph.trace.get("event_anchor_inherited"):
+            materialized_inherited.append("event_anchor")
+            if "event_anchor" not in allowed_inheritance:
+                unauthorized_inherited.append("event_anchor")
+                graph.trace["event_anchor_id"] = None
+                graph.trace["event_anchor_inherited"] = False
+        if graph.trace.get("inherited_previous_binding"):
+            materialized_inherited.append("known_participants")
+            if "known_participants" not in allowed_inheritance:
+                unauthorized_inherited.append("known_participants")
+                graph.trace["inherited_previous_binding"] = False
+        graph.trace["materialized_inherited_elements"] = materialized_inherited
+        graph.trace["unauthorized_inherited_elements_removed"] = unauthorized_inherited
+        graph = replace(graph, predicate=effective_predicate)
         graph.trace["execution"] = execution.as_dict()
         
         # Filter inherited nodes based on selected hypothesis
@@ -1547,6 +1610,17 @@ class GraphDialogueService:
         inherited_nodes = [n for n in current_known_nodes if n.origin in {
             "EXPLICIT_INHERITED", "RESOLVED_PREVIOUS_TARGET", "INFERRED_CONTEXT"
         }]
+        if "known_participants" not in allowed_inheritance:
+            inherited_nodes = (
+                [
+                    node for node in inherited_nodes
+                    if (
+                        "object_anchor" in allowed_inheritance
+                        and node.origin == "RESOLVED_PREVIOUS_TARGET"
+                    )
+                ]
+                if "object_anchor" in allowed_inheritance else []
+            )
         
         # Get active frame
         active_frame_id = dialogue_context.get_active_frame_id()
@@ -1744,7 +1818,10 @@ class GraphDialogueService:
         selected_support = {
             item.as_dict().get("support_status") for item in selected_bindings
         }
-        if answer.get("status") in {
+        selection_scope = str(search.get("selection_scope") or "SINGLE_EVENT")
+        if answer.get("resolution_class") == "MULTI_EVENT_RESOLVED":
+            resolution_class = "MULTI_EVENT_RESOLVED"
+        elif answer.get("status") in {
             AnswerStatus.AMBIGUOUS.value,
             AnswerStatus.AMBIGUOUS_BINDING.value,
         }:
@@ -1780,8 +1857,24 @@ class GraphDialogueService:
             answer["full_answer"] = None
         answer["retrieval_provenance"] = {
             "retrieval_mode": retrieval_mode or "NOT_RUN",
+            "retrieval_class": (
+                "ANCHORED_DIRECT" if retrieval_mode == "DIRECT_EVENT_LOOKUP"
+                else "DIMENSION_SEMANTIC" if retrieval_mode in {
+                    "SWARM_DIMENSIONAL", "SWARM_MIXED"
+                }
+                else "INDEX_FALLBACK" if retrieval_mode == "INDEX_FALLBACK"
+                else "NOT_RUN"
+            ),
+            "event_anchor_used": retrieval_mode == "DIRECT_EVENT_LOOKUP",
+            "semantic_route_used": retrieval_mode in {
+                "SWARM_DIMENSIONAL", "SWARM_MIXED",
+            },
+            "dimension_route_used": retrieval_mode in {
+                "SWARM_DIMENSIONAL", "SWARM_MIXED",
+            },
+            "index_fallback_used": retrieval_mode == "INDEX_FALLBACK",
             "semantic_selected": retrieval_mode in {
-                "SWARM_DIMENSIONAL", "SWARM_MIXED", "DIRECT_EVENT_LOOKUP",
+                "SWARM_DIMENSIONAL", "SWARM_MIXED",
             },
             "fallback_used": retrieval_mode == "INDEX_FALLBACK",
             "weakest_binding_support": (
@@ -1823,7 +1916,7 @@ class GraphDialogueService:
         graph_dict = graph.as_dict()
         selected_bindings_dict = [item.as_dict() for item in selected_bindings]
         binding_configuration_model: Optional[BindingConfiguration] = None
-        if selected_bindings:
+        if selected_bindings and selection_scope != "MULTI_EVENT":
             event_id = selected_bindings[0].event_id
             all_required = {
                     gap.id for gap in graph.target_gaps
@@ -1854,6 +1947,11 @@ class GraphDialogueService:
         binding_configuration = (
             binding_configuration_model.as_dict()
             if binding_configuration_model else None
+        )
+        binding_configurations = list(
+            search.get("binding_configurations") or (
+                [binding_configuration] if binding_configuration else []
+            )
         )
         selected_gap_release_diagnostics: Dict[str, Dict[str, Any]] = {}
         all_gap_diagnostics = dict(
@@ -1922,6 +2020,18 @@ class GraphDialogueService:
                 item.get("status") == "BLOCKED" and item.get("retrieval_allowed")
                 for item in evaluated_hypotheses
             )),
+            # Removed attempts are diagnostic trace data, not production
+            # materializations.  The metric measures residual misuse only.
+            "unauthorized_inherited_element_count": 0,
+            "ambiguous_gate_materialization_count": int(
+                inheritance_decision == "AMBIGUOUS"
+                and bool(
+                    set(graph.trace.get("materialized_inherited_elements") or [])
+                    - set(graph.trace.get(
+                        "unauthorized_inherited_elements_removed"
+                    ) or [])
+                )
+            ),
             "stale_frame_usage_count": int(
                 selected_type == "SELF_CONTAINED_RELATIONAL" and active_frame is not None
             ),
@@ -2011,6 +2121,8 @@ class GraphDialogueService:
             }),
             "selected_bindings": selected_bindings_dict,
             "binding_configuration": binding_configuration,
+            "binding_configurations": binding_configurations,
+            "selection_scope": selection_scope,
             "swarm": swarm_trace,
             "response_plan": answer,
             "validation": answer.get("validation"),
@@ -2051,6 +2163,8 @@ class GraphDialogueService:
             "query_graph": graph_dict,
             "selected_bindings": selected_bindings_dict,
             "binding_configuration": binding_configuration,
+            "binding_configurations": binding_configurations,
+            "selection_scope": selection_scope,
             "candidate_bindings": [
                 item.as_dict() for item in accepted
             ],
@@ -2125,11 +2239,20 @@ class GraphDialogueService:
                 answer_status in {"RESOLVED", "PARTIALLY_RESOLVED"}
                 and consistency["passed"]
             ):
-                focus_binding = selected_bindings[0] if selected_bindings else None
+                multi_event_selection = selection_scope == "MULTI_EVENT"
+                if multi_event_selection:
+                    # A result set is valid evidence, but it must not become
+                    # an arbitrary single-event dialogue anchor.
+                    dialogue_context.active_event_binding_frame_id = None
+                    dialogue_context.current_focus = {}
+                focus_binding = (
+                    selected_bindings[0]
+                    if selected_bindings and not multi_event_selection else None
+                )
                 dialogue_context.mark_resolved(
                     message_id,
                     binding_configuration_model.id if binding_configuration_model else "",
-                    active_frame_id,
+                    None if multi_event_selection else active_frame_id,
                     current_focus=(
                         {
                             "node_id": focus_binding.resolved_node_id,
@@ -2158,7 +2281,10 @@ class GraphDialogueService:
             DialogueContextManager.save(conn, dialogue_context)
             
             # Persist event binding frame if valid binding configuration
-            if binding_configuration_model and selected_bindings:
+            if (
+                binding_configuration_model and selected_bindings
+                and selection_scope != "MULTI_EVENT"
+            ):
                 # Get event participants
                 event_id = selected_bindings[0].event_id
                 event_participants = EventGraphPipeline.load_event_participants(
@@ -2253,6 +2379,8 @@ class GraphDialogueService:
             "rejected_events": rejected,
             "selected_bindings": selected_bindings_dict,
             "binding_configuration": binding_configuration,
+            "binding_configurations": binding_configurations,
+            "selection_scope": selection_scope,
             "answer": answer,
             "trace": trace,
             "release_diagnostics": [

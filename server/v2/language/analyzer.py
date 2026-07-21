@@ -384,6 +384,104 @@ class UniversalLanguageAnalyzer:
             ),
         }
 
+    def _refine_typed_question_np(
+        self,
+        tokens: Sequence[ParsedToken],
+    ) -> None:
+        """Jointly rank ``какой + noun + finite predicate`` candidates.
+
+        This is deliberately a soft structural preference.  It only rewards
+        a nominative typed noun when the visible predicate agrees with it,
+        rather than treating pre-verbal position as a hard case rule.
+        """
+        for modifier in tokens:
+            if not any(
+                candidate.lemma == self.questions.TYPED_QUESTION_LEMMA
+                and candidate.pos == "ADJF"
+                for candidate in modifier.analyses
+            ):
+                continue
+            noun = next(
+                (item for item in tokens[modifier.index + 1:]
+                 if item.pos in NOUN_POS),
+                None,
+            )
+            if noun is None:
+                continue
+            predicate = next(
+                (item for item in tokens[noun.index + 1:]
+                 if item.pos == "VERB" and item.features.get("number")),
+                None,
+            )
+            if predicate is None:
+                continue
+            pairs = []
+            for modifier_variant in modifier.analyses:
+                if (
+                    modifier_variant.lemma != self.questions.TYPED_QUESTION_LEMMA
+                    or modifier_variant.pos != "ADJF"
+                ):
+                    continue
+                for noun_variant in noun.analyses:
+                    if noun_variant.pos not in NOUN_POS:
+                        continue
+                    agreement = self._agreement(modifier_variant, noun_variant)
+                    verb_agreement = (
+                        noun_variant.features.get("number")
+                        and noun_variant.features.get("number")
+                        == predicate.features.get("number")
+                    )
+                    score = (
+                        modifier_variant.confidence + noun_variant.confidence
+                        + (0.8 if agreement else -1.0)
+                        + (0.65 if verb_agreement else 0.0)
+                        + (0.30 if verb_agreement
+                           and noun_variant.features.get("case") == "nomn"
+                           else 0.0)
+                    )
+                    pairs.append((score, modifier_variant, noun_variant,
+                                  bool(verb_agreement)))
+            if not pairs:
+                continue
+            _, chosen_modifier, chosen_noun, verb_agreement = max(
+                pairs, key=lambda item: (item[0], item[1].confidence,
+                                         item[2].confidence)
+            )
+            for candidate in modifier.analyses:
+                candidate.selected = candidate is chosen_modifier
+            for candidate in noun.analyses:
+                candidate.selected = candidate is chosen_noun
+            chosen_modifier.evidence = list(dict.fromkeys([
+                *chosen_modifier.evidence,
+                "joint_typed_np_selection",
+            ]))
+            chosen_noun.evidence = list(dict.fromkeys([
+                *chosen_noun.evidence,
+                "joint_typed_np_selection",
+                "agreement_with_finite_verb" if verb_agreement else "",
+                "subject_position_support" if verb_agreement
+                and chosen_noun.features.get("case") == "nomn" else "",
+            ]))
+            chosen_noun.evidence = [item for item in chosen_noun.evidence if item]
+            modifier.lemma = chosen_modifier.lemma
+            modifier.pos = chosen_modifier.pos
+            modifier.features = {
+                **dict(chosen_modifier.features),
+                "sentence_index": modifier.features.get("sentence_index", 0),
+                "token_index_in_sentence": modifier.features.get(
+                    "token_index_in_sentence", modifier.index,
+                ),
+            }
+            noun.lemma = chosen_noun.lemma
+            noun.pos = chosen_noun.pos
+            noun.features = {
+                **dict(chosen_noun.features),
+                "sentence_index": noun.features.get("sentence_index", 0),
+                "token_index_in_sentence": noun.features.get(
+                    "token_index_in_sentence", noun.index,
+                ),
+            }
+
     def analyze(
         self,
         text: str,
@@ -427,6 +525,7 @@ class UniversalLanguageAnalyzer:
         ]
         if detect_question:
             self._select_question_operator_morphology(tokens)
+            self._refine_typed_question_np(tokens)
         relations = self.relation_phrases.parse(tokens)
         question_operator_indices = (
             self.questions.gap_operator_indices(tokens)
