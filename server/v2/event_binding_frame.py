@@ -143,6 +143,17 @@ class EventBindingFrame:
             ],
         }
 
+    def mark_released(self, participant_node_id: str, turn_index: int) -> "EventBindingFrame":
+        """Mark a frame participant as released at the given turn index."""
+        updated = list(self.participants)
+        for i, p in enumerate(updated):
+            if p.participant_node_id == participant_node_id:
+                from dataclasses import replace as dc_replace
+                updated[i] = dc_replace(p, last_released_turn=turn_index)
+                break
+        from dataclasses import replace as dc_replace
+        return dc_replace(self, participants=tuple(updated))
+
 
 class EventBindingFrameBuilder:
     """Constructs and updates EventBindingFrames from binding configurations."""
@@ -238,7 +249,7 @@ class EventBindingFrameBuilder:
                 observed_question_profiles=tuple(observed),
                 compatible_question_profiles=compatible,
                 binding_confidence=binding.total_score if binding else 0.0,
-                replaceable=binding is not None,
+                replaceable=True,  # All event participants can be query targets
                 last_selected_turn=turn_index if binding else None,
             )
             frame_participants.append(frame_participant)

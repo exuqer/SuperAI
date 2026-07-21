@@ -88,6 +88,12 @@ class DialogueContextState:
             return True
         return False
 
+    def is_currently_resolved_last_turn(self) -> bool:
+        """Check if the last turn was resolved (i.e., context is clean)."""
+        if not self.last_turn_id:
+            return False
+        return not self.is_unresolved(self.last_turn_id) and self.last_turn_id == self.last_resolved_turn_id
+
     def get_context_source_turn_id(self) -> Optional[str]:
         """Get the turn ID that should be used as context source."""
         return self.last_resolved_turn_id

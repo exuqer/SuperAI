@@ -955,7 +955,7 @@ class GraphDialogueService:
             return None
         
         event_id = selected_bindings[0].event_id
-        predicate_concept_id = binding_configuration.event_id  # This should be predicate concept id
+        predicate_concept_id = binding_configuration.event_id
         
         # Check if frame already exists for this event
         existing_frame = conn.execute(
@@ -1011,10 +1011,11 @@ class GraphDialogueService:
                        (id,frame_id,participant_node_id,concept_id,resolved_lemma,
                         canonical_surface,morphology_json,origin,lineage_root_gap_id,
                         latest_source_gap_id,latest_source_binding_id,
-                        source_query_graph_ids_json,observed_question_profiles_json,
+                        source_query_graph_ids_json,local_slot_ids_json,
+                        observed_question_profiles_json,
                         compatible_question_profiles_json,binding_confidence,replaceable,
                         last_released_turn,last_selected_turn,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         participant.frame_participant_id,
                         participant.frame_id,
@@ -1028,6 +1029,7 @@ class GraphDialogueService:
                         participant.latest_source_gap_id,
                         participant.latest_source_binding_id,
                         json.dumps(list(participant.source_query_graph_ids)),
+                        json.dumps(list(participant.local_slot_ids)),
                         json.dumps([p.as_dict() for p in participant.observed_question_profiles]),
                         json.dumps(dict(participant.compatible_question_profiles)),
                         participant.binding_confidence,
@@ -1082,10 +1084,11 @@ class GraphDialogueService:
                        (id,frame_id,participant_node_id,concept_id,resolved_lemma,
                         canonical_surface,morphology_json,origin,lineage_root_gap_id,
                         latest_source_gap_id,latest_source_binding_id,
-                        source_query_graph_ids_json,observed_question_profiles_json,
+                        source_query_graph_ids_json,local_slot_ids_json,
+                        observed_question_profiles_json,
                         compatible_question_profiles_json,binding_confidence,replaceable,
                         last_released_turn,last_selected_turn,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         participant.frame_participant_id,
                         participant.frame_id,
@@ -1099,6 +1102,7 @@ class GraphDialogueService:
                         participant.latest_source_gap_id,
                         participant.latest_source_binding_id,
                         json.dumps(list(participant.source_query_graph_ids)),
+                        json.dumps(list(participant.local_slot_ids)),
                         json.dumps([p.as_dict() for p in participant.observed_question_profiles]),
                         json.dumps(dict(participant.compatible_question_profiles)),
                         participant.binding_confidence,
@@ -1192,55 +1196,51 @@ class GraphDialogueService:
         selected_hypothesis: Dict[str, Any],
         current_explicit_nodes: List[Any],
     ) -> List[Any]:
-        """Filter inherited nodes to prevent stale constraints from UNRESOLVED turns."""
-        filtered = []
-        context_source_turn = dialogue_context.get_context_source_turn_id()
+        """Filter inherited nodes to prevent stale constraints from UNRESOLVED turns.
         
-        # Get valid participant node IDs from active frame
-        valid_participant_nodes = set()
+        KEY RULE: Do NOT aggressively filter when an active EventBindingFrame exists —
+        gap release can select the correct participant after full search with all inherited nodes.
+        Only filter for:
+        1. STANDALONE_GAP_QUERY (e.g., "Где батарея?") — no inherited constraints
+        2. UNRESOLVED previous turn — inherited nodes cannot come from UNRESOLVED
+        3. Duplicates of EXPLICIT_CURRENT entities
+        """
+        filtered = []
+        hypothesis_type = selected_hypothesis.get("interpretation_type")
+
+        # Build lookup for frame participants if frame exists
+        frame_participant_node_ids: set[str] = set()
         if active_frame:
             for participant in active_frame.participants:
-                valid_participant_nodes.add(participant.participant_node_id)
-        
+                if participant.participant_node_id:
+                    frame_participant_node_ids.add(participant.participant_node_id)
+
         # Get known node keys from current explicit nodes
         current_explicit_keys = {
-            (node.head_lemma, node.qualified_key) for node in current_explicit_nodes
+            (getattr(node, 'head_lemma', ''), getattr(node, 'qualified_key', ''))
+            for node in current_explicit_nodes
         }
-        
+
         for node in inherited_nodes:
-            # Check 1: Node must be in active EventBindingFrame
-            if active_frame and node.id not in valid_participant_nodes:
-                continue
-            
-            # Check 2: Node must come from last RESOLVED turn
-            if node.source_query_graph_id:
-                # Check if this node's source turn was resolved
-                # We need to check if the source query graph came from a resolved turn
-                source_resolved = False
-                if dialogue_context.last_resolved_turn_id:
-                    # We'd need to check the turn that produced this query graph
-                    # For now, accept if node has valid binding origin
-                    if node.origin in {"EXPLICIT_INHERITED", "RESOLVED_PREVIOUS_TARGET"}:
-                        source_resolved = True
-                if not source_resolved:
-                    continue
-            
-            # Check 3: Node must be compatible with selected hypothesis
-            hypothesis_type = selected_hypothesis.get("interpretation_type")
+            # Rule 1: STANDALONE_GAP_QUERY — no inherited nodes at all
             if hypothesis_type == "STANDALONE_GAP_QUERY":
-                # Only keep the entity that the question is about
-                # For "Где батарея?" keep only "батарея"
-                pass  # Additional filtering based on question focus
-            
-            # Check 4: Node must not conflict with EXPLICIT_CURRENT entity
-            if (node.head_lemma, node.qualified_key) in current_explicit_keys:
                 continue
-            
-            # Check 5: Node must not come from UNRESOLVED QueryGraph
-            # This is already checked via is_unresolved on the turn
-            
+
+            # Rule 2: UNRESOLVED previous turn blocks all inherited nodes
+            has_unresolved = False
+            if dialogue_context.last_resolved_turn_id:
+                # If last turn was not resolved and current is a follow-up
+                if not dialogue_context.is_currently_resolved_last_turn():
+                    has_unresolved = True
+                    continue
+
+            # Rule 3: Don't duplicate EXPLICIT_CURRENT entities
+            if hasattr(node, 'head_lemma') and hasattr(node, 'qualified_key'):
+                if (node.head_lemma, node.qualified_key) in current_explicit_keys:
+                    continue
+
             filtered.append(node)
-        
+
         return filtered
 
     def query(
@@ -1372,7 +1372,7 @@ class GraphDialogueService:
                             concept_id=pr["concept_id"],
                             resolved_lemma=pr["resolved_lemma"],
                             canonical_surface=pr["canonical_surface"],
-                            local_slot_ids=tuple(json.loads(pr["source_query_graph_ids_json"] or "[]")),
+                            local_slot_ids=tuple(json.loads(pr["local_slot_ids_json"] or "[]")),
                             morphology_profile=json.loads(pr["morphology_json"] or "{}"),
                             origin=ParticipantOrigin(pr["origin"]),
                             lineage_root_gap_id=pr["lineage_root_gap_id"],
@@ -1413,12 +1413,88 @@ class GraphDialogueService:
         # Rebuild known_nodes with filtered inherited nodes
         graph = replace(graph, known_nodes=tuple(filtered_inherited + current_explicit_nodes))
         
-        # Run search with filtered graph
+        # ── Run search ──
         search = self.matcher.search(graph)
         selected_bindings = [
             item for item in search.get("selected_bindings", [])
             if isinstance(item, CandidateBinding)
         ]
+
+        # ── GAP release diagnostics (computed AFTER search for post-filtering) ──
+        release_diagnostic_after_search: Optional[GapReleaseDiagnostic] = None
+        released_node_id: Optional[str] = None
+        released_binding_ids: set[str] = set()
+
+        if active_frame and graph.gap_node:
+            question_surface = graph.gap_node.surface
+            current_explicit_node_ids = {n.id for n in current_explicit_nodes}
+
+            released_node_id, release_diagnostic_after_search = (
+                self.gap_release_selector.select_participant_to_release(
+                    current_question_surface=question_surface,
+                    active_frame=active_frame,
+                    current_explicit_node_ids=current_explicit_node_ids,
+                    query_graph_id=graph.id,
+                )
+            )
+
+            if released_node_id and release_diagnostic_after_search:
+                # Find the released binding_id from the frame
+                for p in active_frame.participants:
+                    if p.participant_node_id == released_node_id:
+                        if p.latest_source_binding_id:
+                            released_binding_ids.add(p.latest_source_binding_id)
+                        break
+                # Persist the diagnostic into graph.trace so it is saved
+                graph.trace["gap_release_diagnostic"] = release_diagnostic_after_search.as_dict()
+
+        # ── Apply GAP release result: if released_node_id is selected,
+        #     use it as the answer binding even if the matcher is ambiguous ──
+        if released_node_id and active_frame:
+            # Try to find a binding for the released node in accepted results
+            
+            # Try to find a binding for the released node in accepted results
+            released_binding = None
+            for binding in search.get("accepted", []):
+                if isinstance(binding, CandidateBinding):
+                    if binding.resolved_node_id == released_node_id:
+                        released_binding = binding
+                        break
+                    # Also check via source_binding_id match
+                    if binding.resolved_node_id in released_binding_ids:
+                        released_binding = binding
+                        break
+            
+            if not released_binding:
+                # Try another strategy: find by canonical surface match
+                for p in active_frame.participants:
+                    if p.participant_node_id == released_node_id:
+                        target_surface = p.canonical_surface
+                        for binding in search.get("accepted", []):
+                            if isinstance(binding, CandidateBinding) and binding.resolved_surface == target_surface:
+                                released_binding = binding
+                                break
+                        break
+            
+            if not released_binding:
+                # Last resort: find any binding for the same concept
+                for p in active_frame.participants:
+                    if p.participant_node_id == released_node_id:
+                        target_concept = p.concept_id
+                        for binding in search.get("accepted", []):
+                            if isinstance(binding, CandidateBinding) and binding.resolved_concept_id == target_concept:
+                                released_binding = binding
+                                break
+                        break
+
+            if released_binding:
+                # Override selected_bindings with the gap-release winner
+                selected_bindings = [released_binding]
+                # Also fix the search status so plan() doesn't see AMBIGUOUS
+                search = dict(search)
+                search["status"] = "RESOLVED"
+                search["reason"] = "gap_release_override"
+
         selected = selected_bindings[0] if selected_bindings else None
         event = None
         if isinstance(selected, CandidateBinding):
@@ -1718,30 +1794,32 @@ class GraphDialogueService:
                 )
                 self._persist_predicate_hypotheses(conn, graph, evaluated_predicate_hypotheses)
             
-            # Handle GAP release and persist diagnostics
-            release_diagnostic = graph.trace.get("gap_release_diagnostic")
-            if release_diagnostic and active_frame:
-                question_surface = graph.gap_node.surface
+            # Persist gap release diagnostics
+            if released_node_id and release_diagnostic_after_search and active_frame:
+                question_surface = graph.gap_node.surface if graph.gap_node else ""
                 question_family_key = resolve_question_family(question_surface)
-                
-                # Use gap release selector for proper diagnostics
-                current_explicit_node_ids = {n.id for n in current_explicit_nodes}
-                released_node_id, diagnostic = self.gap_release_selector.select_participant_to_release(
-                    current_question_surface=question_surface,
-                    active_frame=active_frame,
-                    current_explicit_node_ids=current_explicit_node_ids,
-                    query_graph_id=graph.id,
+                self._persist_gap_release_diagnostics(
+                    conn,
+                    graph,
+                    active_frame.frame_id,
+                    active_frame.event_id,
+                    question_family_key,
+                    release_diagnostic_after_search,
                 )
-                
-                if diagnostic:
-                    self._persist_gap_release_diagnostics(
-                        conn,
-                        graph,
+                # Mark participant as released in the frame
+                active_frame.mark_released(released_node_id, turn_index=int(next_turn or 0))
+                # Persist the released frame state
+                conn.execute(
+                    """UPDATE event_binding_frame_participants 
+                       SET last_released_turn=?, updated_at=?
+                       WHERE frame_id=? AND participant_node_id=?""",
+                    (
+                        int(next_turn or 0),
+                        utcnow(),
                         active_frame.frame_id,
-                        active_frame.event_id,
-                        question_family_key,
-                        diagnostic,
-                    )
+                        released_node_id,
+                    ),
+                )
             
             if selected_bindings:
                 self._learn_confirmed_episode(
@@ -1759,6 +1837,14 @@ class GraphDialogueService:
                 """UPDATE hives SET state_json=?, updated_at=? WHERE id=?""",
                 (encode(next_state), utcnow(), hive_id),
             )
+        # Collect release diagnostics from trace (already persisted in DB)
+        release_diagnostics_list = []
+        release_diagnostic = graph.trace.get("gap_release_diagnostic")
+        if release_diagnostic:
+            release_diagnostics_list.append(
+                release_diagnostic.as_dict() if hasattr(release_diagnostic, 'as_dict') else release_diagnostic
+            )
+        
         return {
             "message_id": stable_id("dialogue-turn", hive_id, next_turn),
             "query_graph": graph_dict,
@@ -1768,6 +1854,10 @@ class GraphDialogueService:
             "binding_configuration": binding_configuration,
             "answer": answer,
             "trace": trace,
+            "release_diagnostics": [
+                d.as_dict() if hasattr(d, 'as_dict') else d
+                for d in release_diagnostics_list
+            ],
             "hive": {
                 "id": hive_id,
                 "conversation_id": str(row["conversation_id"]),

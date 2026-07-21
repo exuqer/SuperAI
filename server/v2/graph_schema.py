@@ -1116,6 +1116,7 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             latest_source_gap_id TEXT,
             latest_source_binding_id TEXT,
             source_query_graph_ids_json TEXT NOT NULL DEFAULT '[]',
+            local_slot_ids_json TEXT NOT NULL DEFAULT '[]',
             observed_question_profiles_json TEXT NOT NULL DEFAULT '[]',
             compatible_question_profiles_json TEXT NOT NULL DEFAULT '{}',
             binding_confidence REAL NOT NULL DEFAULT 0,

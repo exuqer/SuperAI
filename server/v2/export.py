@@ -313,6 +313,96 @@ class HiveExportService:
                     )
                 ] if conversation_id else [],
             }
+            # ── v2.8 evidence tables ──────────────────────────────
+            v2_8_evidence: Dict[str, Any] = {}
+            if conversation_id:
+                v2_8_evidence["event_binding_frames"] = [
+                    self._json_row(row) for row in conn.execute(
+                        "SELECT * FROM event_binding_frames WHERE conversation_id=? ORDER BY created_at",
+                        (conversation_id,),
+                    )
+                ]
+                v2_8_evidence["event_binding_frame_participants"] = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT p.* FROM event_binding_frame_participants p
+                           JOIN event_binding_frames f ON f.id=p.frame_id
+                           WHERE f.conversation_id=?
+                           ORDER BY p.created_at""",
+                        (conversation_id,),
+                    )
+                ]
+                v2_8_evidence["event_binding_frame_question_profiles"] = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT q.* FROM event_binding_frame_question_profiles q
+                           JOIN event_binding_frame_participants p ON p.id=q.frame_participant_id
+                           JOIN event_binding_frames f ON f.id=p.frame_id
+                           WHERE f.conversation_id=?
+                           ORDER BY q.confidence DESC""",
+                        (conversation_id,),
+                    )
+                ]
+                v2_8_evidence["query_interpretation_hypotheses"] = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT h.* FROM query_interpretation_hypotheses h
+                           JOIN query_graphs g ON g.id=h.query_graph_id
+                           JOIN dialogue_turns t ON t.query_graph_id=g.id
+                           JOIN hives hv ON hv.id=t.hive_id
+                           WHERE hv.conversation_id=?
+                           ORDER BY h.created_at""",
+                        (conversation_id,),
+                    )
+                ]
+                v2_8_evidence["gap_release_diagnostics"] = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT d.* FROM gap_release_diagnostics d
+                           JOIN query_graphs g ON g.id=d.query_graph_id
+                           JOIN dialogue_turns t ON t.query_graph_id=g.id
+                           JOIN hives hv ON hv.id=t.hive_id
+                           WHERE hv.conversation_id=?
+                           ORDER BY d.created_at""",
+                        (conversation_id,),
+                    )
+                ]
+                v2_8_evidence["gap_release_candidate_scores"] = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT cs.* FROM gap_release_candidate_scores cs
+                           JOIN gap_release_diagnostics d ON d.id=cs.diagnostic_id
+                           JOIN query_graphs g ON g.id=d.query_graph_id
+                           JOIN dialogue_turns t ON t.query_graph_id=g.id
+                           JOIN hives hv ON hv.id=t.hive_id
+                           WHERE hv.conversation_id=?
+                           ORDER BY cs.rank""",
+                        (conversation_id,),
+                    )
+                ]
+                v2_8_evidence["dialogue_context_states"] = [
+                    self._json_row(row) for row in conn.execute(
+                        "SELECT * FROM dialogue_context_states WHERE conversation_id=?",
+                        (conversation_id,),
+                    )
+                ]
+                v2_8_evidence["predicate_hypotheses"] = [
+                    self._json_row(row) for row in conn.execute(
+                        "SELECT * FROM predicate_hypotheses ORDER BY created_at"
+                    )
+                ]
+                v2_8_evidence["question_family_profiles"] = [
+                    self._json_row(row) for row in conn.execute(
+                        "SELECT * FROM question_family_profiles ORDER BY family_key"
+                    )
+                ]
+                v2_8_evidence["question_family_observations"] = [
+                    self._json_row(row) for row in conn.execute(
+                        """SELECT o.* FROM question_family_observations o
+                           JOIN query_graphs g ON g.id=o.query_graph_id
+                           JOIN dialogue_turns t ON t.query_graph_id=g.id
+                           JOIN hives hv ON hv.id=t.hive_id
+                           WHERE hv.conversation_id=?
+                           ORDER BY o.created_at""",
+                        (conversation_id,),
+                    )
+                ]
+            payload["v2_8_evidence"] = v2_8_evidence
             if detail != "compact":
                 payload["stats"] = {
                     "nodes": len(nodes),
