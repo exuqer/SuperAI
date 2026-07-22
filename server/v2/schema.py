@@ -1,4 +1,4 @@
-"""Canonical schema entry point for SuperAI V2.7."""
+"""Canonical schema entry point for SuperAI V3.0."""
 
 from .graph_schema import SCHEMA_VERSION, ensure_graph_schema
 

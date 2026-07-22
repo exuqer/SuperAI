@@ -1,4 +1,4 @@
-"""Canonical SQLite storage for the V2.7 event graph."""
+"""Canonical SQLite storage for SuperAI V3.0."""
 
 from __future__ import annotations
 

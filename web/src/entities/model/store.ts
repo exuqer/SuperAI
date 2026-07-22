@@ -193,6 +193,21 @@ export const useModelStore = defineStore('model', () => {
     });
   }
 
+  function clearLocalState() {
+    cloudsById.value = {};
+    placementsById.value = {};
+    currentSpace.value = null;
+    selectedPlacementId.value = null;
+    selectedStructure.value = null;
+    currentStructure.value = null;
+    selectedScene.value = null;
+    lastTraining.value = null;
+    trainedModel.value = null;
+    breadcrumb.value = [];
+    loading.value = false;
+    error.value = '';
+  }
+
   async function clearModel() {
     return run(async () => {
       await api.delete('/api/v2/model');
@@ -234,6 +249,7 @@ export const useModelStore = defineStore('model', () => {
     train,
     tickPhysics,
     loadTrainedModel,
+    clearLocalState,
     clearModel,
   };
 });

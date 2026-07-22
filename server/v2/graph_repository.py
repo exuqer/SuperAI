@@ -1,4 +1,4 @@
-"""Transactional persistence helpers for the V2.7 event graph."""
+"""Transactional persistence helpers for the SuperAI V3.0 evidence graph."""
 
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,7 +15,28 @@ class Settings(BaseSettings):
 
     # API
     api_prefix: str = "/api/v2"
-    admin_token: str = ""
+    admin_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("SUPERAI_ADMIN_TOKEN", "ADMIN_TOKEN"),
+    )
+    allow_test_reset: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SUPERAI_ALLOW_TEST_RESET", "ALLOW_TEST_RESET"),
+    )
+    test_reset_localhost_only: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "SUPERAI_TEST_RESET_LOCALHOST_ONLY",
+            "TEST_RESET_LOCALHOST_ONLY",
+        ),
+    )
+    test_reset_confirmation: str = Field(
+        default="RESET TEST SPACE",
+        validation_alias=AliasChoices(
+            "SUPERAI_TEST_RESET_CONFIRMATION",
+            "TEST_RESET_CONFIRMATION",
+        ),
+    )
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     cors_allow_credentials: bool = True
     cors_allow_methods: list[str] = ["*"]
@@ -93,6 +114,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
 

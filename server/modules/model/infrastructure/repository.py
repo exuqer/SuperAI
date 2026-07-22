@@ -1,4 +1,4 @@
-"""V2.7 graph repository exposed to the application layer."""
+"""V3.0 graph repository exposed to the application layer."""
 
 from server.v2.graph_repository import GraphRepository
 

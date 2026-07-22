@@ -838,7 +838,7 @@ class UniverseService:
                        (id,name,scale,version,base_space_config_json,discovery_config_json,
                         statistics_json,created_at,updated_at)
                        VALUES(?,?,?,?,?,?, '{}',?,?) ON CONFLICT(id) DO NOTHING""",
-                    (universe_id, name, scale, "2.8.0",
+                    (universe_id, name, scale, "3.0.0",
                      encode({"dimensions": 3, "metric": "cosine+local"}),
                      encode({"algorithm": "sparse_residual", "max_active_dimensions": 32,
                              "minimum_evidence": 2}), now, now),

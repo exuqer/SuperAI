@@ -1,4 +1,4 @@
-"""V2.7 graph dialogue request contracts."""
+"""V3.0 dialogue request contracts."""
 
 from __future__ import annotations
 

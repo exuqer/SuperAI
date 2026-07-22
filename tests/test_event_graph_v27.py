@@ -795,8 +795,8 @@ def test_versions_and_trace_are_saved_with_every_answer():
         independent_key="versions",
     )
     result = ask(dialogue, "Кто настроил датчик?")
-    assert trained["events"][0]["versions"]["event_schema_version"] == "2.7.0"
-    assert result["answer"]["versions"]["query_graph_version"] == "2.7.0"
+    assert trained["events"][0]["versions"]["event_schema_version"] == "3.0.0"
+    assert result["answer"]["versions"]["query_graph_version"] == "3.0.0"
     trace = result["trace"]
     assert trace["final_query_graph"]
     assert trace["candidate_bindings"]

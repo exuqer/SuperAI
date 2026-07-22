@@ -1,4 +1,4 @@
-/** State for the V2.7 QueryGraph dialogue UI. */
+/** State for the V3.0 QueryGraph dialogue UI. */
 
 import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
@@ -235,6 +235,7 @@ export const useGraphStore = defineStore('graph-v27', () => {
     hybrid,
     createHive,
     restoreHive,
+    clearLocalState,
     resetHive,
     query,
     refresh,

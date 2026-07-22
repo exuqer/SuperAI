@@ -1,4 +1,4 @@
-"""V2.7 graph training request contracts."""
+"""V3.0 training request contracts."""
 
 from __future__ import annotations
 

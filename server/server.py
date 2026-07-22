@@ -1,4 +1,4 @@
-"""FastAPI composition root for the V2.7 event graph."""
+"""FastAPI composition root for SuperAI V3.0."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from server.modules.training.api.router import router as training_router
 from server.modules.hive.api.router import router as hive_router
 from server.modules.hive.api.query_router import router as query_scene_router
 from server.modules.universe.api.router import router as universe_router
+from server.modules.testing.api.router import router as testing_router
 from server.v2.graph_repository import GraphRepository
 from server.v2.graph_schema import SCHEMA_VERSION
 from server.v2.russian_morphology import RussianMorphology
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
     app.include_router(training_router, prefix=settings.api_prefix)
     app.include_router(hive_router, prefix=settings.api_prefix)
     app.include_router(query_scene_router, prefix=settings.api_prefix)
+    app.include_router(testing_router, prefix=settings.api_prefix)
     app.include_router(
         universe_router,
         prefix=settings.api_prefix.rsplit("/v", 1)[0],
@@ -68,16 +70,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict[str, object]:
+        # Liveness only.  Dependency and pipeline readiness belongs to
+        # /api/readiness and must never be guessed here.
         return {
-            "status": "ok",
+            "status": "alive",
             "model": "superai-spatial-semantic-reasoning",
-            "version": "v3",
-            "event_graph": "ready",
-            "semantic_field": "ready",
-            "field_revision": _field_revision(),
-            "latent_dimensions": "ready",
-            "morphology": "ready",
-            "reasoning_pipeline": "ready",
+            "version": settings.app_version,
         }
 
     @app.get("/api/readiness")

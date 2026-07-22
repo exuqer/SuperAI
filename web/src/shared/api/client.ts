@@ -28,7 +28,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
     let data: unknown;
     try {
       const body = await response.json();
-      detail = body.detail;
+      detail = body.detail || body.error?.message || body.error?.detail?.message;
       data = body;
     } catch {
       detail = await response.text().catch(() => 'Unknown error');

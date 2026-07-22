@@ -1,4 +1,4 @@
-/** Public client contracts for the role-free SuperAI V2.7 graph API. */
+/** Public client contracts for the role-free SuperAI V3.0 graph API. */
 
 export type QueryMode = 'NEW_QUERY' | 'FOLLOW_UP' | 'CORRECTION';
 export type RetrievalScope = 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL' | 'GLOBAL_ONLY';
@@ -173,6 +173,45 @@ export interface SwarmTrace {
   gap_swarms?: GapSwarmRun[];
 }
 
+export interface QueryElementReference {
+  node_id?: string;
+  concept_id?: string;
+  entity_id?: string;
+  lemma?: string;
+  surface?: string;
+  lemma_hypotheses?: Array<Record<string, unknown>>;
+  morphology?: Record<string, unknown>;
+  relation_attachment?: string | null;
+  origin?: string;
+  confidence?: number;
+}
+
+export interface HybridGraphEvidence {
+  evidence_id: string;
+  source_type: string;
+  source_id: string;
+  supports?: string[];
+  strength: number;
+  retrieval_path?: string[];
+  independent_source_key?: string;
+}
+
+export interface HybridSpatialSupport {
+  support_id: string;
+  cloud_id: string;
+  region_id?: string | null;
+  score: number;
+  retrieval_path?: string[];
+}
+
+export interface HybridFieldRegion {
+  center?: number[];
+  radius?: number;
+  active_dimensions?: string[];
+  field_revision?: number;
+  region_id?: string;
+}
+
 export interface HybridWorkspaceElement {
   element_id: string;
   element_type: string;
@@ -187,12 +226,19 @@ export interface HybridCandidate {
   candidate_id: string;
   gap_id: string;
   element_id: string;
+  configuration_id?: string | null;
+  event_id?: string | null;
   surface?: string | null;
   lemma?: string | null;
   activation: number;
   score: number;
   status: string;
   evidence_ids?: string[];
+  graph_evidence_ids: string[];
+  spatial_support_ids: string[];
+  independent_source_keys: string[];
+  field_fit: number;
+  evidential_score?: number;
   constraint_violations?: string[];
 }
 
@@ -204,6 +250,11 @@ export interface HybridWorkspace {
   entities: HybridWorkspaceElement[];
   events: HybridWorkspaceElement[];
   scenes: HybridWorkspaceElement[];
+  active_clouds: HybridWorkspaceElement[];
+  field_region: HybridFieldRegion;
+  local_gradients: Array<Record<string, unknown>>;
+  graph_evidence: HybridGraphEvidence[];
+  spatial_support: HybridSpatialSupport[];
   gaps: Array<{ gap_id: string; surface_projection: string; status: string }>;
   candidates: HybridCandidate[];
   hypotheses: Array<{
@@ -225,12 +276,20 @@ export interface HybridPipelineResult {
   query_frame: {
     query_id: string;
     query_type: string;
-    known_elements: string[];
+    known_elements: QueryElementReference[];
     gaps: HybridWorkspace['gaps'];
     exclusions: string[];
     unresolved_context: boolean;
   };
-  query_field_projection: Record<string, unknown>;
+  query_field_projection: {
+    anchor_clouds: Array<Record<string, unknown>>;
+    positive_gradients: Array<Record<string, unknown>>;
+    negative_gradients: Array<Record<string, unknown>>;
+    relation_projections: Array<Record<string, unknown>>;
+    active_dimensions: string[];
+    field_region: HybridFieldRegion;
+    [key: string]: unknown;
+  };
   retrieval: { hits: Array<{ hit_id: string; element_id: string; element_type: string; match_score: number }>; field_hit_count: number; graph_hit_count: number };
   activation: { activations: Record<string, number>; visited: number; steps: number };
   workspace: HybridWorkspace;
@@ -248,6 +307,8 @@ export interface HybridPipelineResult {
     graph_support: number;
     field_support: number;
     independent_source_count: number;
+    graph_evidence: string[];
+    spatial_support: string[];
     provenance: Record<string, unknown>;
   };
   answer_text: string;

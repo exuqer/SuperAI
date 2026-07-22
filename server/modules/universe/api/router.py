@@ -11,6 +11,7 @@ from server.core.settings import settings
 from server.v2.graph_repository import GraphRepository
 from server.v2.semantic_field import SemanticFieldService
 from server.v2.universe import UniverseService
+from server.v2.testing_reset import ResetMode, ResetScope, TestingResetService
 
 
 router = APIRouter(tags=["universes"])
@@ -23,9 +24,10 @@ def semantic_field() -> SemanticFieldService:
 @router.get("/v2/semantic-field")
 async def semantic_field_view(
     limit: int = Query(default=200, ge=1, le=2000),
+    field_revision: int | None = Query(default=None, ge=0),
     field: SemanticFieldService = Depends(semantic_field),
 ) -> dict[str, Any]:
-    return field.snapshot(limit=limit)
+    return field.snapshot(limit=limit, field_revision=field_revision)
 
 
 @router.post("/v2/semantic-field/rollback/{field_revision}")
@@ -52,12 +54,15 @@ async def universes(current: UniverseService = Depends(service)) -> dict[str, An
 @router.post("/reset")
 async def reset_memory(
     x_admin_token: str = Header(default=""),
-    current: UniverseService = Depends(service),
 ) -> dict[str, Any]:
-    """Destructively reset all graph and universe data in the current database."""
+    """Admin-compatible alias for the canonical full test-space reset."""
     if not settings.admin_token or x_admin_token != settings.admin_token:
         raise HTTPException(status_code=403, detail="destructive endpoint is disabled")
-    return current.reset()
+    return TestingResetService().reset(
+        ResetScope.FULL_TEST_STATE,
+        ResetMode.FRESH_SCHEMA,
+        requested_by="legacy-admin-alias",
+    )
 
 
 @router.get("/export/memory")

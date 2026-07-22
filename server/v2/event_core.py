@@ -1,4 +1,4 @@
-"""Public V2.7 event API."""
+"""Public V3.0 event API."""
 
 from .event_graph import EventGraphPipeline
 from .graph_learning import signature_similarity

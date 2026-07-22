@@ -361,7 +361,7 @@ def build_query_frame(
             (str((analysis or {}).get("query_graph", {}).get("continuation_of") or "") if isinstance(analysis, Mapping) else "")
             or str(context.get("last_query_id") or "")
         ) or None if continuation else None,
-        confidence=clamp(0.92 if focuses else 0.35),
+        confidence=0.20,
         context_inheritance={
             "mode": "ALLOW" if continuation else "BLOCK",
             "source_query_id": None,
@@ -375,7 +375,8 @@ def build_query_frame(
         constraint_groups=_constraint_groups(focuses),
         trace={
             "query_type_reason": "question_focus_and_relation_anchors",
-            "parser_mode": "CANONICAL" if isinstance(graph, Mapping) else "DEGRADED_UNVERIFIED",
+            "parser_mode": "DEGRADED_UNVERIFIED",
+            "epistemic_ceiling": "UNVERIFIED_ASSOCIATION",
             "known_elements": list(known),
             "gap_count": len(gaps),
             "predicate": predicate,

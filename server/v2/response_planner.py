@@ -1,4 +1,4 @@
-"""Public V2.7 response planning API."""
+"""Public V3.0 response planning API."""
 
 from .query_graph import GraphResponsePlanner
 

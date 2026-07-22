@@ -8,8 +8,8 @@
         <button class="export-button" :disabled="exporting" @click="exportMemory">
           {{ exporting ? 'Копирование…' : exportStatus || 'Копировать память' }}
         </button>
-        <button class="reset-button" :disabled="resetting" @click="resetMemory">
-          {{ resetting ? 'Сброс…' : 'Очистить память' }}
+        <button class="reset-button" :disabled="resetting" @click="openResetDialog">
+          {{ resetting ? 'Очистка…' : 'Очистить тестовое пространство' }}
         </button>
       </nav>
     </header>
@@ -56,14 +56,14 @@
         <p class="notice">
           <template v-if="selectedDimensions.length === 2">X — {{ compact(selectedDimensions[0]) }}, Y — {{ compact(selectedDimensions[1]) }}. Близкие точки имеют похожие проекции в обоих измерениях.</template>
           <template v-else-if="selectedDimensions.length === 1">Показана сила принадлежности к {{ compact(selectedDimensions[0]) }}; выберите второе D для пересечения.</template>
-          <template v-else>Semantic Field revision {{ semanticField.field_revision }} · {{ semanticField.projection_method }} · display projection only.</template>
+          <template v-else>Semantic Field revision {{ semanticField.field_revision }} · {{ semanticField.projection_method }} · {{ semanticField.display_projection_warning }}</template>
         </p>
         <div class="map" aria-label="Базовое пространство">
           <button
             v-for="point in displayPoints"
             :key="point.id"
             class="entity"
-            :class="{ active: point.id === selectedEntity?.entity.id }"
+            :class="{ active: point.id === selectedEntity?.entity.id || point.id === selectedFieldCloud?.cloud_id }"
             :style="position(point)"
             :title="point.label"
             @click="openEntity(point.id)"
@@ -73,8 +73,30 @@
       </section>
 
       <aside class="panel inspector">
-        <div class="kicker">{{ selectedEntity ? 'ПРОФИЛЬ СУЩНОСТИ' : 'LATENT DIMENSIONS' }}</div>
-        <template v-if="selectedEntity">
+        <div class="kicker">{{ selectedFieldCloud ? 'SEMANTIC CLOUD' : selectedEntity ? 'ПРОФИЛЬ СУЩНОСТИ' : 'LATENT DIMENSIONS' }}</div>
+        <template v-if="selectedFieldCloud">
+          <h2>{{ selectedFieldCloud.canonical_lemma }}</h2>
+          <p>cloud {{ selectedFieldCloud.cloud_id }}</p>
+          <dl class="cloud-detail">
+            <dt>Mass / density</dt><dd>{{ selectedFieldCloud.mass.toFixed(2) }} / {{ selectedFieldCloud.density.toFixed(2) }}</dd>
+            <dt>Halo / stability</dt><dd>{{ selectedFieldCloud.halo.toFixed(2) }} / {{ selectedFieldCloud.stability.toFixed(2) }}</dd>
+            <dt>Permeability</dt><dd>{{ selectedFieldCloud.permeability.toFixed(2) }}</dd>
+            <dt>Position</dt><dd>{{ selectedFieldCloud.position_status }} · {{ selectedFieldCloud.projection_status }}</dd>
+            <dt>Bootstrap</dt><dd>{{ selectedFieldCloud.bootstrap_center.join(', ') }}</dd>
+            <dt>Learned display</dt><dd>{{ selectedFieldCloud.learned_center.join(', ') }}</dd>
+            <dt>Latent dimensions</dt><dd>{{ selectedFieldCloud.active_dimensions.join(', ') || 'нет' }}</dd>
+            <dt>Sources / events</dt><dd>{{ selectedFieldCloud.supporting_source_ids.length }} / {{ selectedFieldCloud.supporting_event_ids.length }}</dd>
+            <dt>Contexts</dt><dd>{{ selectedFieldCloud.contextual_projections.length }}</dd>
+          </dl>
+          <h3>Force breakdown</h3>
+          <div v-for="(force, index) in selectedFieldCloud.force_breakdown" :key="`${force.force_type}-${index}`" class="force-row">
+            <strong>{{ force.force_type }}</strong>
+            <span>{{ force.magnitude.toFixed(4) }} · {{ force.source_cloud_id || 'self' }}</span>
+          </div>
+          <p v-if="!selectedFieldCloud.force_breakdown.length" class="empty-inline">Нет активных сил в этой revision.</p>
+          <button class="show-dimensions" @click="selectedFieldCloud = null">Закрыть cloud inspector</button>
+        </template>
+        <template v-else-if="selectedEntity">
           <h2>{{ selectedEntity.entity.label }}</h2>
           <p>масса {{ selectedEntity.entity.mass.toFixed(2) }} · устойчивость {{ selectedEntity.entity.stability.toFixed(2) }}</p>
           <h3>Параллельные проекции</h3>
@@ -128,6 +150,38 @@
         <p v-if="error" class="error">{{ error }}</p>
       </aside>
     </section>
+
+    <div v-if="resetOpen" class="reset-backdrop" role="presentation" @click.self="closeResetDialog">
+      <section class="reset-dialog" role="dialog" aria-modal="true" aria-labelledby="reset-title">
+        <div class="kicker">ТЕСТОВОЕ ОКРУЖЕНИЕ</div>
+        <h2 id="reset-title">Очистить тестовое пространство</h2>
+        <p>
+          Будут удалены обученные источники, граф событий, семантическое поле,
+          микровселенные, измерения, диалоги и тестовые трассы. Действие необратимо.
+        </p>
+        <label>
+          Область очистки
+          <select v-model="resetScope" :disabled="resetting">
+            <option value="FULL_TEST_STATE">Полный тестовый сброс</option>
+            <option value="DERIVED_SEMANTIC_SPACE">Только производное пространство</option>
+          </select>
+        </label>
+        <label>
+          Введите RESET TEST SPACE
+          <input v-model="resetConfirmation" :disabled="resetting" autocomplete="off" />
+        </label>
+        <p v-if="resetError" class="error">{{ resetError }}</p>
+        <div class="reset-actions">
+          <button type="button" class="cancel" :disabled="resetting" @click="closeResetDialog">Отмена</button>
+          <button
+            type="button"
+            class="danger"
+            :disabled="resetting || resetConfirmation !== 'RESET TEST SPACE'"
+            @click="resetTestSpace"
+          >{{ resetting ? 'Очищаю…' : 'Подтвердить очистку' }}</button>
+        </div>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -135,6 +189,10 @@
 import { computed, onMounted, ref } from 'vue';
 import { api } from '@/shared/api/client';
 import { copyJsonToClipboard } from '@/shared/utils/clipboard';
+import { useGraphStore } from '@/entities/graph/store';
+import { useGraphTrainingStore } from '@/entities/graph/trainingStore';
+import { useHiveStore } from '@/entities/hive/store';
+import { useModelStore } from '@/entities/model/store';
 
 type Universe = { id: string; name: string; entity_count: number; active_dimension_count: number };
 type Entity = { id: string; label: string; mass: number; stability: number; base_position: number[] };
@@ -167,7 +225,27 @@ type Profile = {
   word_forms?: WordForm[];
 };
 type ProjectionPoint = { id: string; label: string; x: number; y: number; projections: Record<string, number> };
-type SemanticField = { field_revision: number; projection_method: string; clouds: Array<{ cloud_id: string; concept_id: string; center: number[]; display_center: number[]; halo: number; mass: number; density: number; stability: number; active_dimensions: string[]; position_status: string }> };
+type FieldForce = { force_type: string; source_cloud_id?: string | null; magnitude: number; vector: number[]; evidence_ids: string[]; payload: Record<string, unknown> };
+type FieldCloud = {
+  cloud_id: string; concept_id: string; canonical_lemma: string;
+  bootstrap_center: number[]; learned_center: number[]; previous_revision_center: number[];
+  proposed_center: number[]; center: number[]; display_center: number[];
+  halo: number; mass: number; density: number; stability: number; permeability: number;
+  active_dimensions: string[]; position_status: string; projection_status: string;
+  validation: Record<string, unknown>; contextual_projections: Array<Record<string, unknown>>;
+  supporting_source_ids: string[]; supporting_event_ids: string[]; force_breakdown: FieldForce[];
+};
+type SemanticField = { field_revision: number; projection_method: string; display_projection_warning: string; revision_history: Array<Record<string, unknown>>; clouds: FieldCloud[] };
+
+type ResetScope = 'FULL_TEST_STATE' | 'DERIVED_SEMANTIC_SPACE';
+type ResetReport = {
+  reset: boolean;
+  scope: ResetScope;
+  mode: 'FRESH_SCHEMA' | 'CLEAR_DATA';
+  database_generation_id: string;
+  field_revision: number;
+  invariants: Record<string, boolean>;
+};
 
 const universes = ref<Universe[]>([]);
 const selectedUniverse = ref('words');
@@ -175,18 +253,27 @@ const base = ref<{ entities: Entity[] }>({ entities: [] });
 const dimensions = ref<Dimension[]>([]);
 const dimensionDetail = ref<DimensionDetail | null>(null);
 const selectedEntity = ref<Profile | null>(null);
+const selectedFieldCloud = ref<FieldCloud | null>(null);
 const selectedDimensions = ref<string[]>([]);
 const projectionPoints = ref<ProjectionPoint[]>([]);
-const semanticField = ref<SemanticField>({ field_revision: 0, projection_method: 'none', clouds: [] });
+const semanticField = ref<SemanticField>({ field_revision: 0, projection_method: 'none', display_projection_warning: 'Display projection — not semantic distance.', revision_history: [], clouds: [] });
 const error = ref('');
 const trainingText = ref('');
 const training = ref(false);
 const trainingStatus = ref('');
-const resetting = ref(false);
 const exporting = ref(false);
 const exportStatus = ref('');
+const resetOpen = ref(false);
+const resetting = ref(false);
+const resetScope = ref<ResetScope>('FULL_TEST_STATE');
+const resetConfirmation = ref('');
+const resetError = ref('');
+const graphStore = useGraphStore();
+const trainingStore = useGraphTrainingStore();
+const hiveStore = useHiveStore();
+const modelStore = useModelStore();
 const activeUniverse = computed(() => universes.value.find(item => item.id === selectedUniverse.value));
-const fieldPoints = computed<ProjectionPoint[]>(() => semanticField.value.clouds.map(cloud => ({ id: cloud.cloud_id, label: cloud.concept_id, x: (Math.max(-1, Math.min(1, cloud.display_center[0] || 0)) + 1) / 2, y: (Math.max(-1, Math.min(1, cloud.display_center[1] || 0)) + 1) / 2, projections: {} })));
+const fieldPoints = computed<ProjectionPoint[]>(() => semanticField.value.clouds.map(cloud => ({ id: cloud.cloud_id, label: cloud.canonical_lemma, x: (Math.max(-1, Math.min(1, cloud.display_center[0] || 0)) + 1) / 2, y: (Math.max(-1, Math.min(1, cloud.display_center[1] || 0)) + 1) / 2, projections: {} })));
 const displayPoints = computed<Array<Entity | ProjectionPoint>>(() => selectedDimensions.value.length ? projectionPoints.value : fieldPoints.value);
 const dimensionTitle = computed(() => selectedDimensions.value.map(compact).join(' × '));
 
@@ -199,7 +286,7 @@ function position(point: Entity | ProjectionPoint): Record<string, string> {
   return { left: `${18 + point.x * 64}%`, top: `${18 + point.y * 64}%`, fontSize: '14px' };
 }
 async function loadUniverse(): Promise<void> {
-  error.value = ''; selectedEntity.value = null; selectedDimensions.value = []; projectionPoints.value = []; dimensionDetail.value = null;
+  error.value = ''; selectedEntity.value = null; selectedFieldCloud.value = null; selectedDimensions.value = []; projectionPoints.value = []; dimensionDetail.value = null;
   try {
     const [space, fields, field] = await Promise.all([
       api.get<{ entities: Entity[] }>(`/api/universes/${selectedUniverse.value}/base-space`),
@@ -233,7 +320,11 @@ async function toggleDimension(id: string): Promise<void> {
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не удалось построить проекцию'; }
 }
 async function openEntity(id: string): Promise<void> {
-  try { selectedEntity.value = await api.get<Profile>(`/api/entities/${id}/dimension-profile`); }
+  if (!selectedDimensions.value.length) {
+    const cloud = semanticField.value.clouds.find(item => item.cloud_id === id);
+    if (cloud) { selectedFieldCloud.value = cloud; selectedEntity.value = null; return; }
+  }
+  try { selectedEntity.value = await api.get<Profile>(`/api/entities/${id}/dimension-profile`); selectedFieldCloud.value = null; }
   catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не удалось загрузить профиль'; }
 }
 async function refresh(): Promise<void> {
@@ -258,17 +349,68 @@ async function learn(): Promise<void> {
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не удалось выполнить обучение'; }
   finally { training.value = false; }
 }
-async function resetMemory(): Promise<void> {
-  if (!window.confirm('Очистить всю память? Будут удалены обучающие тексты, графы, микровселенные и история. Это действие нельзя отменить.')) return;
-  resetting.value = true; error.value = ''; trainingStatus.value = '';
-  try {
-    await api.post<{ reset: boolean }>('/api/reset');
-    selectedEntity.value = null; dimensions.value = []; base.value = { entities: [] };
-    trainingStatus.value = 'Память очищена. Можно начать новое обучение.';
-    await refresh();
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не удалось очистить память'; }
-  finally { resetting.value = false; }
+function openResetDialog(): void {
+  resetError.value = '';
+  resetConfirmation.value = '';
+  resetScope.value = 'FULL_TEST_STATE';
+  resetOpen.value = true;
 }
+function closeResetDialog(): void {
+  if (resetting.value) return;
+  resetOpen.value = false;
+  resetConfirmation.value = '';
+  resetError.value = '';
+}
+function clearProjectStorage(): void {
+  for (const storage of [window.localStorage, window.sessionStorage]) {
+    const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
+      .filter((key): key is string => Boolean(key) && key!.startsWith('superai'));
+    keys.forEach(key => storage.removeItem(key));
+  }
+}
+function clearClientRuntime(): void {
+  graphStore.clearLocalState();
+  trainingStore.clearLocalState();
+  hiveStore.clearRuntimeState();
+  modelStore.clearLocalState();
+  clearProjectStorage();
+  selectedEntity.value = null;
+  selectedFieldCloud.value = null;
+  selectedDimensions.value = [];
+  projectionPoints.value = [];
+  dimensionDetail.value = null;
+  trainingText.value = '';
+}
+async function resetTestSpace(): Promise<void> {
+  if (resetConfirmation.value !== 'RESET TEST SPACE') return;
+  resetting.value = true;
+  resetError.value = '';
+  error.value = '';
+  try {
+    const mode = resetScope.value === 'FULL_TEST_STATE' ? 'FRESH_SCHEMA' : 'CLEAR_DATA';
+    const report = await api.post<ResetReport>('/api/v2/testing/reset', {
+      scope: resetScope.value,
+      mode,
+      confirmation: resetConfirmation.value,
+    });
+    if (!report.reset || Object.values(report.invariants).some(value => !value)) {
+      throw new Error('Backend не подтвердил пустое и согласованное состояние');
+    }
+    clearClientRuntime();
+    await api.get('/api/readiness');
+    await refresh();
+    trainingStatus.value = resetScope.value === 'FULL_TEST_STATE'
+      ? 'Тестовое пространство очищено. Можно начинать новое обучение.'
+      : 'Производное пространство очищено. Доступна явная пересборка из Event Graph.';
+    resetOpen.value = false;
+    resetConfirmation.value = '';
+  } catch (cause) {
+    resetError.value = cause instanceof Error ? cause.message : 'Не удалось очистить тестовое пространство';
+  } finally {
+    resetting.value = false;
+  }
+}
+
 async function exportMemory(): Promise<void> {
   exporting.value = true; error.value = '';
   try {
@@ -299,5 +441,7 @@ nav { display: flex; align-items: center; gap: 18px; } nav a { color: #9db0c8; t
 .entity { position: absolute; transform: translate(-50%, -50%); border: 0; border-radius: 999px; padding: 7px 10px; color: #dff1ff; background: #1b5276cc; box-shadow: 0 0 0 1px #76ceff55, 0 0 20px #419bd044; cursor: pointer; }.entity:hover, .entity.active { background: #2b8fc8; box-shadow: 0 0 0 2px #b6e8ff; }.empty { position: absolute; inset: 45% 10%; text-align: center; color: #7d91ad; }
 .inspector h2 { margin: 7px 0; }.inspector h3 { margin: 18px 0 7px; font-size: 12px; color: #9db0c8; }.inspector p { color: #9db0c8; }.show-dimensions, .show-word-forms { border: 1px solid #38536f; border-radius: 6px; padding: 7px 9px; color: #b9e4fa; background: transparent; cursor: pointer; }.word-form { display: flex; width: 100%; justify-content: space-between; border: 0; border-radius: 6px; padding: 5px 7px; color: #d8e8f4; background: #152438; text-align: left; cursor: pointer; }.word-form:hover { background: #1d3b59; }.word-form em { color: #91aac3; font-size: 11px; font-style: normal; }.show-word-forms { margin-top: 10px; }.dimension-help { font-size: 12px; }.dimension { flex-direction: column; }.dimension.selected { background: #1a2f48; box-shadow: inset 3px 0 #6bc7f7; }.dimension small { color: #9db0c8; font-weight: 400; }.projection { align-items: center; gap: 8px; padding: 5px 0; cursor: default; }.projection span { width: 92px; color: #9db0c8; }.projection i { flex: 1; height: 7px; background: #25344a; border-radius: 99px; overflow: hidden; }.projection b { display: block; height: 100%; background: #5bc0f6; }.projection em { width: 30px; color: #d8e8f4; font-style: normal; font-size: 12px; }.error { color: #ff9e9e !important; }
 .dimension-detail { margin-top: 12px; padding: 10px; border: 1px solid #29435d; border-radius: 8px; background: #111e30; }.dimension-detail dl { display: grid; grid-template-columns: 1fr; gap: 2px; }.dimension-detail dt { margin-top: 7px; color: #7890ad; font-size: 10px; text-transform: uppercase; }.dimension-detail dd { margin: 0; color: #d3e2ef; font-size: 11px; overflow-wrap: anywhere; }
+.cloud-detail { display: grid; gap: 3px; }.cloud-detail dt { margin-top: 7px; color: #7890ad; font-size: 10px; text-transform: uppercase; }.cloud-detail dd { margin: 0; color: #d3e2ef; font-size: 11px; overflow-wrap: anywhere; }.force-row { display: grid; gap: 2px; margin: 5px 0; padding: 7px; border: 1px solid #29435d; border-radius: 6px; background: #111e30; }.force-row strong { color: #b9e4fa; font-size: 10px; }.force-row span { color: #8fa7bd; font-size: 10px; }.empty-inline { color: #7d91ad; font-size: 11px; }
+.reset-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: #040812cc; backdrop-filter: blur(4px); }.reset-dialog { width: min(520px, 100%); border: 1px solid #6e3540; border-radius: 14px; padding: 22px; background: #131b29; box-shadow: 0 24px 80px #000a; }.reset-dialog h2 { margin: 5px 0 10px; }.reset-dialog p { color: #aebed0; }.reset-dialog label { display: grid; gap: 6px; margin-top: 14px; color: #cbd8e5; font-size: 12px; }.reset-dialog select, .reset-dialog input { border: 1px solid #485d73; border-radius: 7px; padding: 9px; color: #eef5fb; background: #0c1522; font: inherit; }.reset-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }.reset-actions button { border-radius: 7px; padding: 9px 12px; cursor: pointer; }.reset-actions .cancel { border: 1px solid #485d73; color: #c9d8e5; background: transparent; }.reset-actions .danger { border: 1px solid #a94755; color: #fff; background: #8f3040; font-weight: 700; }.reset-actions button:disabled { opacity: .45; cursor: default; }
 @media (max-width: 960px) { .workspace { grid-template-columns: 190px 1fr; }.inspector { grid-column: 1 / -1; }.map { min-height: 430px; } }
 </style>

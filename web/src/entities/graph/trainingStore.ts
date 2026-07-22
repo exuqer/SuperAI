@@ -1,4 +1,4 @@
-/** Training state for V2.7 events and learned slots. */
+/** Training state for V3.0 events and learned slots. */
 
 import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
@@ -24,6 +24,16 @@ export const useGraphTrainingStore = defineStore('graph-training-v27', () => {
   );
   const slotCount = computed(() => result.value?.local_slots?.length || 0);
   const prototypeCount = computed(() => result.value?.slot_prototypes?.length || 0);
+
+  function clearLocalState(): void {
+    result.value = null;
+    loading.value = false;
+    error.value = '';
+    text.value = '';
+    domainKey.value = '';
+    independentKey.value = '';
+    storage.setLastTrainingText('');
+  }
 
   async function learn(): Promise<TrainingResponse> {
     const normalized = text.value.trim();
@@ -59,6 +69,7 @@ export const useGraphTrainingStore = defineStore('graph-training-v27', () => {
     participantCount,
     slotCount,
     prototypeCount,
+    clearLocalState,
     learn,
   };
 });

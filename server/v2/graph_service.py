@@ -1,4 +1,4 @@
-"""Application services for the fresh V2.7 graph pipeline."""
+"""Application services for the SuperAI V3.0 spatial-evidential pipeline."""
 
 from __future__ import annotations
 
@@ -1631,7 +1631,7 @@ class GraphDialogueService:
             "provenance": {
                 "source_event_ids": list(supporting_events),
                 "evidence_ids": list(answer.get("evidence_ids") or []),
-                "independent_source_count": len(set(answer.get("evidence_ids") or [])),
+                "independent_source_count": int(answer.get("independent_source_count") or 0),
             },
             "hybrid_answer_structure": answer,
             "authoritative": True,

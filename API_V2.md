@@ -1,4 +1,4 @@
-# API SuperAI V2.8
+# API SuperAI V3.0
 
 Базовый адрес при локальном запуске: `http://127.0.0.1:8000`. Полная
 машиночитаемая схема доступна в `/openapi.json`, интерактивная — в `/docs`.
@@ -84,7 +84,8 @@ Batch-операции:
   "query_graph": {},
   "candidate_bindings": [],
   "rejected_events": [],
-  "selected_binding": {},
+  "selected_bindings": [],
+  "binding_configuration": {},
   "answer": {
     "status": "RESOLVED",
     "surface": "Борис.",
@@ -107,8 +108,8 @@ ResponsePlan и validation. Для вопросительных GAP в `QueryGra
 многомерные проекции и прогноз локальных слотов; на этом этапе он не влияет
 на ответ.
 
-`GET /api/v2/hives/{id}/bindings` возвращает текущие candidate bindings,
-выбранное binding и причины отклонения событий.
+`GET /api/v2/hives/{id}/bindings` возвращает канонический массив `selected_bindings`,
+`binding_configurations`, candidate bindings и причины отклонения событий.
 
 Дополнительно доступны:
 
@@ -123,7 +124,7 @@ ResponsePlan и validation. Для вопросительных GAP в `QueryGra
 
 ## Микровселенные
 
-Эти методы читают производную память V2.8. После `learn` ответ содержит
+Эти методы читают производную память V3.0. После `learn` ответ содержит
 `universe_update`; он сообщает, был ли подтверждённый источник спроецирован в
 микровселенные.
 
@@ -158,7 +159,32 @@ POST /api/entities/compare
 
 ## Операции с памятью
 
-- `GET /api/health` — статус процесса и версия событийного графа.
+- `GET /api/health` — статус процесса.
+- `GET /api/readiness` — проверка схемы, морфологии и reasoning pipeline.
 - `GET /api/export/memory` — переносимый JSON-снимок всех таблиц текущей памяти.
-- `POST /api/reset` — **разрушительно** удаляет граф и производные
-  микровселенные, затем создаёт пустой реестр микровселенных.
+- `POST /api/reset` — admin-совместимый alias полного сброса. Он использует
+  тот же `TestingResetService`, что и тестовый endpoint.
+
+### Очистка тестового пространства
+
+`POST /api/v2/testing/reset` выполняет явный проверяемый сброс. В production
+нужен `X-Admin-Token`. Для локальной разработки endpoint можно включить только
+через `SUPERAI_ALLOW_TEST_RESET=true`; строка подтверждения обязательна всегда.
+
+```json
+{
+  "scope": "FULL_TEST_STATE",
+  "mode": "FRESH_SCHEMA",
+  "confirmation": "RESET TEST SPACE"
+}
+```
+
+Поддерживаемые области: `FULL_TEST_STATE`, `DERIVED_SEMANTIC_SPACE`,
+`DIALOGUE_STATE`, `REASONING_TRACES`, `EXPERIMENT_STATE`. Для полного нового
+эксперимента используется `FRESH_SCHEMA`; выборочные области используют
+`CLEAR_DATA`. Ответ содержит счётчики до/после, generation ID, состояние
+runtime-кэшей и проверенные инварианты пустого пространства.
+
+После `DERIVED_SEMANTIC_SPACE` автоматическая пересборка не выполняется. Её
+можно явно запустить через `POST /api/v2/testing/rebuild-derived-space` с тем
+же confirmation-контрактом.

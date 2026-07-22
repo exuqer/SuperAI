@@ -1,11 +1,13 @@
-# Architecture SuperAI V2.8
+# Architecture SuperAI V3.0
 
-V2.8 состоит из двух связанных, но не равноправных слоёв. Событийный граф V2.7
-без фиксированных ролей хранит доказательства и отвечает на вопросы. Динамические
-микровселенные V2.8 — производная геометрическая память для просмотра и
-анализа подтверждённых доказательств.
+V3.0 — единый пространственно-графовый runtime. Непрерывное Semantic Field и
+динамические микровселенные организуют смысл, контекстные проекции, скрытые
+измерения и маршруты поиска. Событийный граф без фиксированных ролей хранит
+доказательства, provenance, отрицания и временные ограничения. Пространственная
+близость предлагает гипотезы, а Event Graph подтверждает или отклоняет
+фактический ответ.
 
-## Слой доказательств: событийный граф V2.7
+## Evidential layer: событийный граф V3.0
 
 Универсальные узлы:
 
@@ -35,7 +37,7 @@ CONTRADICTS
 ## Модули
 
 - `graph_models.py` — неизменяемые контракты узлов, сигнатур, слотов и binding.
-- `graph_schema.py` — свежая SQLite-схема V2.9 и индексы обоих слоёв.
+- `graph_schema.py` — свежая SQLite-схема V3.0 и индексы обоих слоёв.
 - `graph_learning.py` — similarity, центроиды, local slots, slot sets,
   prototypes, anonymous semantic clusters и construction clusters.
 - `event_graph.py` — поздняя морфология и материализация подтверждённых событий.
@@ -80,7 +82,7 @@ predicate index
 режиме `SHADOW`: они видны в trace и собирают историю принятых и отклонённых
 кандидатов, но не меняют admission и ранжирование `GraphMatcher`.
 
-## Динамические микровселенные V2.8
+## Semantic layer: динамические микровселенные и Semantic Field V3.0
 
 `server/v2/universe.py` строит отдельную производную память. Реестр содержит
 микровселенные `symbols`, `morphemes`, `word_forms`, `words`, `usages`,
@@ -98,7 +100,10 @@ predicate index
 - **transition** — наблюдённая связь между масштабами.
 
 После обучения `GraphTrainingService` передаёт в этот слой только источник со
-статусом `CONFIRMED`. При retract производные употребления и осиротевшие
+статусом `CONFIRMED`. Semantic Field строит revisioned cloud projections и
+участвует в Query Field Projection, локальной активации и dimensional retrieval.
+Его результаты хранятся отдельно как `SpatialSupport`; только записи Event Graph
+могут стать `GraphEvidence` для режима `OBSERVED`. При retract производные употребления и осиротевшие
 сущности удаляются, слабые измерения могут быть помечены `pruned`.
 
 Первый взаимозаменяемый алгоритм — `SparseResidualDiscoverer`. Он извлекает
@@ -124,6 +129,18 @@ generation_version
 migration_version
 ```
 
-Схема SQLite: `schema_version = 33`,
-`migration_version = fresh-v2.9-query-operators`. Несовместимое хранилище
+Схема SQLite: `schema_version = 38`,
+`migration_version = fresh-v3.0-spatial-reset`. Несовместимое хранилище
 пересоздаётся: перенос прежних таблиц и backfill намеренно не выполняются.
+
+
+
+## Воспроизводимый тестовый reset
+
+`TestingResetService` является единственной реализацией разрушительной очистки.
+Он используется HTTP API, CLI и compact experiment runner. `FULL_TEST_STATE /
+FRESH_SCHEMA` закрывает reusable SQLite handle, удаляет основной файл, WAL и
+SHM, создаёт schema 38, восстанавливает пустой реестр микровселенных и очищает
+process-local acceleration indexes. `DERIVED_SEMANTIC_SPACE` сохраняет
+подтверждённый Event Graph и не запускает неявную пересборку. Каждый reset
+создаёт новый `database_generation_id`, audit record и отчёт инвариантов.

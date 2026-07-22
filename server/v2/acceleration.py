@@ -380,6 +380,17 @@ class AccelerationRuntime:
         key = (str(Path(database_path)), str(revision))
         return self._route_cache.setdefault(key, RouteGraphIndex(self))
 
+    def reset_runtime_state(self) -> dict[str, Any]:
+        """Drop process-local indices after a destructive memory reset."""
+        projection_count = len(self._projection_cache)
+        route_count = len(self._route_cache)
+        self._projection_cache.clear()
+        self._route_cache.clear()
+        return {
+            "projection_indexes_cleared": projection_count,
+            "route_indexes_cleared": route_count,
+        }
+
     def diagnostics(self) -> dict[str, Any]:
         return {
             "acceleration_mode": self.mode,

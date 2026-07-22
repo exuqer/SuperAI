@@ -535,11 +535,9 @@ export const useHiveStore = defineStore('hive', () => {
     }
   }
 
-  async function resetHive() {
+  function clearRuntimeState() {
     storage.removeActiveHive();
     storage.removeChatCache();
-    const conversationId = crypto.randomUUID();
-    storage.setConversationId(conversationId);
     messages.value = [];
     decision.value = null;
     metrics.value = null;
@@ -574,6 +572,12 @@ export const useHiveStore = defineStore('hive', () => {
     selectedCell.value = null;
     goalText.value = '';
     runResult.value = null;
+  }
+
+  async function resetHive() {
+    clearRuntimeState();
+    const conversationId = crypto.randomUUID();
+    storage.setConversationId(conversationId);
     await createHive();
   }
 
@@ -736,6 +740,7 @@ export const useHiveStore = defineStore('hive', () => {
     loadJson,
     openJson,
     copyJson,
+    clearRuntimeState,
     resetHive,
     restoreHive,
     applyState,

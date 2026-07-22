@@ -1,4 +1,4 @@
-"""Application boundary for the V2.7 graph dialogue service."""
+"""Application boundary for the V3.0 dialogue service."""
 
 from __future__ import annotations
 

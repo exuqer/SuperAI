@@ -1,4 +1,4 @@
-"""Public query service backed exclusively by V2.7 QueryGraph."""
+"""Public query service backed exclusively by V3.0 QueryGraph."""
 
 from __future__ import annotations
 

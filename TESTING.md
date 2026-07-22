@@ -25,3 +25,40 @@ python3 -m pytest -q tests/test_dynamic_universes.py
 Перед ручной проверкой HTTP-сервиса запускайте тесты с отдельной БД, как это
 делает `tests/conftest.py`; рабочая база по умолчанию находится в
 `.superai/state.sqlite` и несовместимая схема пересоздаётся.
+
+
+## Чистое тестовое пространство
+
+Для полного воспроизводимого сброса локальной тестовой памяти:
+
+```bash
+SUPERAI_ALLOW_TEST_RESET=true \
+python3 -m server.v2.testing_reset \
+  --scope full \
+  --mode fresh-schema \
+  --confirm "RESET TEST SPACE"
+```
+
+Для очистки только производного Semantic Field и микровселенных с сохранением
+Event Graph:
+
+```bash
+SUPERAI_ALLOW_TEST_RESET=true \
+python3 -m server.v2.testing_reset \
+  --scope derived \
+  --mode clear-data \
+  --confirm "RESET TEST SPACE"
+```
+
+После выборочной очистки производный слой пересобирается явно через
+`POST /api/v2/testing/rebuild-derived-space`. Технический rebuild не должен
+увеличивать evidence, activation count или массу облаков.
+
+Целевой reset-набор:
+
+```bash
+python3 -m pytest -q \
+  tests/test_testing_reset.py \
+  tests/api/test_testing_reset_api.py \
+  tests/semantic_field/test_reset_invariants.py
+```

@@ -5,7 +5,7 @@
         <span class="brand-mark">S</span>
         <span>
           <b>SuperAI</b>
-          <small>Event Graph · V2.7</small>
+          <small>Semantic Space + Evidence Graph · V3.0</small>
         </span>
       </RouterLink>
       <nav aria-label="Основная навигация">

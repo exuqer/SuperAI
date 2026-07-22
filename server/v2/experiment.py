@@ -30,6 +30,7 @@ from .graph_repository import (
 from .acceleration import AccelerationRuntime
 from .graph_service import GraphDialogueService, GraphTrainingService
 from .universe import UniverseService
+from .testing_reset import ResetMode, ResetScope, TestingResetService
 
 
 DATASET_VERSION = "compact-iteration-1"
@@ -552,7 +553,11 @@ class CompactExperiment:
         sql_before, executes_before = database.metrics_snapshot()
         serialization_before = serialization_snapshot()
         counts = self.validate_dataset()
-        self.repository.reset()
+        TestingResetService(self.repository).reset(
+            ResetScope.FULL_TEST_STATE,
+            ResetMode.CLEAR_DATA,
+            requested_by="compact-experiment",
+        )
         self.universes._ensure_universes()
         started_at = utcnow()
         experiment_id = stable_id(

@@ -1,4 +1,4 @@
-"""Public V2.7 hive facade over role-free event/query graphs."""
+"""Public V3.0 hive facade over role-free event/query graphs."""
 
 from __future__ import annotations
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from time import perf_counter
+from dataclasses import replace
 from typing import Any, Mapping
 
 from .activation import spread_activation
@@ -124,6 +125,19 @@ class HybridDialoguePipeline:
             stage("HYPOTHESIS_BUILD_AFTER_BEES", lambda: build_hypotheses(workspace).hypotheses)
             resonance = stage("RESONANCE_AFTER_BEES", lambda: run_resonance(workspace, self.config.get("resonance")))
         answer = stage("ANSWER_STRUCTURE", lambda: compile_answer_structure(workspace))
+        if frame.trace.get("parser_mode") == "DEGRADED_UNVERIFIED":
+            answer = replace(
+                answer,
+                epistemic_mode=(
+                    "UNVERIFIED_ASSOCIATION"
+                    if answer.status == "STABLE"
+                    else "UNKNOWN"
+                ),
+                confidence=min(answer.confidence, 0.35),
+                uncertainties=tuple(
+                    dict.fromkeys([*answer.uncertainties, "DEGRADED_UNVERIFIED_QUERY_FRAME"])
+                ),
+            )
         query_graph = analysis.get("query_graph") if isinstance(analysis, Mapping) and isinstance(analysis.get("query_graph"), Mapping) else {}
         return {
             "debug_payload_version": "4.0.0",

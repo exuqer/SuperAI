@@ -1,8 +1,10 @@
 .superai/
 .pytest_cache/
+.ruff_cache/
 __pycache__/
 *.py[cod]
 *.egg-info/
+.venv/
 web/node_modules/
 web/dist/
 playwright-report/

@@ -1,4 +1,4 @@
-"""HTTP routes for V2.7 role-free graph dialogue."""
+"""HTTP routes for V3.0 spatial-evidential dialogue."""
 
 from __future__ import annotations
 

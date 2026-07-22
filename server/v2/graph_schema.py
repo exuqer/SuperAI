@@ -1,4 +1,4 @@
-"""Fresh V2.7 SQLite schema for role-free event graphs."""
+"""Fresh SuperAI V3.0 spatial-evidential SQLite schema."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from .graph_models import (
 )
 
 
-# Query-operator evidence is an additive extension to V2.8's graph schema.
-# Keeping this version stable lets existing V2.8 databases gain the tables
+# Query-operator evidence is an additive extension to V3.0's graph schema.
+# Keeping this version stable lets existing V3.0 databases gain the tables
 # below through CREATE IF NOT EXISTS instead of being reset.
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 
 def _reset_incompatible_schema(conn: sqlite3.Connection) -> None:
@@ -93,6 +93,18 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS testing_reset_audit (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            database_generation_id TEXT NOT NULL,
+            report_json TEXT NOT NULL DEFAULT '{}',
+            requested_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS testing_reset_audit_created_idx
+            ON testing_reset_audit(created_at DESC);
 
         CREATE TABLE IF NOT EXISTS knowledge_sources (
             id TEXT PRIMARY KEY,
@@ -1380,6 +1392,7 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS field_source_contributions (
             source_id TEXT NOT NULL,
             source_revision INTEGER NOT NULL,
+            field_revision INTEGER NOT NULL,
             event_id TEXT NOT NULL,
             cloud_id TEXT NOT NULL,
             mass_delta REAL NOT NULL DEFAULT 0,
@@ -1388,8 +1401,9 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             shape_delta_json TEXT NOT NULL DEFAULT '{}',
             context_projection_ids_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
-            PRIMARY KEY(source_id, source_revision, event_id, cloud_id),
-            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE
+            PRIMARY KEY(source_id, source_revision, field_revision, event_id, cloud_id),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(field_revision) REFERENCES field_revisions(revision) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS semantic_field_force_traces (
             id TEXT PRIMARY KEY,
@@ -1408,7 +1422,9 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS semantic_cloud_revision_lookup_idx
             ON semantic_cloud_projection_revisions(universe_id, field_revision);
         CREATE INDEX IF NOT EXISTS field_source_contribution_lookup_idx
-            ON field_source_contributions(source_id, source_revision);
+            ON field_source_contributions(source_id, source_revision, field_revision);
+        CREATE INDEX IF NOT EXISTS field_source_contribution_revision_idx
+            ON field_source_contributions(field_revision, cloud_id);
         CREATE TABLE IF NOT EXISTS contextual_cloud_projections (
             id TEXT PRIMARY KEY,
             cloud_id TEXT NOT NULL,
@@ -1421,6 +1437,22 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE,
             FOREIGN KEY(field_revision) REFERENCES field_revisions(revision)
         );
+        CREATE TABLE IF NOT EXISTS contextual_cloud_projection_contributions (
+            source_id TEXT NOT NULL,
+            source_revision INTEGER NOT NULL,
+            event_id TEXT NOT NULL,
+            cloud_id TEXT NOT NULL,
+            context_key TEXT NOT NULL,
+            activation_delta INTEGER NOT NULL DEFAULT 1,
+            field_revision INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(source_id, source_revision, event_id, cloud_id, context_key, field_revision),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(field_revision) REFERENCES field_revisions(revision) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS contextual_projection_contribution_revision_idx
+            ON contextual_cloud_projection_contributions(field_revision, cloud_id, context_key);
+
         CREATE TABLE IF NOT EXISTS field_transitions (
             id TEXT PRIMARY KEY,
             revision INTEGER NOT NULL,

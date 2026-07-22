@@ -1,4 +1,4 @@
-"""Role-free event graph contracts used by the V2.7 pipeline.
+"""Role-free event graph contracts used by the SuperAI V3.0 pipeline.
 
 The computational model deliberately knows only graph nodes, structural
 attachments, observations and gaps.  Human-readable labels may be attached to
@@ -13,16 +13,16 @@ from types import MappingProxyType
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 
-EVENT_SCHEMA_VERSION = "2.7.0"
-SLOT_MODEL_VERSION = "2.7.0"
-CONSTRUCTION_MODEL_VERSION = "2.7.0"
-SEMANTIC_CLUSTER_VERSION = "2.7.0"
-QUERY_GRAPH_VERSION = "2.7.0"
-GENERATION_VERSION = "2.7.0"
+EVENT_SCHEMA_VERSION = "3.0.0"
+SLOT_MODEL_VERSION = "3.0.0"
+CONSTRUCTION_MODEL_VERSION = "3.0.0"
+SEMANTIC_CLUSTER_VERSION = "3.0.0"
+QUERY_GRAPH_VERSION = "3.0.0"
+GENERATION_VERSION = "3.0.0"
 # The graph database is intentionally recreated when this contract changes.
 # Query-operator occurrences became an explicit learned layer in 2.9, so
 # there is no legacy merge path for databases without this evidence.
-MIGRATION_VERSION = "fresh-v2.9-query-operators"
+MIGRATION_VERSION = "fresh-v3.0-spatial-reset"
 
 
 class StringEnum(str, Enum):
