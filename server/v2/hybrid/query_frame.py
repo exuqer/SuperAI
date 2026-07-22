@@ -38,8 +38,8 @@ CURRENT_WORDS = {"сейчас", "теперь", "ныне"}
 HISTORICAL_WORDS = {"сначала", "раньше", "ранее", "прежде"}
 
 
-def _normalise(text: str) -> str:
-    return " ".join(TOKEN_RE.findall(text.casefold().replace("ё", "е")))
+def _normalise(text: Any) -> str:
+    return " ".join(TOKEN_RE.findall(str(text or "").casefold().replace("ё", "е")))
 
 
 def _tokens(text: str) -> list[str]:
@@ -99,6 +99,93 @@ def _reference_lemma(value: Any) -> str:
     return _normalise(value)
 
 
+def _predicate_hypotheses_from_analysis(
+    predicate_data: Mapping[str, Any],
+    language_analysis: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Preserve all morphology-backed predicate lemmas without lexical hardcode."""
+    values: dict[str, dict[str, Any]] = {}
+
+    def add(lemma: Any, confidence: Any, *, source: str, selected: bool = False) -> None:
+        normalized = _normalise(lemma)
+        if not normalized:
+            return
+        try:
+            score = float(confidence)
+        except (TypeError, ValueError):
+            score = 0.0
+        current = values.get(normalized)
+        candidate = {
+            "type": "morphological_predicate",
+            "predicate": normalized,
+            "lemma": normalized,
+            "confidence": clamp(score),
+            "selected": bool(selected),
+            "source": source,
+        }
+        if current is None or candidate["confidence"] > current["confidence"]:
+            values[normalized] = candidate
+        elif selected:
+            current["selected"] = True
+
+    predicate_analysis = (
+        language_analysis.get("predicate")
+        if isinstance(language_analysis.get("predicate"), Mapping)
+        else {}
+    )
+    for item in predicate_analysis.get("morphological_analyses") or ():
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("pos") or "").upper() not in {"VERB", "INFN", "PRTF", "PRTS", "GRND"}:
+            continue
+        add(
+            item.get("lemma"),
+            item.get("confidence", 0.0),
+            source="LANGUAGE_MORPHOLOGY",
+            selected=bool(item.get("selected")),
+        )
+    for clause in language_analysis.get("clauses") or ():
+        if not isinstance(clause, Mapping):
+            continue
+        for item in clause.get("predicate_hypotheses") or ():
+            if isinstance(item, Mapping):
+                add(
+                    item.get("lemma"),
+                    item.get("confidence", 0.0),
+                    source="CLAUSE_PREDICATE_HYPOTHESIS",
+                    selected=bool(item.get("selected")),
+                )
+    add(
+        predicate_data.get("lemma") or predicate_data.get("surface"),
+        0.92 if not values else 0.55,
+        source="QUERY_GRAPH_PREDICATE",
+        selected=not values,
+    )
+    return tuple(
+        sorted(values.values(), key=lambda item: (-float(item["confidence"]), str(item["predicate"])))
+    )
+
+
+def _operational_gap_kind(
+    gap_data: Mapping[str, Any],
+    operator: Mapping[str, Any] | None,
+) -> str:
+    """Keep unseen operators broad until successful evidence supports specialization."""
+    kind = str(gap_data.get("gap_kind") or "ENTITY")
+    evidence = gap_data.get("evidence") if isinstance(gap_data.get("evidence"), Mapping) else {}
+    profile = evidence.get("learned_gap_profile") if isinstance(evidence.get("learned_gap_profile"), Mapping) else {}
+    profile_status = str(profile.get("profile_status") or "UNSEEN").upper()
+    support_count = int(profile.get("support_count") or 0)
+    operator_type = str((operator or {}).get("operator_type") or "")
+    if (
+        kind == "EVENT_PROPERTY"
+        and operator_type == "EVENT_ATTACHMENT"
+        and (profile_status in {"UNSEEN", "SHADOW"} or support_count < 3)
+    ):
+        return "EVENT_ATTACHMENT"
+    return kind
+
+
 def from_query_graph(
     query_graph: Mapping[str, Any],
     language_analysis: Mapping[str, Any] | None = None,
@@ -121,12 +208,14 @@ def from_query_graph(
         for item in operators if isinstance(item, Mapping)
     ]
     predicate_data = pattern.get("predicate") if isinstance(pattern.get("predicate"), Mapping) else {}
-    predicate = str(predicate_data.get("lemma") or predicate_data.get("surface") or "") or None
+    predicate_hypotheses = _predicate_hypotheses_from_analysis(predicate_data, analysis)
+    unique_predicates = {str(item.get("predicate") or "") for item in predicate_hypotheses if item.get("predicate")}
+    predicate = next(iter(unique_predicates)) if len(unique_predicates) == 1 else None
     nodes = [_reference(node) for node in pattern.get("known_nodes") or () if isinstance(node, Mapping)]
     target_gaps = pattern.get("target_gaps") or ([pattern["target_gap"]] if isinstance(pattern.get("target_gap"), Mapping) else [])
     type_map = {
         "EVENT_PREDICATE": "predicate", "NODE_COMPONENT": "component",
-        "EVENT_PROPERTY": "property", "EVENT_ATTACHMENT": "entity",
+        "EVENT_PROPERTY": "property", "EVENT_ATTACHMENT": "attachment",
         "ENTITY": "entity", "QUANTITY": "quantity", "LOCATION": "location",
         "TIME": "time", "STATE": "state",
     }
@@ -135,7 +224,8 @@ def from_query_graph(
         if not isinstance(gap_data, Mapping):
             continue
         constraints = ()
-        kind = str(gap_data.get("gap_kind") or "ENTITY")
+        operator = operators[index] if index < len(operators) and isinstance(operators[index], Mapping) else None
+        kind = _operational_gap_kind(gap_data, operator)
         gaps.append(Gap(
             gap_id=str(gap_data.get("node_id") or f"gap_{index + 1}_{query_id[-8:]}"),
             source_query_id=query_id,
@@ -161,8 +251,15 @@ def from_query_graph(
         continuation_of=continuation_of,
         confidence=0.92 if gaps else 0.35,
         context_inheritance={"mode": "ALLOW" if continuation_of else "BLOCK", "source_query_id": continuation_of, "inherited_elements": []},
-        predicate_hypotheses=(({"type": "literal_predicate", "predicate": predicate, "confidence": 0.92},) if predicate else ({"type": "unknown_predicate_question", "confidence": 0.81},)),
-        trace={"source": "CANONICAL_QUERY_GRAPH", "query_graph_id": query_id, "gap_count": len(gaps), "parser_mode": "CANONICAL"},
+        predicate_hypotheses=(predicate_hypotheses or ({"type": "unknown_predicate_question", "confidence": 0.81},)),
+        trace={
+            "source": "CANONICAL_QUERY_GRAPH",
+            "query_graph_id": query_id,
+            "gap_count": len(gaps),
+            "parser_mode": "CANONICAL",
+            "predicate_resolution_status": "RESOLVED" if predicate else ("AMBIGUOUS" if predicate_hypotheses else "UNKNOWN"),
+            "predicate_hypothesis_count": len(predicate_hypotheses),
+        },
     )
 
 
@@ -286,7 +383,9 @@ def build_query_frame(
 ) -> QueryFrame:
     graph = analysis.get("query_graph") if isinstance(analysis, Mapping) else None
     if isinstance(graph, Mapping):
-        language = graph.get("trace", {}).get("language_analysis") if isinstance(graph.get("trace"), Mapping) else None
+        language = analysis.get("language_analysis") if isinstance(analysis.get("language_analysis"), Mapping) else None
+        if language is None:
+            language = graph.get("trace", {}).get("language_analysis") if isinstance(graph.get("trace"), Mapping) else None
         return from_query_graph(graph, language if isinstance(language, Mapping) else None, session_context)
     raw_text = str(text or "").strip()
     normalized = _normalise(raw_text)

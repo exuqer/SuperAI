@@ -416,6 +416,8 @@ class BoundedAssociativeWorkspace:
     constraints: List[Mapping[str, Any]] = field(default_factory=list)
     exclusions: List[str] = field(default_factory=list)
     temporal_scope: Optional[Mapping[str, Any]] = None
+    explicit_predicate: Optional[str] = None
+    predicate_hypotheses: List[Mapping[str, Any]] = field(default_factory=list)
     candidates: List[Candidate] = field(default_factory=list)
     configurations: List[EventCandidateConfiguration] = field(default_factory=list)
     hypotheses: List[Hypothesis] = field(default_factory=list)
@@ -429,11 +431,17 @@ class BoundedAssociativeWorkspace:
     def _section(self, element_type: str) -> List[WorkspaceElement]:
         return {
             "entity": self.entities,
+            "entities": self.entities,
             "event": self.events,
+            "events": self.events,
             "scene": self.scenes,
+            "scenes": self.scenes,
             "cloud": self.clouds,
+            "clouds": self.clouds,
             "context": self.active_context,
+            "active_context": self.active_context,
             "anchor": self.anchors,
+            "anchors": self.anchors,
         }.get(element_type, self.entities)
 
     def add_element(self, element: WorkspaceElement, section: Optional[str] = None) -> WorkspaceElement:
@@ -531,6 +539,8 @@ class BoundedAssociativeWorkspace:
             "gaps": [item.as_dict() for item in self.gaps],
             "constraints": plain(self.constraints), "exclusions": list(self.exclusions),
             "temporal_scope": plain(self.temporal_scope),
+            "explicit_predicate": self.explicit_predicate,
+            "predicate_hypotheses": plain(self.predicate_hypotheses),
             "candidates": [item.as_dict() for item in self.candidates],
             "configurations": [item.as_dict() for item in self.configurations],
             "hypotheses": [item.as_dict() for item in self.hypotheses],

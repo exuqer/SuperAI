@@ -60,3 +60,30 @@ python -m pytest -q tests/test_testing_reset.py \
 Результат целевого набора: `8 passed`.
 
 Полная языковая регрессия требует установки locked dependency `pymorphy3`.
+
+## Исправление Auto retrieval и перехода Field → Evidence Graph
+
+- Режим интерфейса «Авто» теперь передаёт `LOCAL_THEN_GLOBAL`; отдельные режимы
+  `LOCAL_ONLY` и `GLOBAL_ONLY` сохраняют строгую семантику.
+- Обычный query contract использует `retrieval_scope`; `resonance_scope`
+  остаётся только у отдельного локального resonance action.
+- `LOCAL_THEN_GLOBAL` выполняет локальную фазу, а затем глобальный fallback
+  только при отсутствии устойчивого evidential ответа.
+- В debug payload добавлен `scope_trace`: запрошенная и разрешённая область,
+  число локальных/глобальных событий, фаза и факт fallback.
+- Структурированный query anchor использует `concept_id/entity_id/node_id`, а не
+  строковое представление словаря.
+- Неоднозначные predicate lemmas сохраняются из морфологических анализов и
+  проверяются по GraphEvidence; словарный hardcode отдельных омонимов удалён.
+- Необученный question operator остаётся широким `EVENT_ATTACHMENT` до
+  подтверждённой специализации его shadow profile.
+- Добавлен `EVENT_ATTACHMENT` candidate builder с сохранением предлога в
+  surface answer, например `у забора`.
+- Добавлен этап `FIELD_TO_GRAPH_BRIDGE`: активированное semantic cloud
+  разрешается в concept, participant, event и только затем в `GraphEvidence`.
+- Field Bee возвращает `SPATIAL_SUPPORT_FOUND`, а не ложный общий `FOUND`;
+  нулевой результат получает `NO_RESULT`.
+- Spatial support дедуплицируется по query, field revision, cloud и region и не
+  размножается при повторном обнаружении пчелой.
+- Добавлены чистые regression tests для anchor identity, predicate ambiguity,
+  field-to-graph bridge, Bee statuses и zero-score rejection.

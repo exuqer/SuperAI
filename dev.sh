@@ -9,6 +9,7 @@ set -e
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_PORT=${BACKEND_PORT:-8000}
 FRONTEND_DIR="$ROOT_DIR/web"
+export SUPERAI_ALLOW_TEST_RESET=true
 
 cleanup() {
   echo ""

@@ -133,6 +133,35 @@ def _relation_satisfied(expected: str, participant: Mapping[str, Any], payload: 
     return expected in observed
 
 
+def _workspace_predicate_lemmas(workspace: BoundedAssociativeWorkspace) -> set[str]:
+    values = {_norm(workspace.explicit_predicate)} if workspace.explicit_predicate else set()
+    for item in workspace.predicate_hypotheses:
+        if isinstance(item, Mapping):
+            value = _norm(item.get("predicate") or item.get("lemma"))
+            if value:
+                values.add(value)
+    return {item for item in values if item}
+
+
+def _attachment_option(participant: Mapping[str, Any]) -> dict[str, Any]:
+    option = dict(participant)
+    base_surface = str(
+        participant.get("surface")
+        or participant.get("head_surface")
+        or participant.get("value")
+        or participant.get("head_lemma")
+        or ""
+    ).strip()
+    preposition = str(participant.get("preposition") or "").strip()
+    option["surface"] = f"{preposition} {base_surface}".strip()
+    option["lemma"] = str(participant.get("head_lemma") or participant.get("lemma") or base_surface)
+    option["relation_surface"] = preposition or None
+    option["attachment_type_hypotheses"] = [
+        {"type": "PREPOSITIONAL_ATTACHMENT", "confidence": 0.82}
+    ] if preposition else [{"type": "EVENT_PARTICIPANT", "confidence": 0.55}]
+    return option
+
+
 def build_configurations(workspace: BoundedAssociativeWorkspace) -> BoundedAssociativeWorkspace:
     """Turn retrieved events into the only admissible evidence structures."""
     workspace.configurations.clear()
@@ -189,12 +218,17 @@ def build_configurations(workspace: BoundedAssociativeWorkspace) -> BoundedAssoc
                 reasons.append("TEMPORAL_CONFLICT")
         configuration_id = _id("configuration", workspace.query_id, event_id, "|".join(sorted(used)))
         predicate = payload.get("predicate_lemma") or payload.get("predicate") or payload.get("action")
+        expected_predicates = _workspace_predicate_lemmas(workspace)
+        predicate_match = not expected_predicates or _norm(predicate) in expected_predicates
+        if not predicate_match:
+            reasons.append("PREDICATE_MISMATCH")
+        predicate_status = "COMPATIBLE" if predicate_match and predicate else ("UNRESOLVED" if not predicate else "HARD_CONFLICT")
         configuration = EventCandidateConfiguration(
             configuration_id=configuration_id,
             query_id=workspace.query_id,
             event_id=event_id,
             known_member_bindings=list(bindings),
-            predicate_binding={"value": predicate, "status": "MATCHED" if predicate else "UNRESOLVED"} if predicate else None,
+            predicate_binding={"value": predicate, "status": predicate_status, "hypotheses": sorted(expected_predicates)} if predicate else None,
             relation_matches=[item for item in bindings if item.get("known")],
             temporal_match=temporal_match,
             constraint_evaluations=[
@@ -213,7 +247,7 @@ def build_configurations(workspace: BoundedAssociativeWorkspace) -> BoundedAssoc
             semantic_region_id=f"region:{workspace.query_id}",
             known_bindings_by_gap={gap.gap_id: [item for item in bindings if item.get("known") in gap.known_elements] for gap in workspace.gaps},
             relation_evaluations=[{"type": "RELATION", "target": item.get("participant_id"), "status": "EVALUATED"} for item in bindings],
-            predicate_evaluation={"value": predicate, "status": "MATCHED" if predicate else "UNRESOLVED"},
+            predicate_evaluation={"value": predicate, "status": predicate_status, "hypotheses": sorted(expected_predicates)},
             temporal_evaluation=dict(temporal_match or {}),
             polarity_evaluation={"value": polarity, "status": "COMPATIBLE" if "NEGATION_CONFLICT" not in reasons else "HARD_CONFLICT"},
             state_evaluation={"status": "UNRESOLVED"},
@@ -274,8 +308,10 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                     for component in participant.get("components") or ()
                     if isinstance(component, Mapping)
                 ]
+            elif gap.expected_type in {"attachment", "entity", "location", "property", "time", "state", "unknown"}:
+                options = [_attachment_option(participant) for participant in participants]
             else:
-                options = participants
+                options = []
             known_ids = {str(item.get("participant_id") or "") for item in configuration.known_member_bindings}
             for ordinal, option in enumerate(options):
                 candidate_element_id = str(option.get("entity_id") or option.get("element_id") or option.get("id") or option.get("lemma") or option.get("surface") or element.element_id)
@@ -297,7 +333,7 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                 surface = str(option.get("surface") or option.get("head_surface") or option.get("value") or option.get("lemma") or candidate_element_id)
                 lemma = str(option.get("lemma") or option.get("head_lemma") or surface)
                 is_quantity = surface.replace(".", "", 1).isdigit()
-                type_fit = 1.0 if gap.expected_type in {"unknown", "entity", "predicate", "component", "property", "location", "time", "state"} else (1.0 if gap.expected_type == "quantity" and is_quantity else 0.0)
+                type_fit = 1.0 if gap.expected_type in {"unknown", "entity", "attachment", "predicate", "component", "property", "location", "time", "state"} else (1.0 if gap.expected_type == "quantity" and is_quantity else 0.0)
                 event_fit = 1.0 if element.element_type == "event" else 0.42
                 context_fit = 0.85 if element.element_type == "context" else 0.4
                 constraint_fit, constraint_violations = _constraint_fit(gap, option, payload)
@@ -305,6 +341,15 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                 provenance_score = min(1.0, 0.35 + 0.15 * len(element.provenance) + 0.10 * len(element.retrieval_paths))
                 conflict_score = min(1.0, 0.22 * len(element.conflict_ids))
                 candidate_id = _id("candidate", configuration.configuration_id, gap.gap_id, candidate_element_id)
+                candidate_spatial_support_ids = [
+                    support.support_id
+                    for support in workspace.spatial_support
+                    if any(
+                        cloud.element_id == support.cloud_id
+                        and str(cloud.payload.get("concept_id") or "") == candidate_element_id
+                        for cloud in workspace.clouds
+                    )
+                ]
                 candidate = Candidate(
                     candidate_id=candidate_id, gap_id=gap.gap_id, element_id=candidate_element_id,
                     activation=element.activation, query_match=query_match, event_fit=event_fit,
@@ -315,6 +360,7 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                     constraint_fit=constraint_fit, constraint_violations=constraint_violations,
                     evidence_ids=list(element.evidence_ids),
                     graph_evidence_ids=list(element.evidence_ids),
+                    spatial_support_ids=list(dict.fromkeys(candidate_spatial_support_ids)),
                     independent_source_keys=list(dict.fromkeys(
                         str(item.get("independent_source_key"))
                         for item in element.provenance
@@ -324,7 +370,7 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                     event_id=event_id, supporting_event_ids=[event_id], surface=surface, lemma=lemma,
                     configuration_id=configuration.configuration_id,
                     origin={
-                        "type": "EVENT_PREDICATE" if gap.expected_type == "predicate" else ("MENTION_COMPONENT" if gap.expected_type == "component" else "EVENT_PARTICIPANT"), "event_id": event_id,
+                        "type": "EVENT_PREDICATE" if gap.expected_type == "predicate" else ("MENTION_COMPONENT" if gap.expected_type == "component" else ("EVENT_ATTACHMENT" if gap.expected_type == "attachment" else "EVENT_PARTICIPANT")), "event_id": event_id,
                         "configuration_id": configuration.configuration_id,
                         "source_element_id": candidate_element_id,
                     },

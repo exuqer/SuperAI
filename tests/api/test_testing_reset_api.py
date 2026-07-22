@@ -6,7 +6,7 @@ from server.core.settings import settings
 from server.server import create_app
 
 
-def test_testing_reset_is_disabled_by_default(monkeypatch) -> None:
+def test_local_testing_reset_is_available_without_an_environment_flag(monkeypatch) -> None:
     monkeypatch.setattr(settings, "allow_test_reset", False)
     monkeypatch.setattr(settings, "admin_token", "")
     with TestClient(create_app()) as client:
@@ -18,7 +18,7 @@ def test_testing_reset_is_disabled_by_default(monkeypatch) -> None:
                 "confirmation": "RESET TEST SPACE",
             },
         )
-    assert response.status_code == 403
+    assert response.status_code == 200
 
 
 def test_local_testing_reset_contract(monkeypatch) -> None:

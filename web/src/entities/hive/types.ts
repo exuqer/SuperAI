@@ -188,7 +188,7 @@ export interface QueryWorkingHiveV2 {
   answer: { answer_mode: string; surface_answer: string; confidence: number };
   dialogue_context?: DialogueContextV2;
   context_resolution?: ContextResolutionV2;
-  retrieval_scope?: Record<string, number>;
+  retrieval_scope?: 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL' | 'GLOBAL_ONLY';
   semantic_total?: number;
   gravity?: number;
   decision_score?: number;

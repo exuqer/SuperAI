@@ -86,6 +86,14 @@
                 <option value="CORRECTION">Исправление</option>
               </select>
             </label>
+            <label class="mode-select">
+              <span>Память</span>
+              <select v-model="retrievalScope" :disabled="store.loading">
+                <option value="LOCAL_THEN_GLOBAL">Авто · диалог → вся память</option>
+                <option value="LOCAL_ONLY">Только текущий диалог</option>
+                <option value="GLOBAL_ONLY">Вся память</option>
+              </select>
+            </label>
             <button class="primary-button" type="submit" :disabled="!canSubmit">
               <span>{{ store.loading ? 'Обработка…' : 'Отправить' }}</span>
               <span aria-hidden="true">↗</span>
@@ -214,7 +222,8 @@
               <article class="hybrid-stage retrieval-stage">
                 <small>RETRIEVAL</small>
                 <b>{{ hybrid.retrieval.hits.length }} hits</b>
-                <span>{{ hybrid.activation.visited }} активировано</span>
+                <span>field {{ hybrid.retrieval.field_hit_count }} · graph {{ hybrid.retrieval.graph_hit_count }}</span>
+                <span>{{ hybrid.retrieval.scope_trace?.phase || hybrid.retrieval.scope || 'scope неизвестен' }}</span>
               </article>
               <i>→</i>
               <article class="hybrid-stage workspace-stage">
@@ -434,7 +443,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useGraphStore } from '@/entities/graph/store';
-import type { AnswerStatus, GapNode, GraphStatus, QueryMode } from '@/entities/graph/types';
+import type { AnswerStatus, GapNode, GraphStatus, QueryMode, RetrievalScope } from '@/entities/graph/types';
 import { api } from '@/shared/api/client';
 import { copyJsonToClipboard } from '@/shared/utils/clipboard';
 
@@ -455,6 +464,7 @@ const {
 
 const question = ref('');
 const mode = ref<'' | QueryMode>('');
+const retrievalScope = ref<RetrievalScope>('LOCAL_THEN_GLOBAL');
 const messageList = ref<HTMLElement | null>(null);
 const exportingSpace = ref(false);
 const exportStatus = ref('');
@@ -616,7 +626,7 @@ async function submit(): Promise<void> {
   const text = question.value;
   question.value = '';
   try {
-    await store.query(text, mode.value || undefined);
+    await store.query(text, mode.value || undefined, retrievalScope.value);
   } catch {
     // The store exposes the normalized error and keeps the failed turn visible.
   }
@@ -627,6 +637,7 @@ async function newDialogue(): Promise<void> {
   await store.resetHive();
   question.value = '';
   mode.value = '';
+  retrievalScope.value = 'LOCAL_THEN_GLOBAL';
 }
 
 async function clearChatSpace(): Promise<void> {
@@ -984,11 +995,13 @@ nav {
 }
 
 .chat-panel {
+  min-width: 0;
   display: grid;
   grid-template-rows: auto 1fr auto;
 }
 
 .messages {
+  min-width: 0;
   overflow-y: auto;
   min-height: 0;
   padding: 18px;
@@ -1020,6 +1033,8 @@ nav {
 }
 
 .message {
+  width: 100%;
+  min-width: 0;
   display: grid;
   margin-bottom: 17px;
 
@@ -1043,7 +1058,8 @@ nav {
 }
 
 .bubble {
-  max-width: 92%;
+  min-width: 0;
+  max-width: calc(100% - 8px);
   padding: 11px 13px;
   border: 1px solid rgba(161, 188, 226, .13);
   border-radius: 5px 14px 14px;
@@ -1080,10 +1096,13 @@ nav {
 }
 
 .composer {
+  min-width: 0;
   padding: 14px;
   border-top: 1px solid rgba(162, 189, 225, .1);
 
   textarea {
+    display: block;
+    max-width: 100%;
     width: 100%;
     resize: none;
     padding: 12px 13px;
@@ -1099,14 +1118,16 @@ nav {
 }
 
 .composer-footer {
-  display: flex;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: end;
-  justify-content: space-between;
   gap: 10px;
   margin-top: 10px;
 }
 
 .mode-select {
+  min-width: 0;
   display: grid;
   gap: 3px;
   color: #6f83a1;
@@ -1115,6 +1136,11 @@ nav {
   text-transform: uppercase;
 
   select {
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     border: 0;
     outline: 0;
     color: #aabbd2;
@@ -1125,6 +1151,8 @@ nav {
 }
 
 .primary-button {
+  min-width: 0;
+  white-space: nowrap;
   display: flex;
   align-items: center;
   gap: 12px;

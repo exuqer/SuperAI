@@ -315,7 +315,7 @@ export const useHiveStore = defineStore('hive', () => {
   async function query(
     text: string,
     mode?: QueryMessageMode,
-    resonanceScope: 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL' = 'LOCAL_THEN_GLOBAL',
+    retrievalScope: 'LOCAL_ONLY' | 'LOCAL_THEN_GLOBAL' | 'GLOBAL_ONLY' = 'LOCAL_THEN_GLOBAL',
   ) {
     if (!hive.value || loading.value || reasoningLoading.value) return;
     loading.value = true;
@@ -335,7 +335,7 @@ export const useHiveStore = defineStore('hive', () => {
     try {
       const result = await api.post<HiveQueryResponse>(
         `/api/v2/hives/${hive.value.id}/query`,
-        { text, ...(mode ? { resolved_mode: mode } : {}), resonance_scope: resonanceScope }
+        { text, ...(mode ? { resolved_mode: mode } : {}), retrieval_scope: retrievalScope }
       );
       applyState(result);
       syncMessages(result.messages);

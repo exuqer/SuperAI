@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+
+import server.database as database
+
 from server.v2.graph_repository import GraphRepository, utcnow
 from server.v2.testing_reset import ResetMode, ResetScope, TestingResetService
 from server.v2.universe import UniverseService
@@ -108,3 +112,19 @@ def test_fresh_schema_removes_database_state_and_allows_reuse() -> None:
     assert report["mode"] == "FRESH_SCHEMA"
     assert all(value == 0 for value in report["after"].values())
     assert GraphRepository().graph_meta()["database_generation_id"] == report["database_generation_id"]
+
+
+def test_fresh_schema_reset_does_not_delete_an_open_database_file() -> None:
+    repository = GraphRepository()
+    _seed_state(repository)
+    external_handle = sqlite3.connect(database.get_db_path())
+    try:
+        report = TestingResetService(repository).reset(
+            ResetScope.FULL_TEST_STATE,
+            ResetMode.FRESH_SCHEMA,
+            requested_by="pytest",
+        )
+    finally:
+        external_handle.close()
+
+    assert report["reset"] is True

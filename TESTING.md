@@ -62,3 +62,18 @@ python3 -m pytest -q \
   tests/api/test_testing_reset_api.py \
   tests/semantic_field/test_reset_invariants.py
 ```
+
+## Regression: Auto retrieval и Field → Graph bridge
+
+```bash
+python -m pytest -q tests/test_scope_field_bridge_regressions.py
+```
+
+Набор проверяет:
+
+- стабильный identity структурированного query anchor;
+- широкий `EVENT_ATTACHMENT` для необученного question operator;
+- выбор predicate hypothesis через graph event без lexical hardcode;
+- переход semantic cloud → GraphEvidence;
+- различие `SPATIAL_SUPPORT_FOUND` и `GAP_FILLED`;
+- отказ Field Bee от zero-score результата.

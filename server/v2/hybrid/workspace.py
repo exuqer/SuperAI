@@ -7,6 +7,37 @@ from typing import Any, Mapping, Sequence
 from .contracts import BoundedAssociativeWorkspace, Conflict, GraphEvidence, QueryFrame, RetrievalHit, SpatialSupport, WorkspaceBudget, WorkspaceElement, _id
 
 
+def query_reference_id(value: object) -> str:
+    """Return a stable identity for a structured query reference."""
+    if isinstance(value, Mapping):
+        return str(
+            value.get("concept_id")
+            or value.get("entity_id")
+            or value.get("node_id")
+            or value.get("mention_id")
+            or value.get("lemma")
+            or value.get("surface")
+            or ""
+        )
+    return str(value or "")
+
+
+def spatial_support_identity(
+    query_id: str,
+    cloud_id: str,
+    field_revision: int,
+    region_id: str | None,
+) -> str:
+    """Identity of a spatial observation, independent of the retrieval route."""
+    return _id(
+        "spatial-support",
+        query_id,
+        int(field_revision or 0),
+        cloud_id,
+        region_id or "",
+    )
+
+
 def build_workspace(
     query_frame: QueryFrame,
     activation_result: Any,
@@ -31,14 +62,20 @@ def build_workspace(
         constraints=list(query_frame.constraints),
         exclusions=list(query_frame.exclusions),
         temporal_scope=query_frame.temporal_scope,
+        explicit_predicate=query_frame.explicit_predicate,
+        predicate_hypotheses=list(query_frame.predicate_hypotheses),
         field_region=dict((field_projection or {}).get("field_region") or {}),
         local_gradients=list((field_projection or {}).get("positive_gradients") or ()),
     )
     spatial_by_hit: dict[str, SpatialSupport] = {}
     active = dict(getattr(activation_result, "activations", {}) or {})
     for index, value in enumerate(query_frame.known_elements[:workspace_budget.max_anchors]):
+        reference_id = query_reference_id(value)
+        if not reference_id:
+            continue
+        reference_payload = dict(value) if isinstance(value, Mapping) else {"value": value}
         workspace.add_element(WorkspaceElement(
-            element_id=str(value), element_type="entity", payload={"value": value},
+            element_id=reference_id, element_type="entity", payload={"reference": reference_payload, **reference_payload},
             activation=1.0, workspace_functions=["query_anchor", "known_participant"],
             source_ids=[query_frame.query_id], retrieval_paths=["query_frame"],
             provenance=[{"source_id": query_frame.query_id, "source_type": "query_frame"}],
@@ -61,17 +98,26 @@ def build_workspace(
         )
         stored_element = workspace.add_element(element, section=hit.element_type)
         if hit.element_type == "cloud" or hit.origin == "FIELD":
+            cloud_id = str(hit.payload.get("cloud_id") or hit.element_id)
+            field_revision = int(hit.payload.get("field_revision") or 0)
+            region_id = str((field_projection or {}).get("field_region", {}).get("region_id") or f"region:{query_frame.query_id}")
             support = SpatialSupport(
-                support_id=_id("spatial-support", query_frame.query_id, hit.hit_id),
-                cloud_id=str(hit.payload.get("cloud_id") or hit.element_id),
-                region_id=str((field_projection or {}).get("field_region", {}).get("field_revision") or "") or None,
+                support_id=spatial_support_identity(
+                    query_frame.query_id, cloud_id, field_revision, region_id
+                ),
+                cloud_id=cloud_id,
+                region_id=region_id,
                 score=hit.match_score,
                 relation_alignment=float(next((item.get("weight") for item in (field_projection or {}).get("relation_projections") or () if isinstance(item, Mapping)), 0.0) or 0.0),
-                field_revision=int(hit.payload.get("field_revision") or 0),
+                field_revision=field_revision,
                 retrieval_path=hit.retrieval_path,
             )
             spatial_by_hit[hit.hit_id] = support
-            workspace.spatial_support.append(support)
+            existing_support = next((item for item in workspace.spatial_support if item.support_id == support.support_id), None)
+            if existing_support is None:
+                workspace.spatial_support.append(support)
+            else:
+                support = existing_support
             stored_element.payload["spatial_support_id"] = support.support_id
             stored_element.payload["spatial_support"] = True
             continue

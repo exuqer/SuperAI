@@ -50,14 +50,14 @@ class HiveService:
         hive_id: str,
         text: str,
         resolved_mode: Optional[str] = None,
-        resonance_scope: str = "LOCAL_THEN_GLOBAL",
+        retrieval_scope: str = "LOCAL_THEN_GLOBAL",
     ) -> dict[str, Any]:
         try:
             return self.facade.query(
                 hive_id,
                 text,
                 resolved_mode,
-                resonance_scope,
+                retrieval_scope,
             )
         except KeyError as error:
             raise NotFoundError("hive", hive_id) from error

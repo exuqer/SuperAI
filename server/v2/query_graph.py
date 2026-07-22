@@ -851,11 +851,9 @@ class QueryGraphBuilder:
                     "type_constraint_lemma": type_constraint.get("lemma", ""),
                 },
             ))
-        # The learned query-operator model is intentionally shadow-only in
-        # this revision.  It can inspect an occurrence and propose local-slot
-        # neighbourhoods, but cannot alter GraphMatcher's admission or score.
-        # This keeps a profile trained from one successful answer from
-        # becoming an unvalidated lexical rule.
+        # Query-operator profiles remain shadow evidence.  An unseen broad
+        # attachment operator must not be prematurely narrowed to a property
+        # role; specialization is allowed only after repeated confirmed fills.
         shadow_predictions: Dict[str, Dict[str, Any]] = {}
         with self.repository.transaction() as conn:
             enriched_gaps: List[GapNode] = []
@@ -874,16 +872,37 @@ class QueryGraphBuilder:
                 ),
                 trace={"continuation_mode": continuation_mode},
             )
-            for current_gap in target_gaps:
+            for gap_index, current_gap in enumerate(target_gaps):
                 prediction = self.query_operators.predict(
                     conn, shadow_graph, current_gap,
                 )
                 shadow_predictions[current_gap.id] = prediction
+                operator = questions[gap_index] if gap_index < len(questions) else None
+                profile_status = str(prediction.get("profile_status") or "UNSEEN").upper()
+                support_count = int(prediction.get("support_count") or 0)
+                broaden_unseen_attachment = bool(
+                    current_gap.gap_kind == GapKind.EVENT_PROPERTY
+                    and operator is not None
+                    and str(getattr(operator, "operator_type", "")) == "EVENT_ATTACHMENT"
+                    and continuation_mode == "NONE"
+                    and (profile_status in {"UNSEEN", "SHADOW"} or support_count < 3)
+                )
                 enriched_gaps.append(replace(
                     current_gap,
+                    gap_kind=(
+                        GapKind.EVENT_ATTACHMENT
+                        if broaden_unseen_attachment
+                        else current_gap.gap_kind
+                    ),
                     evidence={
                         **dict(current_gap.evidence),
                         "learned_gap_profile": prediction,
+                        "preliminary_gap_kind": current_gap.gap_kind.value,
+                        "operational_broadening": (
+                            "UNSEEN_EVENT_ATTACHMENT"
+                            if broaden_unseen_attachment
+                            else None
+                        ),
                     },
                 ))
         target_gaps = enriched_gaps

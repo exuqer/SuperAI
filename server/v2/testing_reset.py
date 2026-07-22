@@ -9,7 +9,6 @@ import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Any, Iterable
 
 import server.database as database
@@ -223,15 +222,10 @@ class TestingResetService:
         }
 
     def _fresh_schema(self, generation_id: str) -> None:
+        """Recreate the schema in place so an open SQLite handle cannot block reset."""
         database.close_current_connection()
-        path = Path(database.get_db_path())
-        for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
-            try:
-                candidate.unlink()
-            except FileNotFoundError:
-                pass
-        database.init_db()
         self.repository = GraphRepository()
+        self.repository.reset()
         with self.repository.transaction() as conn:
             self._set_generation(conn, generation_id)
 

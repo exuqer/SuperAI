@@ -136,7 +136,7 @@ export const useGraphStore = defineStore('graph-v27', () => {
   async function query(
     text: string,
     mode?: QueryMode,
-    retrievalScope: RetrievalScope = 'LOCAL_ONLY',
+    retrievalScope: RetrievalScope = 'LOCAL_THEN_GLOBAL',
   ): Promise<HiveQueryResponse> {
     const normalized = text.trim();
     if (!normalized) throw new Error('Введите вопрос');

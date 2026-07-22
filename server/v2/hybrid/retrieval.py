@@ -27,6 +27,20 @@ def _lemma_match(left: str, right: str) -> bool:
     return bool(left and right and left == right)
 
 
+def _predicate_lemmas(frame: QueryFrame) -> tuple[str, ...]:
+    values: list[str] = []
+    explicit = _norm(frame.explicit_predicate)
+    if explicit:
+        values.append(explicit)
+    for item in frame.predicate_hypotheses or ():
+        if not isinstance(item, Mapping):
+            continue
+        value = _norm(item.get("predicate") or item.get("lemma"))
+        if value and value not in values:
+            values.append(value)
+    return tuple(values)
+
+
 def _records(indexes: Any) -> list[Mapping[str, Any]]:
     if indexes is None:
         return []
@@ -43,11 +57,12 @@ def _records(indexes: Any) -> list[Mapping[str, Any]]:
 def _score(frame: QueryFrame, record: Mapping[str, Any]) -> tuple[float, list[str]]:
     features: list[str] = []
     score = 0.0
-    predicate = _norm(frame.explicit_predicate)
+    predicates = _predicate_lemmas(frame)
     record_predicate = _norm(record.get("predicate") or record.get("predicate_lemma") or record.get("action"))
-    if predicate and record_predicate and _lemma_match(predicate, record_predicate):
+    matched_predicate = next((value for value in predicates if _lemma_match(value, record_predicate)), "")
+    if matched_predicate:
         score += 0.28
-        features.append("predicate")
+        features.extend(("predicate", f"predicate_hypothesis:{matched_predicate}"))
     record_terms = set().union(*(_terms(record.get(key)) for key in ("text", "raw_text", "surface", "lemma", "value", "predicate", "predicate_lemma")))
     participant_terms = set()
     for participant in record.get("participants") or ():
@@ -129,26 +144,48 @@ def retrieve_direct(query_frame: QueryFrame, indexes: Any = None, *, limit: int 
     return DirectRetriever().retrieve(query_frame, indexes, limit=limit)
 
 
-def graph_rows_from_connection(
-    conn: Any,
-    *,
-    session_id: str = "",
-    query_graph: Mapping[str, Any] | None = None,
-    limit: int = 128,
-) -> list[dict[str, Any]]:
-    """Adapt the existing event index without changing its global representation."""
-    pattern = query_graph.get("event_pattern") if isinstance(query_graph, Mapping) and isinstance(query_graph.get("event_pattern"), Mapping) else (query_graph or {})
-    predicate = pattern.get("predicate") if isinstance(pattern, Mapping) and isinstance(pattern.get("predicate"), Mapping) else {}
-    predicate_lemma = _norm(predicate.get("lemma") or predicate.get("surface"))
-    operators = query_graph.get("question_operators") if isinstance(query_graph, Mapping) else ()
+def _predicate_lemmas_from_query_graph(query_graph: Mapping[str, Any] | None) -> tuple[str, ...]:
+    if not isinstance(query_graph, Mapping):
+        return ()
+    pattern = query_graph.get("event_pattern") if isinstance(query_graph.get("event_pattern"), Mapping) else query_graph
+    predicate = pattern.get("predicate") if isinstance(pattern.get("predicate"), Mapping) else {}
+    values: list[str] = []
+
+    def add(value: Any) -> None:
+        lemma = _norm(value)
+        if lemma and lemma not in values:
+            values.append(lemma)
+
+    trace = query_graph.get("trace") if isinstance(query_graph.get("trace"), Mapping) else {}
+    language = trace.get("language_analysis") if isinstance(trace.get("language_analysis"), Mapping) else {}
+    language_predicate = language.get("predicate") if isinstance(language.get("predicate"), Mapping) else {}
+    for item in language_predicate.get("morphological_analyses") or ():
+        if isinstance(item, Mapping) and str(item.get("pos") or "").upper() in {"VERB", "INFN", "PRTF", "PRTS", "GRND"}:
+            add(item.get("lemma"))
+    for clause in language.get("clauses") or ():
+        if not isinstance(clause, Mapping):
+            continue
+        for item in clause.get("predicate_hypotheses") or ():
+            if isinstance(item, Mapping):
+                add(item.get("lemma"))
+    add(predicate.get("lemma") or predicate.get("surface"))
+
+    operators = query_graph.get("question_operators") or ()
     if operators and isinstance(operators[0], Mapping):
         surface = _norm(operators[0].get("surface") or operators[0].get("question_lemma"))
         question_index = int((operators[0].get("token_indices") or [0])[0] or 0)
         predicate_index = int(predicate.get("token_index") or 0)
         if surface == "что" and predicate_index == question_index + 1:
-            predicate_lemma = ""
+            return ()
+    return tuple(values)
+
+
+def _known_constraints_from_query_graph(query_graph: Mapping[str, Any] | None) -> list[tuple[str, str]]:
+    if not isinstance(query_graph, Mapping):
+        return []
+    pattern = query_graph.get("event_pattern") if isinstance(query_graph.get("event_pattern"), Mapping) else query_graph
     known_nodes = pattern.get("known_nodes") if isinstance(pattern, Mapping) else ()
-    known_constraints: list[tuple[str, str]] = []
+    constraints: list[tuple[str, str]] = []
     for node in known_nodes or ():
         if not isinstance(node, Mapping):
             continue
@@ -156,34 +193,12 @@ def graph_rows_from_connection(
         entity_id = str(node.get("entity_id") or "")
         lemma = _norm(head.get("lemma") or node.get("lemma") or node.get("surface"))
         if entity_id or lemma:
-            known_constraints.append((entity_id, lemma))
-    if not predicate_lemma and not known_constraints:
-        return []
-    clauses: list[str] = []
-    params: list[Any] = []
-    if predicate_lemma:
-        clauses.append("e.predicate_lemma=?")
-        params.append(predicate_lemma)
-    for entity_id, lemma in known_constraints:
-        clauses.append(
-            """EXISTS (
-                   SELECT 1 FROM graph_participants p
-                   JOIN graph_mentions m ON m.id=p.mention_id
-                   WHERE p.event_id=e.id
-                     AND (m.entity_id=? OR m.head_lemma=?)
-               )"""
-        )
-        params.extend((entity_id, lemma))
-    rows = conn.execute(
-        f"""SELECT e.*,s.raw_text,s.source_type,s.status,s.independent_key,s.confidence AS source_confidence,
-                   s.metadata_json
-            FROM graph_events e JOIN knowledge_sources s ON s.id=e.source_id
-            WHERE s.status='CONFIRMED' AND {' AND '.join(clauses)}
-            ORDER BY e.created_at,e.id
-            LIMIT ?""",
-        (*params, max(1, int(limit))),
-    ).fetchall()
-    result = []
+            constraints.append((entity_id, lemma))
+    return constraints
+
+
+def _decode_event_rows(conn: Any, rows: Iterable[Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
         for key in ("predicate_features_json", "properties_json", "metadata_json"):
@@ -201,7 +216,7 @@ def graph_rows_from_connection(
                WHERE p.event_id=? ORDER BY p.ordinal_hint,p.id""",
             (row["id"],),
         ).fetchall()
-        decoded_participants = []
+        decoded_participants: list[dict[str, Any]] = []
         for participant in participants:
             value = dict(participant)
             for key, fallback in (("features_json", {}), ("components_json", []), ("observation_signature_json", {})):
@@ -226,3 +241,110 @@ def graph_rows_from_connection(
         }]
         result.append(item)
     return result
+
+
+def graph_rows_from_connection(
+    conn: Any,
+    *,
+    session_id: str = "",
+    query_graph: Mapping[str, Any] | None = None,
+    limit: int = 128,
+) -> list[dict[str, Any]]:
+    """Adapt confirmed events for every morphology-backed predicate hypothesis."""
+    predicate_lemmas = _predicate_lemmas_from_query_graph(query_graph)
+    known_constraints = _known_constraints_from_query_graph(query_graph)
+    if not predicate_lemmas and not known_constraints:
+        return []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if predicate_lemmas:
+        placeholders = ",".join("?" for _ in predicate_lemmas)
+        clauses.append(f"e.predicate_lemma IN ({placeholders})")
+        params.extend(predicate_lemmas)
+    for entity_id, lemma in known_constraints:
+        clauses.append(
+            """EXISTS (
+                   SELECT 1 FROM graph_participants p
+                   JOIN graph_mentions m ON m.id=p.mention_id
+                   WHERE p.event_id=e.id
+                     AND (m.entity_id=? OR m.head_lemma=?)
+               )"""
+        )
+        params.extend((entity_id, lemma))
+    rows = conn.execute(
+        f"""SELECT e.*,s.raw_text,s.source_type,s.status,s.independent_key,s.confidence AS source_confidence,
+                   s.metadata_json
+            FROM graph_events e JOIN knowledge_sources s ON s.id=e.source_id
+            WHERE s.status='CONFIRMED' AND {' AND '.join(clauses)}
+            ORDER BY e.created_at,e.id
+            LIMIT ?""",
+        (*params, max(1, int(limit))),
+    ).fetchall()
+    return _decode_event_rows(conn, rows)
+
+
+def graph_rows_all_from_connection(conn: Any, *, limit: int = 1024) -> list[dict[str, Any]]:
+    """Return confirmed graph events for field-to-evidence bridging."""
+    rows = conn.execute(
+        """SELECT e.*,s.raw_text,s.source_type,s.status,s.independent_key,
+                  s.confidence AS source_confidence,s.metadata_json
+           FROM graph_events e JOIN knowledge_sources s ON s.id=e.source_id
+           WHERE s.status='CONFIRMED'
+           ORDER BY e.created_at,e.id LIMIT ?""",
+        (max(1, int(limit)),),
+    ).fetchall()
+    return _decode_event_rows(conn, rows)
+
+
+def field_to_graph_hits(
+    query_frame: QueryFrame,
+    field_hits: Iterable[RetrievalHit],
+    indexes: Any,
+    *,
+    limit: int = 128,
+) -> list[RetrievalHit]:
+    """Resolve spatially activated concepts back to persisted graph evidence."""
+    if not isinstance(indexes, Mapping):
+        return []
+    records = indexes.get("field_bridge_records") or ()
+    if not isinstance(records, Iterable) or isinstance(records, (str, bytes, Mapping)):
+        return []
+    cloud_concepts = {
+        str(hit.payload.get("concept_id") or "")
+        for hit in field_hits
+        if isinstance(hit, RetrievalHit) and hit.payload.get("concept_id")
+    }
+    if not cloud_concepts:
+        return []
+    hits: list[RetrievalHit] = []
+    for ordinal, record in enumerate(item for item in records if isinstance(item, Mapping)):
+        if not _matches_all_known_elements(query_frame, record):
+            continue
+        participants = [item for item in record.get("participants") or () if isinstance(item, Mapping)]
+        activated = {
+            str(item.get("entity_id") or "")
+            for item in participants
+            if str(item.get("entity_id") or "") in cloud_concepts
+        }
+        if not activated:
+            continue
+        score, features = _score(query_frame, record)
+        score = clamp(max(score, 0.42) + min(0.18, 0.06 * len(activated)))
+        element_id = str(record.get("element_id") or record.get("id") or f"bridge_{ordinal}")
+        source_id = str(record.get("source_id") or record.get("observation_id") or element_id)
+        provenance = tuple(record.get("provenance") or ({"source_id": source_id, "source_type": "observation"},))
+        hits.append(RetrievalHit(
+            hit_id=f"bridge_{query_frame.query_id[-12:]}_{ordinal}",
+            element_id=element_id,
+            element_type="event",
+            source_id=source_id,
+            match_score=score,
+            matched_features=tuple(dict.fromkeys([*features, "FIELD_TO_GRAPH_BRIDGE"])),
+            payload={**dict(record), "bridge_cloud_concept_ids": sorted(activated)},
+            provenance=provenance,
+            conflicts=tuple(str(item) for item in record.get("conflicts") or record.get("conflict_ids") or ()),
+            retrieval_path=("field_projection", "concept_to_graph_event", element_id),
+            origin="GRAPH_BRIDGE",
+        ))
+    hits.sort(key=lambda item: (-item.match_score, item.element_id, item.hit_id))
+    return hits[:max(1, int(limit))]

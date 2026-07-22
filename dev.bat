@@ -10,6 +10,7 @@ set "ROOT_DIR=%~dp0"
 set "BACKEND_PORT=%BACKEND_PORT%"
 if "%BACKEND_PORT%"=="" set "BACKEND_PORT=8000"
 set "FRONTEND_DIR=%ROOT_DIR%web"
+set "SUPERAI_ALLOW_TEST_RESET=true"
 
 echo 🚀 Запускаю бекенд на порту %BACKEND_PORT%...
 cd /d "%ROOT_DIR%"

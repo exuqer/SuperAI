@@ -67,7 +67,7 @@ from .dialogue_context import (
 )
 from .query_execution import QueryExecutionContext, diagnostic_owner_valid
 from .hybrid import HybridDialoguePipeline
-from .hybrid.retrieval import graph_rows_from_connection
+from .hybrid.retrieval import graph_rows_all_from_connection, graph_rows_from_connection
 
 
 class GraphTrainingService:
@@ -875,33 +875,78 @@ class GraphDialogueService:
         graph: QueryGraph,
         analysis: Mapping[str, Any],
     ) -> List[Dict[str, Any]]:
-        """Build predicate hypotheses for ambiguous verb forms (e.g., стоит -> стоять/стоить)."""
-        hypotheses = []
+        """Build predicate hypotheses exclusively from parser morphology."""
         if not graph.predicate:
-            return hypotheses
-        
-        # Check if predicate has ambiguous morphology
-        predicate_lemma = graph.predicate.lemma
-        ambiguous_lemmas = {
-            "стоить": ["стоять", "стоить"],
-            "стоять": ["стоять", "стоить"],
-        }
-        
-        if predicate_lemma in ambiguous_lemmas:
-            for lemma in ambiguous_lemmas[predicate_lemma]:
-                concept_id = stable_id("predicate-concept", lemma)
-                hypotheses.append({
-                    "utterance_id": graph.id,
-                    "token_index": graph.predicate.token_index,
-                    "lemma": lemma,
-                    "concept_id": concept_id,
-                    "morphology_confidence": 0.8,
-                    "contextual_confidence": 0.5,
-                    "construction_confidence": 0.5,
-                    "participant_compatibility": 0.5,
-                })
-        
-        return hypotheses
+            return []
+        predicate_analysis = (
+            analysis.get("predicate")
+            if isinstance(analysis.get("predicate"), Mapping)
+            else {}
+        )
+        values: Dict[str, Dict[str, Any]] = {}
+
+        def add(lemma: Any, confidence: Any, *, selected: bool, source: str) -> None:
+            normalized = str(lemma or "").casefold().replace("ё", "е").strip()
+            if not normalized:
+                return
+            try:
+                morphology_confidence = float(confidence)
+            except (TypeError, ValueError):
+                morphology_confidence = 0.0
+            candidate = {
+                "utterance_id": graph.id,
+                "token_index": graph.predicate.token_index,
+                "lemma": normalized,
+                "concept_id": stable_id("predicate-concept", normalized),
+                "morphology_confidence": max(0.0, min(1.0, morphology_confidence)),
+                "contextual_confidence": 0.5,
+                "construction_confidence": 0.5,
+                "participant_compatibility": 0.5,
+                "selected_by_morphology": bool(selected),
+                "source": source,
+            }
+            current = values.get(normalized)
+            if current is None or candidate["morphology_confidence"] > current["morphology_confidence"]:
+                values[normalized] = candidate
+            elif selected:
+                current["selected_by_morphology"] = True
+
+        for item in predicate_analysis.get("morphological_analyses") or ():
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("pos") or "").upper() not in {"VERB", "INFN", "PRTF", "PRTS", "GRND"}:
+                continue
+            add(
+                item.get("lemma"),
+                item.get("confidence", 0.0),
+                selected=bool(item.get("selected")),
+                source="LANGUAGE_MORPHOLOGY",
+            )
+        for token in analysis.get("tokens") or ():
+            if not isinstance(token, Mapping) or int(token.get("index") or -1) != int(graph.predicate.token_index):
+                continue
+            for item in token.get("morphological_analyses") or ():
+                if isinstance(item, Mapping):
+                    add(
+                        item.get("lemma"),
+                        item.get("confidence", 0.0),
+                        selected=bool(item.get("selected")),
+                        source="TOKEN_MORPHOLOGY",
+                    )
+        if not values:
+            add(
+                graph.predicate.lemma,
+                0.55,
+                selected=True,
+                source="QUERY_GRAPH_FALLBACK",
+            )
+        return sorted(
+            values.values(),
+            key=lambda item: (
+                -float(item["morphology_confidence"]),
+                str(item["lemma"]),
+            ),
+        )
 
     def _evaluate_predicate_hypotheses(
         self,
@@ -1473,7 +1518,8 @@ class GraphDialogueService:
         """Attach the single authoritative hybrid result."""
         hive = result.get("hive") or {}
         conversation_id = str(hive.get("conversation_id") or "")
-        indexes: list[dict[str, Any]] = []
+        query_indexes: list[dict[str, Any]] = []
+        bridge_indexes: list[dict[str, Any]] = []
         previous_context: dict[str, Any] = dict(result.get("_hybrid_context") or {})
         with self.repository.transaction() as conn:
             graph_object = result.get("_query_graph_object")
@@ -1485,23 +1531,12 @@ class GraphDialogueService:
                     hive_id=hive_id,
                     search={"accepted": []},
                 )
-            indexes = graph_rows_from_connection(
+            query_indexes = graph_rows_from_connection(
                 conn,
                 session_id=conversation_id,
                 query_graph=result.get("query_graph") or {},
             )
-            local = [
-                item for item in indexes
-                if conversation_id
-                and str(item.get("session_id") or "") == conversation_id
-            ]
-            global_items = [item for item in indexes if item not in local]
-            if retrieval_scope == "LOCAL_ONLY":
-                indexes = local
-            elif retrieval_scope == "GLOBAL_ONLY":
-                indexes = global_items
-            else:
-                indexes = [*local, *global_items]
+            bridge_indexes = graph_rows_all_from_connection(conn)
             turns = conn.execute(
                 """SELECT query_graph_id,selected_bindings_json,answer_json
                    FROM dialogue_turns WHERE hive_id=?
@@ -1524,32 +1559,102 @@ class GraphDialogueService:
                         "resolved_values": [item for item in resolved_values if item],
                     },
                 }
-        # Preserve a useful shadow trace even before a confirmed event index exists.
-        if not indexes:
-            indexes = [
-                {
-                    "element_id": item.get("resolved_node_id") or item.get("binding_id"),
-                    "element_type": "entity",
-                    "surface": item.get("resolved_surface"),
-                    "lemma": item.get("resolved_lemma"),
-                    "event_id": item.get("event_id"),
-                    "source_id": item.get("event_id"),
-                    "provenance": item.get("evidence") or (),
-                }
-                for item in result.get("candidate_bindings") or ()
-            ]
+
+        def is_local(item: Mapping[str, Any]) -> bool:
+            return bool(
+                conversation_id
+                and str(item.get("session_id") or "") == conversation_id
+            )
+
+        local_query = [item for item in query_indexes if is_local(item)]
+        global_query = [item for item in query_indexes if not is_local(item)]
+        local_bridge = [item for item in bridge_indexes if is_local(item)]
+        global_bridge = [item for item in bridge_indexes if not is_local(item)]
         context = {
             "session_id": conversation_id,
             **previous_context,
             "last_query_id": previous_context.get("last_query_id") or (result.get("query_graph") or {}).get("continuation_of"),
         }
-        hybrid = self.hybrid.run(
-            text,
-            session_context=context,
-            indexes=indexes,
-            analysis={"query_graph": result.get("query_graph") or {}},
+        analysis_payload = {
+            "query_graph": result.get("query_graph") or {},
+            "language_analysis": result.get("language_analysis") or {},
+        }
+
+        def run_hybrid(
+            records: Sequence[Mapping[str, Any]],
+            bridge_records: Sequence[Mapping[str, Any]],
+            scope_trace: Mapping[str, Any],
+        ) -> Dict[str, Any]:
+            return self.hybrid.run(
+                text,
+                session_context=context,
+                indexes={
+                    "records": list(records),
+                    "field_bridge_records": list(bridge_records),
+                    "scope_trace": dict(scope_trace),
+                },
+                analysis=analysis_payload,
+            )
+
+        requested_scope = (
+            retrieval_scope
+            if retrieval_scope in {"LOCAL_ONLY", "LOCAL_THEN_GLOBAL", "GLOBAL_ONLY"}
+            else "LOCAL_THEN_GLOBAL"
         )
-        hybrid["retrieval"]["scope"] = retrieval_scope
+        base_scope_trace = {
+            "requested_retrieval_scope": retrieval_scope,
+            "resolved_retrieval_scope": requested_scope,
+            "local_event_count": len(local_query),
+            "global_event_count": len(global_query),
+            "local_bridge_event_count": len(local_bridge),
+            "global_bridge_event_count": len(global_bridge),
+            "global_fallback_used": False,
+        }
+        if requested_scope == "LOCAL_ONLY":
+            scope_trace = {
+                **base_scope_trace,
+                "phase": "LOCAL_ONLY",
+                "events_after_scope_filter": len(local_query),
+            }
+            hybrid = run_hybrid(local_query, local_bridge, scope_trace)
+        elif requested_scope == "GLOBAL_ONLY":
+            scope_trace = {
+                **base_scope_trace,
+                "phase": "GLOBAL_ONLY",
+                "events_after_scope_filter": len(global_query),
+            }
+            hybrid = run_hybrid(global_query, global_bridge, scope_trace)
+        else:
+            local_scope_trace = {
+                **base_scope_trace,
+                "phase": "LOCAL_PHASE",
+                "events_after_scope_filter": len(local_query),
+            }
+            if local_query or local_bridge:
+                hybrid = run_hybrid(local_query, local_bridge, local_scope_trace)
+            else:
+                hybrid = {"answer_structure": {"status": "INSUFFICIENT_EVIDENCE"}}
+            local_answer = hybrid.get("answer_structure") or hybrid.get("answer") or {}
+            local_stable = str(local_answer.get("status") or "") == "STABLE"
+            if not local_stable:
+                scope_trace = {
+                    **base_scope_trace,
+                    "phase": "GLOBAL_FALLBACK",
+                    "global_fallback_used": True,
+                    "events_after_scope_filter": len(local_query) + len(global_query),
+                }
+                hybrid = run_hybrid(
+                    [*local_query, *global_query],
+                    [*local_bridge, *global_bridge],
+                    scope_trace,
+                )
+            else:
+                scope_trace = local_scope_trace
+        hybrid.setdefault("retrieval", {})["scope"] = requested_scope
+        hybrid["retrieval"]["scope_trace"] = dict(scope_trace)
+        hybrid.setdefault("trace", {})["retrieval_scope"] = dict(scope_trace)
+        result.setdefault("trace", {})["retrieval_scope"] = dict(scope_trace)
+        result["retrieval_scope"] = requested_scope
         result["hybrid"] = hybrid
         result.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
         result["trace"]["reasoning_mode"] = self.reasoning_mode

@@ -166,19 +166,15 @@
             <option value="DERIVED_SEMANTIC_SPACE">Только производное пространство</option>
           </select>
         </label>
-        <label>
-          Введите RESET TEST SPACE
-          <input v-model="resetConfirmation" :disabled="resetting" autocomplete="off" />
-        </label>
         <p v-if="resetError" class="error">{{ resetError }}</p>
         <div class="reset-actions">
           <button type="button" class="cancel" :disabled="resetting" @click="closeResetDialog">Отмена</button>
           <button
             type="button"
             class="danger"
-            :disabled="resetting || resetConfirmation !== 'RESET TEST SPACE'"
+            :disabled="resetting"
             @click="resetTestSpace"
-          >{{ resetting ? 'Очищаю…' : 'Подтвердить очистку' }}</button>
+          >{{ resetting ? 'Очищаю…' : 'Очистить пространство' }}</button>
         </div>
       </section>
     </div>
@@ -266,7 +262,6 @@ const exportStatus = ref('');
 const resetOpen = ref(false);
 const resetting = ref(false);
 const resetScope = ref<ResetScope>('FULL_TEST_STATE');
-const resetConfirmation = ref('');
 const resetError = ref('');
 const graphStore = useGraphStore();
 const trainingStore = useGraphTrainingStore();
@@ -351,14 +346,12 @@ async function learn(): Promise<void> {
 }
 function openResetDialog(): void {
   resetError.value = '';
-  resetConfirmation.value = '';
   resetScope.value = 'FULL_TEST_STATE';
   resetOpen.value = true;
 }
 function closeResetDialog(): void {
   if (resetting.value) return;
   resetOpen.value = false;
-  resetConfirmation.value = '';
   resetError.value = '';
 }
 function clearProjectStorage(): void {
@@ -382,7 +375,6 @@ function clearClientRuntime(): void {
   trainingText.value = '';
 }
 async function resetTestSpace(): Promise<void> {
-  if (resetConfirmation.value !== 'RESET TEST SPACE') return;
   resetting.value = true;
   resetError.value = '';
   error.value = '';
@@ -391,7 +383,6 @@ async function resetTestSpace(): Promise<void> {
     const report = await api.post<ResetReport>('/api/v2/testing/reset', {
       scope: resetScope.value,
       mode,
-      confirmation: resetConfirmation.value,
     });
     if (!report.reset || Object.values(report.invariants).some(value => !value)) {
       throw new Error('Backend не подтвердил пустое и согласованное состояние');
@@ -403,7 +394,6 @@ async function resetTestSpace(): Promise<void> {
       ? 'Тестовое пространство очищено. Можно начинать новое обучение.'
       : 'Производное пространство очищено. Доступна явная пересборка из Event Graph.';
     resetOpen.value = false;
-    resetConfirmation.value = '';
   } catch (cause) {
     resetError.value = cause instanceof Error ? cause.message : 'Не удалось очистить тестовое пространство';
   } finally {

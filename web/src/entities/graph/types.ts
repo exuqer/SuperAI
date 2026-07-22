@@ -290,7 +290,23 @@ export interface HybridPipelineResult {
     field_region: HybridFieldRegion;
     [key: string]: unknown;
   };
-  retrieval: { hits: Array<{ hit_id: string; element_id: string; element_type: string; match_score: number }>; field_hit_count: number; graph_hit_count: number };
+  retrieval: {
+    hits: Array<{ hit_id: string; element_id: string; element_type: string; match_score: number; origin?: string }>;
+    field_hit_count: number;
+    direct_graph_hit_count?: number;
+    bridge_graph_hit_count?: number;
+    graph_hit_count: number;
+    scope?: RetrievalScope;
+    scope_trace?: {
+      requested_retrieval_scope?: string;
+      resolved_retrieval_scope?: RetrievalScope;
+      local_event_count?: number;
+      global_event_count?: number;
+      events_after_scope_filter?: number;
+      global_fallback_used?: boolean;
+      phase?: string;
+    };
+  };
   activation: { activations: Record<string, number>; visited: number; steps: number };
   workspace: HybridWorkspace;
   configurations?: Array<Record<string, unknown>>;
