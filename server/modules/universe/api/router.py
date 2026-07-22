@@ -4,13 +4,36 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from server.core.settings import settings
+from server.v2.graph_repository import GraphRepository
+from server.v2.semantic_field import SemanticFieldService
 from server.v2.universe import UniverseService
 
 
-router = APIRouter(prefix="/api", tags=["universes"])
+router = APIRouter(tags=["universes"])
+
+
+def semantic_field() -> SemanticFieldService:
+    return SemanticFieldService(GraphRepository())
+
+
+@router.get("/v2/semantic-field")
+async def semantic_field_view(
+    limit: int = Query(default=200, ge=1, le=2000),
+    field: SemanticFieldService = Depends(semantic_field),
+) -> dict[str, Any]:
+    return field.snapshot(limit=limit)
+
+
+@router.post("/v2/semantic-field/rollback/{field_revision}")
+async def rollback_semantic_field(field_revision: int, field: SemanticFieldService = Depends(semantic_field)) -> dict[str, Any]:
+    try:
+        return field.restore_revision(field_revision)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"field revision not found: {error.args[0]}") from error
 
 
 def service() -> UniverseService:
@@ -27,8 +50,13 @@ async def universes(current: UniverseService = Depends(service)) -> dict[str, An
 
 
 @router.post("/reset")
-async def reset_memory(current: UniverseService = Depends(service)) -> dict[str, Any]:
+async def reset_memory(
+    x_admin_token: str = Header(default=""),
+    current: UniverseService = Depends(service),
+) -> dict[str, Any]:
     """Destructively reset all graph and universe data in the current database."""
+    if not settings.admin_token or x_admin_token != settings.admin_token:
+        raise HTTPException(status_code=403, detail="destructive endpoint is disabled")
     return current.reset()
 
 

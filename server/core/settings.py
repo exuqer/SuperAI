@@ -15,14 +15,15 @@ class Settings(BaseSettings):
 
     # API
     api_prefix: str = "/api/v2"
-    cors_origins: list[str] = ["*"]
+    admin_token: str = ""
+    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     cors_allow_credentials: bool = True
     cors_allow_methods: list[str] = ["*"]
     cors_allow_headers: list[str] = ["*"]
 
     # App
-    app_title: str = "SuperAI Role-Free Event Graph API"
-    app_version: str = "2.7.0"
+    app_title: str = "SuperAI Spatial-Semantic Reasoning API"
+    app_version: str = "3.0.0"
     debug: bool = False
     load_demo_knowledge: bool = False
     load_domain_pack: str | None = None
@@ -78,6 +79,14 @@ class Settings(BaseSettings):
                 return False
             if normalized in {"development", "dev"}:
                 return True
+        return value
+
+    @field_validator("cors_allow_credentials")
+    @classmethod
+    def reject_wildcard_credentials(cls, value: bool, info: object) -> bool:
+        data = getattr(info, "data", {})
+        if value and "*" in (data.get("cors_origins") or []):
+            raise ValueError("cors_allow_credentials cannot be enabled with wildcard origins")
         return value
 
     model_config = SettingsConfigDict(

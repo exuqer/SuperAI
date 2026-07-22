@@ -31,7 +31,7 @@
       <section class="panel canvas-panel">
         <div class="panel-head">
           <div>
-            <div class="kicker">{{ selectedDimensions.length ? 'DIMENSION PROJECTION' : 'BASE SPACE' }}</div>
+            <div class="kicker">{{ selectedDimensions.length ? 'DIMENSION PROJECTION' : 'SEMANTIC FIELD' }}</div>
             <h1>{{ selectedDimensions.length ? dimensionTitle : (activeUniverse?.name || 'Пространство') }}</h1>
           </div>
           <span>{{ displayPoints.length }} сущностей</span>
@@ -56,7 +56,7 @@
         <p class="notice">
           <template v-if="selectedDimensions.length === 2">X — {{ compact(selectedDimensions[0]) }}, Y — {{ compact(selectedDimensions[1]) }}. Близкие точки имеют похожие проекции в обоих измерениях.</template>
           <template v-else-if="selectedDimensions.length === 1">Показана сила принадлежности к {{ compact(selectedDimensions[0]) }}; выберите второе D для пересечения.</template>
-          <template v-else>Экранная карта — двумерная проекция; она не заменяет расстояние модели.</template>
+          <template v-else>Semantic Field revision {{ semanticField.field_revision }} · {{ semanticField.projection_method }} · display projection only.</template>
         </p>
         <div class="map" aria-label="Базовое пространство">
           <button
@@ -92,7 +92,7 @@
           <button class="show-dimensions" @click="selectedEntity = null">Выбрать измерения</button>
         </template>
         <template v-else>
-          <p>Измерения независимы: это не дерево классов.</p>
+          <p>Semantic Field: {{ semanticField.clouds.length }} clouds · revision {{ semanticField.field_revision }}.</p>
           <p class="dimension-help">Выберите до двух D — их проекции образуют карту пересечений. Повторный клик снимает выбор.</p>
           <button v-for="dimension in dimensions" :key="dimension.id" class="dimension" :class="{ selected: selectedDimensions.includes(dimension.id) }" @click="toggleDimension(dimension.id)">
             <strong>{{ compact(dimension.id) }} <small v-if="dimension.alias">— {{ dimension.alias }}</small></strong>
@@ -167,6 +167,7 @@ type Profile = {
   word_forms?: WordForm[];
 };
 type ProjectionPoint = { id: string; label: string; x: number; y: number; projections: Record<string, number> };
+type SemanticField = { field_revision: number; projection_method: string; clouds: Array<{ cloud_id: string; concept_id: string; center: number[]; display_center: number[]; halo: number; mass: number; density: number; stability: number; active_dimensions: string[]; position_status: string }> };
 
 const universes = ref<Universe[]>([]);
 const selectedUniverse = ref('words');
@@ -176,6 +177,7 @@ const dimensionDetail = ref<DimensionDetail | null>(null);
 const selectedEntity = ref<Profile | null>(null);
 const selectedDimensions = ref<string[]>([]);
 const projectionPoints = ref<ProjectionPoint[]>([]);
+const semanticField = ref<SemanticField>({ field_revision: 0, projection_method: 'none', clouds: [] });
 const error = ref('');
 const trainingText = ref('');
 const training = ref(false);
@@ -184,7 +186,8 @@ const resetting = ref(false);
 const exporting = ref(false);
 const exportStatus = ref('');
 const activeUniverse = computed(() => universes.value.find(item => item.id === selectedUniverse.value));
-const displayPoints = computed<Array<Entity | ProjectionPoint>>(() => selectedDimensions.value.length ? projectionPoints.value : base.value.entities);
+const fieldPoints = computed<ProjectionPoint[]>(() => semanticField.value.clouds.map(cloud => ({ id: cloud.cloud_id, label: cloud.concept_id, x: (Math.max(-1, Math.min(1, cloud.display_center[0] || 0)) + 1) / 2, y: (Math.max(-1, Math.min(1, cloud.display_center[1] || 0)) + 1) / 2, projections: {} })));
+const displayPoints = computed<Array<Entity | ProjectionPoint>>(() => selectedDimensions.value.length ? projectionPoints.value : fieldPoints.value);
 const dimensionTitle = computed(() => selectedDimensions.value.map(compact).join(' × '));
 
 function compact(value: string): string { return value.replace('dimension-', 'D-').slice(0, 14); }
@@ -198,11 +201,12 @@ function position(point: Entity | ProjectionPoint): Record<string, string> {
 async function loadUniverse(): Promise<void> {
   error.value = ''; selectedEntity.value = null; selectedDimensions.value = []; projectionPoints.value = []; dimensionDetail.value = null;
   try {
-    const [space, fields] = await Promise.all([
+    const [space, fields, field] = await Promise.all([
       api.get<{ entities: Entity[] }>(`/api/universes/${selectedUniverse.value}/base-space`),
       api.get<{ dimensions: Dimension[] }>(`/api/universes/${selectedUniverse.value}/dimensions`),
+      api.get<SemanticField>('/api/v2/semantic-field'),
     ]);
-    base.value = space; dimensions.value = fields.dimensions;
+    base.value = space; dimensions.value = fields.dimensions; semanticField.value = field;
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не удалось загрузить пространство'; }
 }
 async function selectUniverse(id: string): Promise<void> { selectedUniverse.value = id; await loadUniverse(); }

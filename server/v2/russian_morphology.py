@@ -22,6 +22,10 @@ class RussianMorphology:
         except Exception:
             self._analyzer = None
 
+    @property
+    def available(self) -> bool:
+        return self._analyzer is not None
+
     @staticmethod
     def _features(parsed: Any) -> Dict[str, Any]:
         tag = parsed.tag
@@ -47,7 +51,7 @@ class RussianMorphology:
 
     def parse_variants(self, word: str, limit: int = 12) -> List[Morphology]:
         if not self._analyzer:
-            return [Morphology(word.casefold(), "UNK", {}, 1.0)]
+            return [Morphology(word.casefold(), "UNK", {}, 0.20)]
         result: List[Morphology] = []
         seen: set[tuple[Any, ...]] = set()
         for parsed in self._analyzer.parse(word):
@@ -68,7 +72,7 @@ class RussianMorphology:
             ))
             if len(result) >= max(1, int(limit)):
                 break
-        return result or [Morphology(word.casefold(), "UNK", {}, 1.0)]
+        return result or [Morphology(word.casefold(), "UNK", {}, 0.20)]
 
     def parse(self, word: str) -> Morphology:
         return self.parse_variants(word, limit=1)[0]

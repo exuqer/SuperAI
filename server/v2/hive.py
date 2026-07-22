@@ -52,12 +52,13 @@ class V2HiveService:
         hive_id: str,
         text: str,
         resolved_mode: Optional[str] = None,
-        resonance_scope: str = "LOCAL_ONLY",
+        resonance_scope: str = "LOCAL_THEN_GLOBAL",
     ) -> Dict[str, Any]:
         result = self.query_scenes.query(
             hive_id,
             text,
             resolved_mode=resolved_mode,
+            retrieval_scope=resonance_scope,
         )
         result["resolved_mode"] = (
             resolved_mode

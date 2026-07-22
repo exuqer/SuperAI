@@ -421,6 +421,24 @@ class EventGraphPipeline:
             source_type=source_type,
             speaker_role="source",
         )
+        projected_clauses = self._clause_predicates(analysis)
+        structured_clauses = [
+            (clause, predicate)
+            for clause, predicate in projected_clauses
+            if self._mentions_for_clause(analysis, clause, predicate)
+        ]
+        requested_type = str(source_type or "").upper()
+        if requested_type in {
+            "EVENT_SOURCE", "DEFINITION_SOURCE", "LEXICAL_SOURCE",
+            "TAXONOMY_SOURCE", "METADATA_SOURCE", "UNRESOLVED_SOURCE",
+        }:
+            source_class = requested_type
+        elif structured_clauses:
+            source_class = "EVENT_SOURCE"
+        elif analysis.mentions:
+            source_class = "LEXICAL_SOURCE"
+        else:
+            source_class = "UNRESOLVED_SOURCE"
         inferred_status = self._source_status(analysis)
         if force_status == "STAGED":
             status = "STAGED"
@@ -430,6 +448,18 @@ class EventGraphPipeline:
             status = "CONFIRMED" if inferred_status == "CONFIRMED" else "STAGED"
         else:
             status = inferred_status
+        morphology_available = bool(
+            getattr(self.morphology, "available", True)
+        )
+        admission_reasons: list[str] = []
+        if not morphology_available:
+            admission_reasons.append("MORPHOLOGY_UNAVAILABLE")
+        if source_class == "EVENT_SOURCE" and not structured_clauses:
+            admission_reasons.append("NO_VALID_EVENT_PROJECTION")
+        if source_class != "EVENT_SOURCE":
+            admission_reasons.append(f"NON_EVENT_SOURCE:{source_class}")
+        if admission_reasons:
+            status = "STAGED"
         independent_key = independent_key or content_hash(normalized_text)
         domain_key = domain_key or source_type
         transaction = (
@@ -454,6 +484,9 @@ class EventGraphPipeline:
                     ),
                     "interpretation_version": analysis.interpretation_version,
                     "domain_key": domain_key,
+                    "source_class": source_class,
+                    "admission_reasons": admission_reasons,
+                    "morphology_available": morphology_available,
                 },
             )
             if status == "RETRACTED":
@@ -482,12 +515,14 @@ class EventGraphPipeline:
                     "status": status,
                     "events": [],
                     "language_analysis": analysis.as_dict(),
+                    "source_class": source_class,
+                    "admission_reasons": admission_reasons,
                 }
             events: List[EventNode] = []
             learned_slots: Dict[str, Dict[str, Any]] = {}
             learned_sets: List[Dict[str, Any]] = []
             learned_prototypes: Dict[str, Dict[str, Any]] = {}
-            for clause, predicate_token in self._clause_predicates(analysis):
+            for clause, predicate_token in structured_clauses:
                 predicate_concept_id = stable_id(
                     "predicate-concept",
                     predicate_token.lemma.casefold(),
@@ -985,8 +1020,9 @@ class EventGraphPipeline:
             ))
         return participants
 
-    def retract(self, source_id: str) -> Dict[str, Any]:
-        with self.repository.transaction() as conn:
+    def retract(self, source_id: str, *, connection: Any = None) -> Dict[str, Any]:
+        transaction = self.repository.transaction() if connection is None else nullcontext(connection)
+        with transaction as conn:
             row = conn.execute(
                 "SELECT status FROM knowledge_sources WHERE id=?",
                 (source_id,),

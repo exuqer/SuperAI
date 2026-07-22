@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import nullcontext
 from dataclasses import replace
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -41,6 +42,7 @@ from .query_graph import (
     persist_query_result,
 )
 from .universe import UniverseService
+from .semantic_field import SemanticFieldService
 from .question_family import (
     resolve_question_family,
     check_animacy_compatibility,
@@ -87,21 +89,26 @@ class GraphTrainingService:
         self.universes = UniverseService(
             self.repository, runtime=self.acceleration
         )
+        self.field = SemanticFieldService(self.repository)
 
-    def _materialize_and_project(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    def _materialize_and_project(self, *args: Any, connection: Any = None, **kwargs: Any) -> Dict[str, Any]:
         discover_dimensions = kwargs.pop("discover_dimensions", None)
         project_universes = bool(kwargs.pop("project_universes", True))
         # Event evidence and its universe projection form one source-level
         # transaction.  Besides avoiding a second durability barrier, this
         # prevents a confirmed graph source from surviving a failed
         # projection as a partially materialised ingest.
-        with self.repository.transaction() as conn:
+        transaction = nullcontext(connection) if connection is not None else self.repository.transaction()
+        with transaction as conn:
             result = self.events.materialize(
                 *args,
                 **kwargs,
                 connection=conn,
             )
             if result.get("status") == "CONFIRMED" and project_universes:
+                result["field_update"] = self.field.ingest_source(
+                    str(result["source_id"]), connection=conn
+                )
                 if discover_dimensions is None:
                     source_count = int(conn.execute(
                         """SELECT COUNT(*) FROM knowledge_sources
@@ -120,6 +127,9 @@ class GraphTrainingService:
                     connection=conn,
                 )
             elif result.get("status") == "CONFIRMED":
+                result["field_update"] = self.field.ingest_source(
+                    str(result["source_id"]), connection=conn
+                )
                 result["universe_update"] = {
                     "source_id": str(result["source_id"]),
                     "ingested": False,
@@ -188,9 +198,11 @@ class GraphTrainingService:
         )
 
     def retract(self, source_id: str, reason: str = "") -> Dict[str, Any]:
-        result = self.events.retract(source_id)
-        result["universe_update"] = self.universes.remove_source(source_id)
-        result["reason"] = reason
+        with self.repository.transaction() as conn:
+            result = self.events.retract(source_id, connection=conn)
+            result["field_update"] = self.field.remove_source_contribution(source_id, connection=conn)
+            result["universe_update"] = self.universes.remove_source(source_id, connection=conn)
+            result["reason"] = reason
         return result
 
     def reprocess(self, source_id: str) -> Dict[str, Any]:
@@ -203,18 +215,26 @@ class GraphTrainingService:
             if not row:
                 raise KeyError(source_id)
             payload = dict(row)
-            conn.execute(
-                "DELETE FROM knowledge_sources WHERE id=?",
-                (source_id,),
+            metadata = decode(payload["metadata_json"], {})
+            revision_key = f"{payload['independent_key']}:revision:{uuid.uuid4().hex}"
+            replacement = self._materialize_and_project(
+                str(payload["raw_text"]),
+                source_type=str(payload["source_type"]),
+                independent_key=revision_key,
+                domain_key=str(metadata.get("domain_key") or payload["source_type"]),
+                force_status="CONFIRMED",
+                connection=conn,
             )
-        metadata = decode(payload["metadata_json"], {})
-        return self._materialize_and_project(
-            str(payload["raw_text"]),
-            source_type=str(payload["source_type"]),
-            independent_key=str(payload["independent_key"]),
-            domain_key=str(metadata.get("domain_key") or payload["source_type"]),
-            force_status="CONFIRMED",
-        )
+            if replacement.get("status") != "CONFIRMED":
+                raise ValueError("replacement source did not pass admission")
+            self.events.retract(source_id, connection=conn)
+            self.field.remove_source_contribution(source_id, connection=conn)
+            self.universes.remove_source(source_id, connection=conn)
+        return {
+            "previous_source_id": source_id,
+            "source": replacement,
+            "history_preserved": True,
+        }
 
     def preview_batch(
         self,
@@ -284,24 +304,22 @@ class GraphTrainingService:
                    ORDER BY bs.source_order""",
                 (batch_id,),
             ).fetchall()
-        committed = [
-            self.commit(str(row["id"]), manual_validation=True)
-            for row in rows
-        ]
-        final_status = (
-            "COMMITTED"
-            if all(item["status"] == "CONFIRMED" for item in committed)
-            else "PARTIALLY_COMMITTED"
-        )
         with self.repository.transaction() as conn:
+            committed = []
+            for row in rows:
+                source = conn.execute("SELECT raw_text,source_type,independent_key,metadata_json FROM knowledge_sources WHERE id=?", (str(row["id"]),)).fetchone()
+                metadata = decode(source["metadata_json"], {})
+                committed.append(self._materialize_and_project(str(source["raw_text"]), source_type=str(source["source_type"]), independent_key=str(source["independent_key"]), domain_key=str(metadata.get("domain_key") or source["source_type"]), force_status="CONFIRMED", connection=conn))
+            if not all(item.get("status") == "CONFIRMED" for item in committed):
+                raise ValueError("batch admission failed; no source was committed")
             conn.execute(
                 """UPDATE graph_batches SET status=?,updated_at=?
                    WHERE id=?""",
-                (final_status, utcnow(), batch_id),
+                ("COMMITTED", utcnow(), batch_id),
             )
         return {
             "batch_id": batch_id,
-            "status": final_status,
+            "status": "COMMITTED",
             "sources": committed,
         }
 
@@ -381,7 +399,8 @@ class GraphDialogueService:
         self.constructions = ConstructionLearner()
         self.query_operators = self.builder.query_operators
         self.gap_release_selector = GapReleaseSelector()
-        self.hybrid = HybridDialoguePipeline()
+        self.field = SemanticFieldService(self.repository)
+        self.hybrid = HybridDialoguePipeline(field_service=self.field)
         self.reasoning_mode = "hybrid"
 
     def create(
@@ -1352,6 +1371,7 @@ class GraphDialogueService:
         text: str,
         *,
         resolved_mode: Optional[str] = None,
+        retrieval_scope: str = "LOCAL_THEN_GLOBAL",
     ) -> Dict[str, Any]:
         # Query construction, swarm evidence, strict matching and persisted
         # outcome are one atomic turn.  Repository transactions opened by the
@@ -1363,7 +1383,9 @@ class GraphDialogueService:
             result = self._build_hybrid_source(
                 hive_id, text, resolved_mode=resolved_mode
             )
-            result = self._attach_hybrid_result(result, hive_id, text)
+            result = self._attach_hybrid_result(
+                result, hive_id, text, retrieval_scope=retrieval_scope
+            )
             sql_after, executes_after = database.metrics_snapshot()
             serialization_after = serialization_snapshot()
             elapsed_ms = (perf_counter() - started) * 1000.0
@@ -1437,6 +1459,7 @@ class GraphDialogueService:
                 "last_query_frame": previous_hybrid.get("query_frame") or {},
                 "last_answer": previous_hybrid.get("answer_structure") or previous_hybrid.get("answer") or {},
             },
+            "_query_graph_object": graph,
         }
 
     def _attach_hybrid_result(
@@ -1444,6 +1467,8 @@ class GraphDialogueService:
         result: Dict[str, Any],
         hive_id: str,
         text: str,
+        *,
+        retrieval_scope: str = "LOCAL_THEN_GLOBAL",
     ) -> Dict[str, Any]:
         """Attach the single authoritative hybrid result."""
         hive = result.get("hive") or {}
@@ -1451,14 +1476,32 @@ class GraphDialogueService:
         indexes: list[dict[str, Any]] = []
         previous_context: dict[str, Any] = dict(result.get("_hybrid_context") or {})
         with self.repository.transaction() as conn:
-            try:
-                indexes = graph_rows_from_connection(
+            graph_object = result.get("_query_graph_object")
+            if graph_object is not None:
+                persist_query_result(
                     conn,
-                    session_id=conversation_id,
-                    query_graph=result.get("query_graph") or {},
+                    graph_object,
+                    text,
+                    hive_id=hive_id,
+                    search={"accepted": []},
                 )
-            except Exception:
-                indexes = []
+            indexes = graph_rows_from_connection(
+                conn,
+                session_id=conversation_id,
+                query_graph=result.get("query_graph") or {},
+            )
+            local = [
+                item for item in indexes
+                if conversation_id
+                and str(item.get("session_id") or "") == conversation_id
+            ]
+            global_items = [item for item in indexes if item not in local]
+            if retrieval_scope == "LOCAL_ONLY":
+                indexes = local
+            elif retrieval_scope == "GLOBAL_ONLY":
+                indexes = global_items
+            else:
+                indexes = [*local, *global_items]
             turns = conn.execute(
                 """SELECT query_graph_id,selected_bindings_json,answer_json
                    FROM dialogue_turns WHERE hive_id=?
@@ -1506,6 +1549,7 @@ class GraphDialogueService:
             indexes=indexes,
             analysis={"query_graph": result.get("query_graph") or {}},
         )
+        hybrid["retrieval"]["scope"] = retrieval_scope
         result["hybrid"] = hybrid
         result.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
         result["trace"]["reasoning_mode"] = self.reasoning_mode
@@ -1521,8 +1565,57 @@ class GraphDialogueService:
         if answer_text and answer_text[-1:] not in {".", "!", "?"}:
             answer_text += "."
         leader = (hybrid.get("resonance") or {}).get("leader") or {}
-        workspace = hybrid.get("workspace") or {}
         supporting_events = leader.get("supporting_events") or []
+        candidates_by_id = {
+            str(item.get("candidate_id") or ""): item
+            for item in hybrid.get("candidates") or ()
+            if isinstance(item, Mapping)
+        }
+        candidates_by_gap = {
+            str(item.get("gap_id") or ""): item
+            for candidate_id in leader.get("candidate_ids") or ()
+            if isinstance((item := candidates_by_id.get(str(candidate_id))), Mapping)
+        }
+        target_gaps = (
+            ((result.get("query_graph") or {}).get("event_pattern") or {}).get("target_gaps")
+            or []
+        )
+        selected_bindings = []
+        if public_status == "RESOLVED":
+            for gap in target_gaps:
+                if not isinstance(gap, Mapping):
+                    continue
+                gap_id = str(gap.get("node_id") or "")
+                candidate = candidates_by_gap.get(gap_id)
+                if candidate is None:
+                    continue
+                selected_bindings.append({
+                    "binding_id": stable_id("hybrid-binding", str(result.get("message_id") or hive_id), gap_id, str(candidate.get("element_id") or "")),
+                    "query_graph_id": str((result.get("query_graph") or {}).get("query_graph_id") or ""),
+                    "event_id": str(candidate.get("event_id") or (supporting_events[0] if supporting_events else "")),
+                    "gap_node_id": gap_id,
+                    "resolved_node_id": str(candidate.get("element_id") or ""),
+                    "resolved_concept_id": str(candidate.get("element_id") or ""),
+                    "resolved_lemma": str(candidate.get("lemma") or candidate.get("surface") or ""),
+                    "resolved_surface": str(candidate.get("surface") or candidate.get("lemma") or ""),
+                    "resolved_features": {},
+                    "scores": {"structural": float(candidate.get("event_fit") or 0.0), "signature": float(candidate.get("gap_fit") or 0.0), "evidence": float(candidate.get("provenance_score") or 0.0), "total": float(candidate.get("score") or 0.0)},
+                    "status": "SELECTED",
+                    "failed_constraint": None,
+                    "evidence": list(candidate.get("graph_evidence_ids") or []),
+                })
+        binding_configuration = None
+        if selected_bindings and len(selected_bindings) == len(target_gaps):
+            binding_configuration = {
+                "configuration_id": stable_id("hybrid-configuration", str((result.get("query_graph") or {}).get("query_graph_id") or ""), selected_bindings[0]["event_id"]),
+                "event_id": selected_bindings[0]["event_id"],
+                "bindings_by_gap": {item["gap_node_id"]: item for item in selected_bindings},
+                "all_required_gaps_bound": True,
+                "distinct_node_count": len({item["resolved_node_id"] for item in selected_bindings}),
+                "configuration_score": sum(float(item["scores"]["total"]) for item in selected_bindings) / len(selected_bindings),
+                "graph_validation": {"valid": True},
+                "status": "SELECTED",
+            }
         result["hybrid_answer"] = answer
         result["answer"] = {
             "status": public_status,
@@ -1543,23 +1636,54 @@ class GraphDialogueService:
             "hybrid_answer_structure": answer,
             "authoritative": True,
         }
-        try:
-            with self.repository.transaction() as conn:
-                row = conn.execute("SELECT state_json FROM hives WHERE id=?", (hive_id,)).fetchone()
-                if row:
-                    state = decode(row["state_json"], {})
-                    state.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
-                    state["hybrid"] = hybrid
-                    state["query_graph"] = result.get("query_graph")
-                    state["answer"] = result.get("answer")
-                    state["candidate_bindings"] = []
-                    state["selected_bindings"] = []
-                    state["binding_configuration"] = None
-                    state["turn_index"] = int(state.get("turn_index") or 0) + 1
-                    conn.execute("UPDATE hives SET state_json=?,updated_at=? WHERE id=?", (encode(state), utcnow(), hive_id))
-        except Exception:
-            result["trace"]["hybrid_persistence"] = "FAILED"
+        result["selected_bindings"] = selected_bindings
+        result["binding_configuration"] = binding_configuration
+        with self.repository.transaction() as conn:
+            row = conn.execute("SELECT conversation_id,state_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+            if not row:
+                raise KeyError(hive_id)
+            state = decode(row["state_json"], {})
+            turn_index = int(state.get("turn_index") or 0) + 1
+            message_id = stable_id("dialogue-turn", hive_id, turn_index)
+            conn.execute(
+                """INSERT INTO dialogue_turns
+                   (id,hive_id,turn_index,speaker,raw_text,query_graph_id,
+                    selected_bindings_json,binding_configuration_id,answer_json,created_at)
+                   VALUES(?,?,?,'user',?,?,?,?,?,?)""",
+                (
+                    message_id, hive_id, turn_index, text,
+                    str((result.get("query_graph") or {}).get("query_graph_id") or "") or None,
+                    encode(selected_bindings), binding_configuration.get("configuration_id") if binding_configuration else None, encode(answer), utcnow(),
+                ),
+            )
+            dialogue_context = DialogueContextManager.load(conn, str(row["conversation_id"]))
+            if public_status == "RESOLVED":
+                dialogue_context.mark_resolved(
+                    message_id,
+                    "",
+                    None,
+                    current_focus={
+                        "origin": "ANSWER_STRUCTURE",
+                        "confidence": float(answer.get("confidence") or 0.0),
+                        "filled_gaps": dict(answer.get("filled_gaps") or {}),
+                        "provenance": dict(answer.get("provenance") or {}),
+                    },
+                )
+            else:
+                dialogue_context.mark_unresolved(message_id)
+            DialogueContextManager.save(conn, dialogue_context)
+            state.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
+            state["hybrid"] = hybrid
+            state["query_graph"] = result.get("query_graph")
+            state["answer"] = result.get("answer")
+            state["candidate_bindings"] = []
+            state["selected_bindings"] = selected_bindings
+            state["binding_configuration"] = binding_configuration
+            state["turn_index"] = turn_index
+            conn.execute("UPDATE hives SET state_json=?,updated_at=? WHERE id=?", (encode(state), utcnow(), hive_id))
+        result["turn"] = {"id": message_id, "index": turn_index}
         result.pop("_hybrid_context", None)
+        result.pop("_query_graph_object", None)
         result.pop("language_analysis", None)
         return result
 

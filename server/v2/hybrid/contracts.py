@@ -32,7 +32,7 @@ class Gap:
     source_query_id: str
     expected_type: str = "unknown"
     expected_relation: Optional[str] = None
-    known_elements: Sequence[str] = ()
+    known_elements: Sequence[Any] = ()
     surface_projection: str = ""
     constraints: Sequence[Mapping[str, Any]] = ()
     exclusions: Sequence[str] = ()
@@ -44,7 +44,7 @@ class Gap:
             "source_query_id": self.source_query_id,
             "expected_type": self.expected_type,
             "expected_relation": self.expected_relation,
-            "known_elements": list(self.known_elements),
+            "known_elements": plain(self.known_elements),
             "surface_projection": self.surface_projection,
             "constraints": plain(self.constraints),
             "exclusions": list(self.exclusions),
@@ -61,7 +61,7 @@ class QueryFrame:
     query_type: str
     explicit_predicate: Optional[str] = None
     surface_focus: Optional[str] = None
-    known_elements: Sequence[str] = ()
+    known_elements: Sequence[Any] = ()
     gaps: Sequence[Gap] = ()
     constraints: Sequence[Mapping[str, Any]] = ()
     negations: Sequence[str] = ()
@@ -90,7 +90,7 @@ class QueryFrame:
             "query_type": self.query_type,
             "explicit_predicate": self.explicit_predicate,
             "surface_focus": self.surface_focus,
-            "known_elements": list(self.known_elements),
+            "known_elements": plain(self.known_elements),
             "gaps": [gap.as_dict() for gap in self.gaps],
             "constraints": plain(self.constraints),
             "negations": list(self.negations),
@@ -120,6 +120,7 @@ class Evidence:
     trust_status: str = "OBSERVED_UNTRUSTED"
     retrieval_path: Sequence[str] = ()
     conflicts: Sequence[str] = ()
+    independent_source_key: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -133,7 +134,50 @@ class Evidence:
             "trust_status": self.trust_status,
             "retrieval_path": list(self.retrieval_path),
             "conflicts": list(self.conflicts),
+            "independent_source_key": self.independent_source_key,
         }
+
+
+@dataclass(frozen=True)
+class GraphEvidence(Evidence):
+    """Evidence grounded in a persisted graph record, never a field hit."""
+
+
+@dataclass(frozen=True)
+class IndexTrace:
+    trace_id: str
+    index_name: str
+    element_id: str
+    route: Sequence[str] = ()
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"trace_id": self.trace_id, "index_name": self.index_name, "element_id": self.element_id, "route": list(self.route)}
+
+
+@dataclass(frozen=True)
+class BeeDiscovery:
+    discovery_id: str
+    bee_id: str
+    element_id: str
+    mode: str
+    utility: float = 0.0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"discovery_id": self.discovery_id, "bee_id": self.bee_id, "element_id": self.element_id, "mode": self.mode, "utility": clamp(self.utility)}
+
+
+@dataclass(frozen=True)
+class SpatialSupport:
+    support_id: str
+    cloud_id: str
+    region_id: Optional[str] = None
+    score: float = 0.0
+    relation_alignment: float = 0.0
+    field_revision: int = 0
+    retrieval_path: Sequence[str] = ()
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"support_id": self.support_id, "cloud_id": self.cloud_id, "region_id": self.region_id, "score": clamp(self.score), "relation_alignment": clamp(self.relation_alignment), "field_revision": self.field_revision, "retrieval_path": list(self.retrieval_path)}
 
 
 @dataclass(frozen=True)
@@ -148,6 +192,7 @@ class RetrievalHit:
     provenance: Sequence[Mapping[str, Any]] = ()
     conflicts: Sequence[str] = ()
     retrieval_path: Sequence[str] = ()
+    origin: str = "GRAPH"
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -161,6 +206,7 @@ class RetrievalHit:
             "provenance": plain(self.provenance),
             "conflicts": list(self.conflicts),
             "retrieval_path": list(self.retrieval_path),
+            "origin": self.origin,
         }
 
 
@@ -189,6 +235,7 @@ class WorkspaceBudget:
     max_entities: int = 48
     max_events: int = 64
     max_scenes: int = 16
+    max_clouds: int = 48
     max_candidates_per_gap: int = 16
     max_hypotheses: int = 8
     max_conflicts: int = 16
@@ -255,12 +302,16 @@ class Candidate:
     exclusion_score: float = 0.0
     redundancy_score: float = 0.0
     semantic_distance: float = 0.0
+    field_fit: float = 0.0
     mutual_support: float = 0.0
     constraint_fit: float = 1.0
     constraint_violations: List[str] = field(default_factory=list)
     score: float = 0.0
     status: str = "ACTIVE"
     evidence_ids: List[str] = field(default_factory=list)
+    graph_evidence_ids: List[str] = field(default_factory=list)
+    spatial_support_ids: List[str] = field(default_factory=list)
+    independent_source_keys: List[str] = field(default_factory=list)
     provenance: List[Mapping[str, Any]] = field(default_factory=list)
     event_id: Optional[str] = None
     supporting_event_ids: List[str] = field(default_factory=list)
@@ -286,6 +337,13 @@ class Hypothesis:
     status: str = "ACTIVE"
     provenance: List[Mapping[str, Any]] = field(default_factory=list)
     configuration_ids: List[str] = field(default_factory=list)
+    graph_evidence_ids: List[str] = field(default_factory=list)
+    spatial_support_ids: List[str] = field(default_factory=list)
+    active_cloud_ids: List[str] = field(default_factory=list)
+    field_region_id: Optional[str] = None
+    evidential_score: float = 0.0
+    spatial_score: float = 0.0
+    joint_score: float = 0.0
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -321,6 +379,17 @@ class EventCandidateConfiguration:
     score: float = 0.0
     status: str = "ACTIVE"
     rejection_reasons: List[str] = field(default_factory=list)
+    graph_fit: float = 0.0
+    field_fit: float = 0.0
+    gradient_alignment: float = 0.0
+    cloud_overlap: float = 0.0
+    semantic_region_id: Optional[str] = None
+    known_bindings_by_gap: Mapping[str, Any] = field(default_factory=dict)
+    relation_evaluations: List[Mapping[str, Any]] = field(default_factory=list)
+    predicate_evaluation: Mapping[str, Any] = field(default_factory=dict)
+    temporal_evaluation: Mapping[str, Any] = field(default_factory=dict)
+    polarity_evaluation: Mapping[str, Any] = field(default_factory=dict)
+    state_evaluation: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -331,12 +400,18 @@ class BoundedAssociativeWorkspace:
     workspace_id: str
     query_id: str
     session_id: str
+    query_type: str = "canonical_query"
     budget: WorkspaceBudget = field(default_factory=WorkspaceBudget)
     anchors: List[WorkspaceElement] = field(default_factory=list)
     active_context: List[WorkspaceElement] = field(default_factory=list)
     entities: List[WorkspaceElement] = field(default_factory=list)
     events: List[WorkspaceElement] = field(default_factory=list)
     scenes: List[WorkspaceElement] = field(default_factory=list)
+    clouds: List[WorkspaceElement] = field(default_factory=list)
+    field_region: Mapping[str, Any] = field(default_factory=dict)
+    local_gradients: List[Mapping[str, Any]] = field(default_factory=list)
+    graph_evidence: List[Evidence] = field(default_factory=list)
+    spatial_support: List[SpatialSupport] = field(default_factory=list)
     gaps: List[Gap] = field(default_factory=list)
     constraints: List[Mapping[str, Any]] = field(default_factory=list)
     exclusions: List[str] = field(default_factory=list)
@@ -356,6 +431,7 @@ class BoundedAssociativeWorkspace:
             "entity": self.entities,
             "event": self.events,
             "scene": self.scenes,
+            "cloud": self.clouds,
             "context": self.active_context,
             "anchor": self.anchors,
         }.get(element_type, self.entities)
@@ -380,6 +456,9 @@ class BoundedAssociativeWorkspace:
             self.candidates.append(candidate)
         else:
             existing.evidence_ids = list(dict.fromkeys(existing.evidence_ids + candidate.evidence_ids))
+            existing.graph_evidence_ids = list(dict.fromkeys(existing.graph_evidence_ids + candidate.graph_evidence_ids))
+            existing.spatial_support_ids = list(dict.fromkeys(existing.spatial_support_ids + candidate.spatial_support_ids))
+            existing.independent_source_keys = list(dict.fromkeys(existing.independent_source_keys + candidate.independent_source_keys))
             existing.supporting_event_ids = list(dict.fromkeys(existing.supporting_event_ids + candidate.supporting_event_ids))
             if candidate.configuration_id and not existing.configuration_id:
                 existing.configuration_id = candidate.configuration_id
@@ -411,10 +490,10 @@ class BoundedAssociativeWorkspace:
         self.candidates = [item for gap in sorted(by_gap) for item in by_gap[gap][:self.budget.max_candidates_per_gap]]
 
     def total_elements(self) -> int:
-        return sum(len(getattr(self, name)) for name in ("anchors", "active_context", "entities", "events", "scenes"))
+        return sum(len(getattr(self, name)) for name in ("anchors", "active_context", "entities", "events", "scenes", "clouds"))
 
     def _enforce_budget(self) -> None:
-        limits = {"anchors": self.budget.max_anchors, "active_context": self.budget.max_context_elements, "entities": self.budget.max_entities, "events": self.budget.max_events, "scenes": self.budget.max_scenes}
+        limits = {"anchors": self.budget.max_anchors, "active_context": self.budget.max_context_elements, "entities": self.budget.max_entities, "events": self.budget.max_events, "scenes": self.budget.max_scenes, "clouds": self.budget.max_clouds}
         for name, limit in limits.items():
             section = getattr(self, name)
             if len(section) > limit:
@@ -424,7 +503,7 @@ class BoundedAssociativeWorkspace:
                     removed = section.pop(0)
                     self.evictions.append({"element_id": removed.element_id, "reason": "SECTION_BUDGET", "activation": removed.activation})
         while self.total_elements() > self.budget.max_total_elements:
-            sections = [self.active_context, self.entities, self.events, self.scenes]
+            sections = [self.active_context, self.entities, self.events, self.scenes, self.clouds]
             candidates = [item for section in sections for item in section if item.element_id not in {a.element_id for a in self.anchors}]
             if not candidates:
                 break
@@ -438,11 +517,17 @@ class BoundedAssociativeWorkspace:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "workspace_id": self.workspace_id, "query_id": self.query_id, "session_id": self.session_id,
+            "query_type": self.query_type,
             "anchors": [item.as_dict() for item in self.anchors],
             "active_context": [item.as_dict() for item in self.active_context],
             "entities": [item.as_dict() for item in self.entities],
             "events": [item.as_dict() for item in self.events],
             "scenes": [item.as_dict() for item in self.scenes],
+            "field_region": plain(self.field_region),
+            "active_clouds": [item.as_dict() for item in self.clouds],
+            "local_gradients": plain(self.local_gradients),
+            "graph_evidence": [item.as_dict() for item in self.graph_evidence],
+            "spatial_support": [item.as_dict() for item in self.spatial_support],
             "gaps": [item.as_dict() for item in self.gaps],
             "constraints": plain(self.constraints), "exclusions": list(self.exclusions),
             "temporal_scope": plain(self.temporal_scope),
@@ -467,6 +552,7 @@ class BeeTask:
     max_steps: int = 4
     energy_budget: int = 32
     required_evidence: bool = True
+    bee_mode: str = "GRAPH_BEE"
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -478,12 +564,21 @@ class BeeResult:
     task_id: str
     status: str
     result_element_id: Optional[str] = None
+    result_element_type: Optional[str] = None
     path: Sequence[str] = ()
     score: float = 0.0
     energy_spent: int = 0
     provenance: Sequence[Mapping[str, Any]] = ()
     conflicts: Sequence[str] = ()
     reason: str = ""
+    bee_mode: str = "GRAPH_BEE"
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    graph_evidence_ids: Sequence[str] = ()
+    spatial_support_ids: Sequence[str] = ()
+    independent_source_key: Optional[str] = None
+    route: Sequence[str] = ()
+    actual_cost: int = 0
+    utility: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -500,6 +595,12 @@ class AnswerStructure:
     uncertainties: Sequence[str] = ()
     generation_constraints: Mapping[str, Any] = field(default_factory=lambda: {"language": "ru", "do_not_invent": True, "state_uncertainty": True})
     provenance: Mapping[str, Any] = field(default_factory=dict)
+    epistemic_mode: str = "UNKNOWN"
+    graph_support: float = 0.0
+    field_support: float = 0.0
+    graph_evidence: Sequence[str] = ()
+    spatial_support: Sequence[str] = ()
+    independent_source_count: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}

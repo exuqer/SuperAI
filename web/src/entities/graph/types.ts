@@ -230,25 +230,27 @@ export interface HybridPipelineResult {
     exclusions: string[];
     unresolved_context: boolean;
   };
-  retrieval_hits: Array<{ hit_id: string; element_id: string; element_type: string; match_score: number }>;
+  query_field_projection: Record<string, unknown>;
+  retrieval: { hits: Array<{ hit_id: string; element_id: string; element_type: string; match_score: number }>; field_hit_count: number; graph_hit_count: number };
   activation: { activations: Record<string, number>; visited: number; steps: number };
   workspace: HybridWorkspace;
   configurations?: Array<Record<string, unknown>>;
   candidates?: HybridCandidate[];
   hypotheses?: Array<Record<string, unknown>>;
   resonance: { status: string; iterations: number; stable: boolean };
-  bee_decision: { dispatch: boolean; reasons: string[]; task_types: string[]; bee_count: number };
-  bee_dispatch?: HybridPipelineResult['bee_decision'];
-  bee_tasks: Array<Record<string, unknown>>;
-  bee_results: Array<Record<string, unknown>>;
-  answer: {
+  bees: { decision: { dispatch: boolean; reasons: string[]; task_types: string[]; bee_count: number }; tasks: Array<Record<string, unknown>>; results: Array<Record<string, unknown>> };
+  answer_structure: {
     status: string;
     confidence: number;
     filled_gaps: Record<string, string>;
     uncertainties: string[];
+    epistemic_mode: string;
+    graph_support: number;
+    field_support: number;
+    independent_source_count: number;
+    provenance: Record<string, unknown>;
   };
   answer_text: string;
-  answer_structure?: HybridPipelineResult['answer'];
   debug_payload_version?: string;
   trace: { stages: Array<{ stage: string; duration_ms: number; result: string; count?: number }> };
 }

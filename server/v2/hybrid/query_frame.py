@@ -77,6 +77,95 @@ def _graph_known_elements(analysis: Any) -> list[str]:
     return values
 
 
+def _reference(node: Mapping[str, Any]) -> Mapping[str, Any]:
+    head = node.get("head") if isinstance(node.get("head"), Mapping) else {}
+    lemma = str(head.get("lemma") or node.get("lemma") or node.get("surface") or "")
+    return {
+        "node_id": str(node.get("node_id") or node.get("id") or ""),
+        "concept_id": str(node.get("entity_id") or ""),
+        "lemma_hypotheses": list((node.get("features") or {}).get("morphology_alternatives") or ()),
+        "surface": str(node.get("surface") or head.get("surface") or lemma),
+        "lemma": lemma,
+        "morphology": dict(node.get("features") or {}),
+        "relation_attachment": node.get("preposition") or None,
+        "origin": str(node.get("origin") or "CURRENT_QUERY"),
+        "confidence": float(node.get("context_confidence") or 0.91),
+    }
+
+
+def _reference_lemma(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return _normalise(value.get("lemma") or value.get("surface"))
+    return _normalise(value)
+
+
+def from_query_graph(
+    query_graph: Mapping[str, Any],
+    language_analysis: Mapping[str, Any] | None = None,
+    dialogue_context: Mapping[str, Any] | None = None,
+) -> QueryFrame:
+    """Project the canonical query graph into the operational query frame."""
+    graph = dict(query_graph or {})
+    pattern = graph.get("event_pattern") if isinstance(graph.get("event_pattern"), Mapping) else graph
+    analysis = dict(language_analysis or {})
+    context = dict(dialogue_context or {})
+    utterance = analysis.get("utterance") if isinstance(analysis.get("utterance"), Mapping) else {}
+    raw_text = str(utterance.get("raw_text") or context.get("raw_text") or "")
+    query_id = str(graph.get("query_graph_id") or graph.get("id") or "")
+    if not query_id:
+        import uuid
+        query_id = f"query_{uuid.uuid4().hex}"
+    operators = graph.get("question_operators") or pattern.get("question_operators") or ()
+    focuses = [
+        _normalise(item.get("question_lemma") or item.get("surface"))
+        for item in operators if isinstance(item, Mapping)
+    ]
+    predicate_data = pattern.get("predicate") if isinstance(pattern.get("predicate"), Mapping) else {}
+    predicate = str(predicate_data.get("lemma") or predicate_data.get("surface") or "") or None
+    nodes = [_reference(node) for node in pattern.get("known_nodes") or () if isinstance(node, Mapping)]
+    target_gaps = pattern.get("target_gaps") or ([pattern["target_gap"]] if isinstance(pattern.get("target_gap"), Mapping) else [])
+    type_map = {
+        "EVENT_PREDICATE": "predicate", "NODE_COMPONENT": "component",
+        "EVENT_PROPERTY": "property", "EVENT_ATTACHMENT": "entity",
+        "ENTITY": "entity", "QUANTITY": "quantity", "LOCATION": "location",
+        "TIME": "time", "STATE": "state",
+    }
+    gaps: list[Gap] = []
+    for index, gap_data in enumerate(target_gaps):
+        if not isinstance(gap_data, Mapping):
+            continue
+        constraints = ()
+        kind = str(gap_data.get("gap_kind") or "ENTITY")
+        gaps.append(Gap(
+            gap_id=str(gap_data.get("node_id") or f"gap_{index + 1}_{query_id[-8:]}"),
+            source_query_id=query_id,
+            expected_type=type_map.get(kind, "entity"),
+            expected_relation=next((str(item.get("relation_attachment")) for item in nodes if item.get("relation_attachment")), None),
+            known_elements=tuple(nodes),
+            surface_projection=str(gap_data.get("surface") or (focuses[index] if index < len(focuses) else "")),
+            constraints=constraints,
+            exclusions=tuple(graph.get("exclusions") or ()),
+        ))
+    continuation_of = str(graph.get("continuation_of") or "") or None
+    return QueryFrame(
+        query_id=query_id,
+        session_id=str(context.get("session_id") or utterance.get("conversation_id") or ""),
+        raw_text=raw_text,
+        normalized_text=_normalise(raw_text),
+        query_type=("associative_question" if any(marker in _normalise(raw_text) for marker in ("семантически близк", "похоже", "ассоциац")) else ("multi_gap_question" if len(gaps) > 1 else ("continuation_question" if continuation_of else "canonical_query"))),
+        explicit_predicate=predicate,
+        surface_focus=focuses[0] if focuses else None,
+        known_elements=tuple(nodes),
+        gaps=tuple(gaps),
+        exclusions=tuple(graph.get("exclusions") or ()),
+        continuation_of=continuation_of,
+        confidence=0.92 if gaps else 0.35,
+        context_inheritance={"mode": "ALLOW" if continuation_of else "BLOCK", "source_query_id": continuation_of, "inherited_elements": []},
+        predicate_hypotheses=(({"type": "literal_predicate", "predicate": predicate, "confidence": 0.92},) if predicate else ({"type": "unknown_predicate_question", "confidence": 0.81},)),
+        trace={"source": "CANONICAL_QUERY_GRAPH", "query_graph_id": query_id, "gap_count": len(gaps), "parser_mode": "CANONICAL"},
+    )
+
+
 def _graph_predicate(analysis: Any) -> Optional[str]:
     pattern = _analysis_query_graph(analysis)
     predicate = pattern.get("predicate") if isinstance(pattern.get("predicate"), Mapping) else {}
@@ -119,29 +208,11 @@ def _graph_gap_constraints(analysis: Any, index: int) -> tuple[Mapping[str, Any]
 
 
 def _surface_gap_constraints(focus: str) -> tuple[Mapping[str, Any], ...]:
-    return tuple(
-        {"type": "GRAMMATICAL_FEATURE", "feature": feature, "value": value,
-         "scope": "CANDIDATE", "hardness": "SOFT", "confidence": 0.75}
-        for feature, value in QUESTION_FEATURE_CONSTRAINTS.get(focus, ())
-    )
+    return ()
 
 
 def _constraint_groups(focuses: Sequence[str]) -> tuple[Mapping[str, Any], ...]:
-    constraints = []
-    for focus in focuses:
-        alternatives = QUESTION_FEATURE_CONSTRAINTS.get(focus, ())
-        if alternatives:
-            constraints.append({
-                "group_id": f"case_{focus}",
-                "mode": "ANY",
-                "constraints": [
-                    {"type": "GRAMMATICAL_FEATURE", "feature": feature,
-                     "value": value, "scope": "CANDIDATE", "hardness": "SOFT",
-                     "confidence": 0.75}
-                    for feature, value in alternatives
-                ],
-            })
-    return tuple(constraints)
+    return tuple({"group_id": f"gap_hint_{index}", "mode": "GAP_HINT", "surface": focus} for index, focus in enumerate(focuses))
 
 
 def _predicate(tokens: Sequence[str], analysis: Any = None) -> Optional[str]:
@@ -213,13 +284,17 @@ def build_query_frame(
     session_id: str = "",
     analysis: Any = None,
 ) -> QueryFrame:
+    graph = analysis.get("query_graph") if isinstance(analysis, Mapping) else None
+    if isinstance(graph, Mapping):
+        language = graph.get("trace", {}).get("language_analysis") if isinstance(graph.get("trace"), Mapping) else None
+        return from_query_graph(graph, language if isinstance(language, Mapping) else None, session_context)
     raw_text = str(text or "").strip()
     normalized = _normalise(raw_text)
     context = session_context or {}
     query_id = str(context.get("query_id") or "")
     if not query_id:
-        import hashlib
-        query_id = f"query_{hashlib.sha256(f'{session_id}|{normalized}'.encode()).hexdigest()[:20]}"
+        import uuid
+        query_id = f"query_{uuid.uuid4().hex}"
     tokens = _tokens(raw_text)
     question_tokens = [token for token in tokens if token in QUESTION_WORDS]
     focuses = [QUESTION_WORDS[token] for token in question_tokens]
@@ -266,7 +341,7 @@ def build_query_frame(
                 "relation": "после" if "после" in tokens else "до",
                 "anchors": [tokens[index + 1] for index, value in enumerate(tokens[:-1]) if value in {"после", "до"}],
             }
-        elif set(tokens) & CURRENT_WORDS or focuses:
+        elif set(tokens) & CURRENT_WORDS:
             temporal_scope = {"kind": "CURRENT", "anchors": sorted(set(tokens) & CURRENT_WORDS)}
     return QueryFrame(
         query_id=query_id,
@@ -283,12 +358,9 @@ def build_query_frame(
         exclusions=tuple(dict.fromkeys(excluded_values)),
         temporal_scope=temporal_scope,
         continuation_of=(
-            (
-                (str((analysis or {}).get("query_graph", {}).get("continuation_of") or "") if isinstance(analysis, Mapping) else "")
-                or str(context.get("last_query_id") or "")
-            )
-            or None
-        ) if continuation or _graph_known_elements(analysis) else None,
+            (str((analysis or {}).get("query_graph", {}).get("continuation_of") or "") if isinstance(analysis, Mapping) else "")
+            or str(context.get("last_query_id") or "")
+        ) or None if continuation else None,
         confidence=clamp(0.92 if focuses else 0.35),
         context_inheritance={
             "mode": "ALLOW" if continuation else "BLOCK",
@@ -303,6 +375,7 @@ def build_query_frame(
         constraint_groups=_constraint_groups(focuses),
         trace={
             "query_type_reason": "question_focus_and_relation_anchors",
+            "parser_mode": "CANONICAL" if isinstance(graph, Mapping) else "DEGRADED_UNVERIFIED",
             "known_elements": list(known),
             "gap_count": len(gaps),
             "predicate": predicate,
@@ -355,26 +428,42 @@ def inherit_context(
             normalized_value = _normalise(value) if value else ""
             if normalized_value and normalized_value not in query_frame.exclusions:
                 inherited_exclusions.append(normalized_value)
+    inherited_keys = {_reference_lemma(item) for item in inherited}
     for item in previous_known:
-        if item and item not in inherited:
-            inherited.append(str(item))
+        key = _reference_lemma(item)
+        if key and key not in inherited_keys:
+            inherited.append(item if isinstance(item, Mapping) else str(item))
+            inherited_keys.add(key)
     predicate = query_frame.explicit_predicate or (str(previous.get("explicit_predicate") or "") or None)
     unresolved = bool(continuation and not inherited and not predicate)
     inheritance_mode = "UNRESOLVED" if unresolved else ("ALLOW" if continuation else "BLOCK")
+    def unique_references(values: Sequence[Any]) -> tuple[Any, ...]:
+        result: list[Any] = []
+        seen: set[str] = set()
+        for value in values:
+            key = _reference_lemma(value) or _normalise(str(value))
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            result.append(value)
+        return tuple(result)
+
     gaps = tuple(
         Gap(
-            **{**gap.as_dict(), "known_elements": tuple(inherited), "exclusions": tuple(dict.fromkeys(list(gap.exclusions) + inherited_exclusions + list(previous.get("exclusions") or ())))}
+            **{**gap.as_dict(), "known_elements": tuple(inherited), "exclusions": unique_references(list(gap.exclusions) + inherited_exclusions + list(previous.get("exclusions") or ()))}
         )
         for gap in query_frame.gaps
     )
-    inherited_records = tuple({"element": item, "source": "previous_answer_context"} for item in inherited if item not in query_frame.known_elements)
+    original_keys = {_reference_lemma(item) for item in query_frame.known_elements}
+    inherited_records = tuple({"element": item, "source": "previous_answer_context"} for item in inherited if _reference_lemma(item) not in original_keys)
     reconstructed = query_frame.raw_text
     if inherited and (not query_frame.known_elements or query_frame.query_type == "continuation_relation_question"):
-        reconstructed = f"{query_frame.raw_text} [{', '.join(inherited)}]"
+        reconstructed = f"{query_frame.raw_text} [{', '.join(_reference_lemma(item) for item in inherited)}]"
     return QueryFrame(
         **{**query_frame.as_dict(), "explicit_predicate": predicate, "known_elements": tuple(inherited), "gaps": gaps,
            "continuation_of": query_frame.continuation_of or str(previous.get("query_id") or context.get("last_query_id") or "") or None,
-           "exclusions": tuple(dict.fromkeys(inherited_exclusions)), "inherited_elements": inherited_records, "reconstructed_query": reconstructed,
+           "exclusions": unique_references(inherited_exclusions), "inherited_elements": inherited_records, "reconstructed_query": reconstructed,
            "unresolved_context": unresolved, "confidence": clamp(query_frame.confidence * (0.92 if inherited else 0.4)),
            "context_inheritance": {
                "mode": inheritance_mode,

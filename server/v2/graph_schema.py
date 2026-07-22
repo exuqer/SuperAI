@@ -18,7 +18,7 @@ from .graph_models import (
 # Query-operator evidence is an additive extension to V2.8's graph schema.
 # Keeping this version stable lets existing V2.8 databases gain the tables
 # below through CREATE IF NOT EXISTS instead of being reset.
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 
 
 def _reset_incompatible_schema(conn: sqlite3.Connection) -> None:
@@ -1301,8 +1301,161 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(family_key) REFERENCES question_family_profiles(family_key)
                 ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS semantic_clouds (
+            id TEXT PRIMARY KEY,
+            cloud_type TEXT NOT NULL,
+            concept_id TEXT NOT NULL UNIQUE,
+            mass REAL NOT NULL DEFAULT 0 CHECK(mass >= 0),
+            density REAL NOT NULL DEFAULT 0 CHECK(density BETWEEN 0 AND 1),
+            halo REAL NOT NULL DEFAULT 0 CHECK(halo BETWEEN 0 AND 1),
+            stability REAL NOT NULL DEFAULT 0 CHECK(stability BETWEEN 0 AND 1),
+            permeability REAL NOT NULL DEFAULT 0.5 CHECK(permeability BETWEEN 0 AND 1),
+            bootstrap_center_json TEXT NOT NULL DEFAULT '[]',
+            learned_center_json TEXT NOT NULL DEFAULT '[]',
+            active_dimensions_json TEXT NOT NULL DEFAULT '[]',
+            position_status TEXT NOT NULL DEFAULT 'BOOTSTRAP'
+                CHECK(position_status IN ('BOOTSTRAP','LEARNED','STABLE')),
+            provenance_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS field_revisions (
+            revision INTEGER PRIMARY KEY,
+            based_on_event_revision INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('PROPOSED','VALIDATED','APPLIED','REJECTED','ROLLED_BACK')),
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            applied_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS semantic_cloud_projections (
+            cloud_id TEXT NOT NULL,
+            universe_id TEXT NOT NULL DEFAULT 'global-semantic',
+            center_json TEXT NOT NULL,
+            covariance_json TEXT NOT NULL,
+            principal_axes_json TEXT NOT NULL DEFAULT '[]',
+            local_potential REAL NOT NULL DEFAULT 0,
+            field_revision INTEGER NOT NULL,
+            PRIMARY KEY(cloud_id, universe_id),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(field_revision) REFERENCES field_revisions(revision)
+        );
+        CREATE TABLE IF NOT EXISTS semantic_cloud_projection_revisions (
+            cloud_id TEXT NOT NULL,
+            universe_id TEXT NOT NULL,
+            field_revision INTEGER NOT NULL,
+            previous_center_json TEXT NOT NULL DEFAULT '[]',
+            proposed_center_json TEXT NOT NULL,
+            applied_center_json TEXT,
+            covariance_json TEXT NOT NULL DEFAULT '[]',
+            principal_axes_json TEXT NOT NULL DEFAULT '[]',
+            active_dimensions_json TEXT NOT NULL DEFAULT '[]',
+            validation_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL CHECK(status IN ('PROPOSED','VALIDATED','APPLIED','REJECTED')),
+            created_at TEXT NOT NULL,
+            applied_at TEXT,
+            PRIMARY KEY(cloud_id, universe_id, field_revision),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(field_revision) REFERENCES field_revisions(revision)
+        );
+        CREATE TABLE IF NOT EXISTS semantic_cloud_current_projections (
+            cloud_id TEXT NOT NULL,
+            universe_id TEXT NOT NULL,
+            field_revision INTEGER NOT NULL,
+            PRIMARY KEY(cloud_id, universe_id),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(field_revision) REFERENCES field_revisions(revision)
+        );
+        CREATE TABLE IF NOT EXISTS cloud_dimension_projections (
+            cloud_id TEXT NOT NULL,
+            dimension_id TEXT NOT NULL,
+            coordinate REAL NOT NULL DEFAULT 0,
+            variance REAL NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            source_support_json TEXT NOT NULL DEFAULT '[]',
+            revision INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(cloud_id, dimension_id, revision),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS field_source_contributions (
+            source_id TEXT NOT NULL,
+            source_revision INTEGER NOT NULL,
+            event_id TEXT NOT NULL,
+            cloud_id TEXT NOT NULL,
+            mass_delta REAL NOT NULL DEFAULT 0,
+            density_delta REAL NOT NULL DEFAULT 0,
+            force_delta_json TEXT NOT NULL DEFAULT '[]',
+            shape_delta_json TEXT NOT NULL DEFAULT '{}',
+            context_projection_ids_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(source_id, source_revision, event_id, cloud_id),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS semantic_field_force_traces (
+            id TEXT PRIMARY KEY,
+            field_revision INTEGER NOT NULL,
+            cloud_id TEXT NOT NULL,
+            force_type TEXT NOT NULL,
+            source_cloud_id TEXT,
+            vector_json TEXT NOT NULL DEFAULT '[]',
+            magnitude REAL NOT NULL DEFAULT 0,
+            evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(field_revision) REFERENCES field_revisions(revision),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS semantic_cloud_revision_lookup_idx
+            ON semantic_cloud_projection_revisions(universe_id, field_revision);
+        CREATE INDEX IF NOT EXISTS field_source_contribution_lookup_idx
+            ON field_source_contributions(source_id, source_revision);
+        CREATE TABLE IF NOT EXISTS contextual_cloud_projections (
+            id TEXT PRIMARY KEY,
+            cloud_id TEXT NOT NULL,
+            context_key TEXT NOT NULL,
+            center_json TEXT NOT NULL,
+            covariance_json TEXT NOT NULL,
+            activation_count INTEGER NOT NULL DEFAULT 1,
+            field_revision INTEGER NOT NULL,
+            UNIQUE(cloud_id, context_key),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE,
+            FOREIGN KEY(field_revision) REFERENCES field_revisions(revision)
+        );
+        CREATE TABLE IF NOT EXISTS field_transitions (
+            id TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL,
+            source_id TEXT NOT NULL,
+            cloud_id TEXT NOT NULL,
+            transition_type TEXT NOT NULL CHECK(transition_type IN ('PROPOSAL','DISPLACEMENT','SHAPE_UPDATE','HALO_UPDATE','REJECTED')),
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(revision) REFERENCES field_revisions(revision),
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS event_participant_clouds (
+            participant_id TEXT PRIMARY KEY,
+            cloud_id TEXT NOT NULL,
+            projection_confidence REAL NOT NULL CHECK(projection_confidence BETWEEN 0 AND 1),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(cloud_id) REFERENCES semantic_clouds(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS semantic_cloud_projection_revision_idx
+            ON semantic_cloud_projections(universe_id, field_revision);
+        CREATE INDEX IF NOT EXISTS field_transition_source_idx
+            ON field_transitions(source_id, revision);
         """
     )
+    existing_cloud_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(semantic_clouds)").fetchall()
+    }
+    for column, definition in {
+        "bootstrap_center_json": "TEXT NOT NULL DEFAULT '[]'",
+        "learned_center_json": "TEXT NOT NULL DEFAULT '[]'",
+        "active_dimensions_json": "TEXT NOT NULL DEFAULT '[]'",
+        "position_status": "TEXT NOT NULL DEFAULT 'BOOTSTRAP'",
+    }.items():
+        if column not in existing_cloud_columns:
+            conn.execute(f"ALTER TABLE semantic_clouds ADD COLUMN {column} {definition}")
     versions = {
         "schema_version": str(SCHEMA_VERSION),
         "event_schema_version": EVENT_SCHEMA_VERSION,

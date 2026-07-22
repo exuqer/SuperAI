@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from server.modules.model.infrastructure.repository import ModelRepository
 from server.v2.graph_service import GraphTrainingService
+from server.v2.graph_repository import GraphRepository
 
 
 class TrainingService:
-    def __init__(self, repository: ModelRepository | None = None) -> None:
-        self.pipeline = GraphTrainingService(repository or ModelRepository())
+    def __init__(self, repository: GraphRepository | None = None) -> None:
+        self.pipeline = GraphTrainingService(repository or GraphRepository())
 
     def train(self, text: str) -> dict[str, Any]:
         return self.pipeline.train(text)

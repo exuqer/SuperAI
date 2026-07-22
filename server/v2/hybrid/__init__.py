@@ -8,10 +8,14 @@ from .contracts import (
     Conflict,
     EventCandidateConfiguration,
     Evidence,
+    GraphEvidence,
+    IndexTrace,
+    BeeDiscovery,
     Gap,
     Hypothesis,
     QueryFrame,
     RetrievalHit,
+    SpatialSupport,
     WorkspaceBudget,
 )
 from .pipeline import HybridDialoguePipeline
@@ -31,7 +35,7 @@ from .bees import BeeDispatcher, dispatch_bees
 
 __all__ = [
     "ActivationResult", "AnswerStructure", "BeeResult", "BeeTask",
-    "BoundedAssociativeWorkspace", "Candidate", "Conflict", "Evidence",
+    "BoundedAssociativeWorkspace", "Candidate", "Conflict", "Evidence", "GraphEvidence", "IndexTrace", "BeeDiscovery", "SpatialSupport",
     "Gap", "Hypothesis", "EventCandidateConfiguration", "QueryFrame", "RetrievalHit", "WorkspaceBudget",
     "HybridDialoguePipeline", "build_query_frame", "inherit_context",
     "retrieve_direct", "spread_activation", "build_workspace",

@@ -19,7 +19,7 @@ class HiveQueryRequest(BaseModel):
         pattern="^(NEW_QUERY|FOLLOW_UP|CORRECTION)$",
     )
     retrieval_scope: str = Field(
-        default="LOCAL_ONLY",
+        default="LOCAL_THEN_GLOBAL",
         pattern="^(LOCAL_ONLY|LOCAL_THEN_GLOBAL|GLOBAL_ONLY)$",
     )
 

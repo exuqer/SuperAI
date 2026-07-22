@@ -14,7 +14,7 @@ from server.modules.hive.api.dto import (
 from server.modules.hive.application.services import HiveService
 
 
-router = APIRouter(prefix="/api/v2/hives", tags=["event-graphs"])
+router = APIRouter(prefix="/hives", tags=["event-graphs"])
 
 
 def get_hive_service() -> HiveService:
@@ -65,10 +65,6 @@ async def query_hive(
         request.resolved_mode,
         request.retrieval_scope,
     )
-    # Deprecated HTTP-only alias. Internal state and processing use the
-    # canonical selected_bindings array exclusively.
-    bindings = result.get("selected_bindings") or []
-    result["selected_binding"] = bindings[0] if bindings else None
     return result
 
 

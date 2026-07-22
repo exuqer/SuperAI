@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
+import logging
+import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+
+logger = logging.getLogger(__name__)
+
+
+def _request_id(request: Request) -> str:
+    value = getattr(request.state, "request_id", "")
+    return str(value or uuid.uuid4().hex)
+
+
+def _payload(request: Request, code: str, message: Any, detail: Any = None) -> dict[str, Any]:
+    return {
+        "error": {
+            "code": code,
+            "message": str(message),
+            "detail": detail or {},
+            "request_id": _request_id(request),
+        }
+    }
 
 
 class AppException(Exception):
@@ -52,7 +73,7 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
     """Handle application exceptions."""
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.message},
+        content=_payload(request, exc.__class__.__name__.upper(), exc.message, exc.detail),
     )
 
 
@@ -60,15 +81,16 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     """Handle FastAPI HTTP exceptions."""
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.detail},
+        content=_payload(request, "HTTP_ERROR", exc.detail),
     )
 
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle unexpected exceptions."""
+    logger.exception("unhandled request error request_id=%s route=%s exception=%s", _request_id(request), request.url.path, type(exc).__name__)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error"},
+        content=_payload(request, "INTERNAL_PIPELINE_ERROR", "Internal server error"),
     )
 
 

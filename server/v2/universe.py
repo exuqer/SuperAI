@@ -1248,9 +1248,10 @@ class UniverseService:
             self.repository.bump_revisions(conn)
         return {"source_id": source_id, "ingested": True, "universes": sorted(touched)}
 
-    def remove_source(self, source_id: str) -> dict[str, Any]:
+    def remove_source(self, source_id: str, *, connection: Any = None) -> dict[str, Any]:
         """Forget derived geometry together with retracted source evidence."""
-        with self.repository.transaction() as conn:
+        transaction = self.repository.transaction() if connection is None else nullcontext(connection)
+        with transaction as conn:
             affected = [str(row[0]) for row in conn.execute(
                 "SELECT DISTINCT universe_id FROM universe_occurrences WHERE source_id=?", (source_id,)
             ).fetchall()]

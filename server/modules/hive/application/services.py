@@ -50,7 +50,7 @@ class HiveService:
         hive_id: str,
         text: str,
         resolved_mode: Optional[str] = None,
-        resonance_scope: str = "LOCAL_ONLY",
+        resonance_scope: str = "LOCAL_THEN_GLOBAL",
     ) -> dict[str, Any]:
         try:
             return self.facade.query(

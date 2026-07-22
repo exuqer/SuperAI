@@ -18,7 +18,7 @@ from server.modules.training.api.dto import (
 from server.modules.training.application.services import TrainingService
 
 
-router = APIRouter(prefix="/api/v2/training", tags=["training"])
+router = APIRouter(prefix="/training", tags=["training"])
 
 
 def get_training_service() -> TrainingService:

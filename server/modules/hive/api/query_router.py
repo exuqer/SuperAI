@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from server.modules.hive.application.services import HiveService
 
 
-router = APIRouter(prefix="/api/v2/graphs", tags=["query-graphs"])
+router = APIRouter(prefix="/graphs", tags=["query-graphs"])
 
 
 class TextRequest(BaseModel):

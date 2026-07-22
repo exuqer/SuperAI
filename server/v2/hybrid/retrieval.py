@@ -17,15 +17,14 @@ def _terms(value: Any) -> set[str]:
     return {item for item in _norm(value).replace("/", " ").replace(",", " ").split() if item}
 
 
+def _known_lemma(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return _norm(value.get("lemma") or value.get("surface"))
+    return _norm(value)
+
+
 def _lemma_match(left: str, right: str) -> bool:
-    if not left or not right:
-        return False
-    if left == right or left in right or right in left:
-        return True
-    endings = ("ами", "ями", "ого", "ему", "ами", "ыми", "ов", "ев", "ом", "ем", "а", "я", "у", "ю", "е", "и", "ы", "ой", "ий", "ый", "ть", "л", "ли")
-    left_stem = left[:-len(next((ending for ending in endings if left.endswith(ending) and len(left) - len(ending) >= 3), ""))] if any(left.endswith(ending) and len(left) - len(ending) >= 3 for ending in endings) else left
-    right_stem = right[:-len(next((ending for ending in endings if right.endswith(ending) and len(right) - len(ending) >= 3), ""))] if any(right.endswith(ending) and len(right) - len(ending) >= 3 for ending in endings) else right
-    return left_stem == right_stem
+    return bool(left and right and left == right)
 
 
 def _records(indexes: Any) -> list[Mapping[str, Any]]:
@@ -57,7 +56,7 @@ def _score(frame: QueryFrame, record: Mapping[str, Any]) -> tuple[float, list[st
     record_terms |= participant_terms
     known_matches = {
         known
-        for known in {_norm(item) for item in frame.known_elements}
+        for known in {_known_lemma(item) for item in frame.known_elements}
         if any(_lemma_match(known, term) for term in record_terms)
     }
     if known_matches:
@@ -90,7 +89,7 @@ def _matches_all_known_elements(frame: QueryFrame, record: Mapping[str, Any]) ->
     for participant in record.get("participants") or ():
         if isinstance(participant, Mapping):
             record_terms |= set().union(*(_terms(participant.get(key)) for key in ("surface", "lemma", "value", "head_lemma", "head_surface")))
-    return all(any(_lemma_match(_norm(known), term) for term in record_terms) for known in frame.known_elements)
+    return all(any(_lemma_match(_known_lemma(known), term) for term in record_terms) for known in frame.known_elements)
 
 
 class DirectRetriever:
@@ -117,6 +116,7 @@ class DirectRetriever:
                 provenance=provenance,
                 conflicts=tuple(str(item) for item in record.get("conflicts") or record.get("conflict_ids") or ()),
                 retrieval_path=path,
+                origin=str(record.get("retrieval_origin") or "GRAPH"),
             ))
         hits.sort(key=lambda item: (-item.match_score, item.element_id, item.hit_id))
         return hits[:max(1, int(limit))]
@@ -175,10 +175,10 @@ def graph_rows_from_connection(
         )
         params.extend((entity_id, lemma))
     rows = conn.execute(
-        f"""SELECT e.*,s.raw_text,s.source_type,s.status,s.confidence AS source_confidence,
+        f"""SELECT e.*,s.raw_text,s.source_type,s.status,s.independent_key,s.confidence AS source_confidence,
                    s.metadata_json
             FROM graph_events e JOIN knowledge_sources s ON s.id=e.source_id
-            WHERE {' AND '.join(clauses)}
+            WHERE s.status='CONFIRMED' AND {' AND '.join(clauses)}
             ORDER BY e.created_at,e.id
             LIMIT ?""",
         (*params, max(1, int(limit))),
@@ -216,11 +216,13 @@ def graph_rows_from_connection(
         item["session_id"] = str(metadata.get("conversation_id") or metadata.get("session_id") or "")
         item["participants"] = decoded_participants
         item["retrieval_path"] = ["query_anchor", "event_index", str(row["id"])]
+        item["retrieval_origin"] = "GRAPH"
         item["provenance"] = [{
             "source_id": str(row["source_id"]),
             "source_type": str(row["source_type"]),
             "trust_status": str(row["status"]),
             "event_id": str(row["id"]),
+            "independent_source_key": str(row["independent_key"] or row["source_id"]),
         }]
         result.append(item)
     return result

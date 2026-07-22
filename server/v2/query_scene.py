@@ -35,12 +35,14 @@ class QuerySceneService:
         text: str,
         *,
         resolved_mode: Optional[str] = None,
+        retrieval_scope: str = "LOCAL_THEN_GLOBAL",
         **_: Any,
     ) -> Dict[str, Any]:
         return self.dialogue.query(
             hive_id,
             text,
             resolved_mode=resolved_mode,
+            retrieval_scope=retrieval_scope,
         )
 
     def activate(

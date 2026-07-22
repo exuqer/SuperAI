@@ -199,8 +199,8 @@
                 <h3>Гибридное оперативное пространство</h3>
                 <span>Детерминированный retrieval и локальный резонанс</span>
               </div>
-              <b class="hybrid-status" :class="hybrid.answer.status.toLowerCase()">
-                {{ hybridStatusLabel(hybrid.answer.status) }}
+              <b class="hybrid-status" :class="hybrid.answer_structure.status.toLowerCase()">
+                {{ hybridStatusLabel(hybrid.answer_structure.status) }}
               </b>
             </div>
 
@@ -213,7 +213,7 @@
               <i>→</i>
               <article class="hybrid-stage retrieval-stage">
                 <small>RETRIEVAL</small>
-                <b>{{ hybrid.retrieval_hits.length }} hits</b>
+                <b>{{ hybrid.retrieval.hits.length }} hits</b>
                 <span>{{ hybrid.activation.visited }} активировано</span>
               </article>
               <i>→</i>
@@ -232,7 +232,7 @@
               <article class="hybrid-stage resonance-stage">
                 <small>RESONANCE</small>
                 <b>{{ hybrid.resonance.iterations }} итераций</b>
-                <span>{{ percent(hybrid.answer.confidence) }} уверенность</span>
+                <span>{{ percent(hybrid.answer_structure.confidence) }} уверенность</span>
               </article>
             </div>
 
@@ -255,8 +255,8 @@
               </article>
               <article class="hybrid-cell">
                 <small>ПОИСКОВЫЕ ПЧЁЛЫ</small>
-                <b>{{ hybrid.bee_dispatch?.dispatch || hybrid.bee_decision.dispatch ? 'запущены' : 'не нужны' }}</b>
-                <span v-if="hybrid.bee_decision.reasons.length">{{ hybrid.bee_decision.reasons.join(' · ') }}</span>
+                <b>{{ hybrid.bees.decision.dispatch ? 'запущены' : 'не нужны' }}</b>
+                <span v-if="hybrid.bees.decision.reasons.length">{{ hybrid.bees.decision.reasons.join(' · ') }}</span>
                 <span v-else>внутреннего evidence достаточно</span>
               </article>
             </div>
