@@ -1,10 +1,14 @@
 from .contracts import (
     ActivationResult,
     AnswerStructure,
+    AnswerCardinality,
+    AnswerStatus,
     BeeResult,
     BeeTask,
     BoundedAssociativeWorkspace,
     Candidate,
+    CandidateCompatibility,
+    CandidateRelation,
     Conflict,
     EventCandidateConfiguration,
     Evidence,
@@ -12,11 +16,15 @@ from .contracts import (
     IndexTrace,
     BeeDiscovery,
     Gap,
+    GapFillSet,
+    EnumerationState,
+    EnumerationPolicy,
     Hypothesis,
     QueryFrame,
     RetrievalHit,
     SpatialSupport,
     WorkspaceBudget,
+    HypothesisType,
 )
 from .pipeline import HybridDialoguePipeline
 from .query_frame import build_query_frame, inherit_context
@@ -32,11 +40,12 @@ from .reasoning import (
     render_answer,
 )
 from .bees import BeeDispatcher, dispatch_bees
+from .candidate_compatibility import classify_candidate_relation, analyze_candidate_compatibility, group_candidates
 
 __all__ = [
-    "ActivationResult", "AnswerStructure", "BeeResult", "BeeTask",
-    "BoundedAssociativeWorkspace", "Candidate", "Conflict", "Evidence", "GraphEvidence", "IndexTrace", "BeeDiscovery", "SpatialSupport",
-    "Gap", "Hypothesis", "EventCandidateConfiguration", "QueryFrame", "RetrievalHit", "WorkspaceBudget",
+    "ActivationResult", "AnswerStructure", "AnswerCardinality", "AnswerStatus", "BeeResult", "BeeTask",
+    "BoundedAssociativeWorkspace", "Candidate", "CandidateCompatibility", "CandidateRelation", "Conflict", "Evidence", "GraphEvidence", "IndexTrace", "BeeDiscovery", "SpatialSupport",
+    "Gap", "GapFillSet", "EnumerationState", "EnumerationPolicy", "Hypothesis", "HypothesisType", "EventCandidateConfiguration", "QueryFrame", "RetrievalHit", "WorkspaceBudget",
     "HybridDialoguePipeline", "build_query_frame", "inherit_context",
     "retrieve_direct", "spread_activation", "build_workspace",
     "DirectRetriever", "DirectRetrievalService",
@@ -44,4 +53,5 @@ __all__ = [
     "should_dispatch_bees", "compile_answer_structure", "render_answer",
     "dispatch_bees",
     "BeeDispatcher",
+    "classify_candidate_relation", "analyze_candidate_compatibility", "group_candidates",
 ]

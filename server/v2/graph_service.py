@@ -1467,7 +1467,12 @@ class GraphDialogueService:
             raise ValueError("unsupported resolved_mode")
         with self.repository.transaction() as conn:
             row, state = self._load_row(conn, hive_id)
-        previous_graph, previous_bindings = self._previous(state)
+        previous_state = dict(state)
+        previous_state["selected_bindings"] = [
+            item for item in state.get("selected_bindings") or ()
+            if not isinstance(item, Mapping) or str(item.get("delivery_status") or "DELIVERED") == "DELIVERED"
+        ]
+        previous_graph, previous_bindings = self._previous(previous_state)
         if resolved_mode == "NEW_QUERY":
             previous_graph, previous_bindings = None, ()
         next_turn = int(state.get("turn_index") or 0) + 1
@@ -1521,6 +1526,9 @@ class GraphDialogueService:
         query_indexes: list[dict[str, Any]] = []
         bridge_indexes: list[dict[str, Any]] = []
         previous_context: dict[str, Any] = dict(result.get("_hybrid_context") or {})
+        inherited_enumeration = (previous_context.get("last_answer") or {}).get("enumeration_state")
+        if not inherited_enumeration:
+            inherited_enumeration = previous_context.get("enumeration_state")
         with self.repository.transaction() as conn:
             graph_object = result.get("_query_graph_object")
             if graph_object is not None:
@@ -1550,15 +1558,24 @@ class GraphDialogueService:
                 resolved_values = [
                     str(item.get("resolved_lemma") or item.get("resolved_surface") or "")
                     for item in previous_bindings
-                    if isinstance(item, Mapping)
+                    if isinstance(item, Mapping) and str(item.get("delivery_status") or "DELIVERED") == "DELIVERED"
                 ]
                 previous_context = {
                     "last_query_id": str(previous_turn["query_graph_id"] or ""),
                     "last_answer": {
                         **(previous_answer if isinstance(previous_answer, Mapping) else {}),
                         "resolved_values": [item for item in resolved_values if item],
+                        "enumeration_state": (
+                            previous_answer.get("enumeration_state")
+                            if isinstance(previous_answer, Mapping) and previous_answer.get("enumeration_state")
+                            else previous_answer.get("hybrid_answer_structure", {}).get("enumeration_state")
+                            if isinstance(previous_answer, Mapping) and isinstance(previous_answer.get("hybrid_answer_structure"), Mapping)
+                            else None
+                        ),
                     },
                 }
+                if not inherited_enumeration:
+                    inherited_enumeration = (previous_context.get("last_answer") or {}).get("enumeration_state")
 
         def is_local(item: Mapping[str, Any]) -> bool:
             return bool(
@@ -1574,9 +1591,25 @@ class GraphDialogueService:
             "session_id": conversation_id,
             **previous_context,
             "last_query_id": previous_context.get("last_query_id") or (result.get("query_graph") or {}).get("continuation_of"),
+            "enumeration_state": inherited_enumeration or (previous_context.get("last_answer") or {}).get("enumeration_state"),
         }
+        query_graph_payload = dict(result.get("query_graph") or {})
+        previous_enumeration = (previous_context.get("last_answer") or {}).get("enumeration_state")
+        if isinstance(previous_enumeration, Mapping) and previous_enumeration.get("delivered_element_ids"):
+            delivered_elements = set(str(item) for item in previous_enumeration.get("delivered_element_ids") or ())
+            query_graph_payload["exclusions"] = sorted(delivered_elements)
+            pattern = dict(query_graph_payload.get("event_pattern") or {})
+            target_gaps = []
+            for gap in pattern.get("target_gaps") or ():
+                if isinstance(gap, Mapping):
+                    target_gaps.append({**gap, "exclusions": sorted(delivered_elements)})
+                else:
+                    target_gaps.append(gap)
+            if target_gaps:
+                pattern["target_gaps"] = target_gaps
+                query_graph_payload["event_pattern"] = pattern
         analysis_payload = {
-            "query_graph": result.get("query_graph") or {},
+            "query_graph": query_graph_payload,
             "language_analysis": result.get("language_analysis") or {},
         }
 
@@ -1635,7 +1668,7 @@ class GraphDialogueService:
             else:
                 hybrid = {"answer_structure": {"status": "INSUFFICIENT_EVIDENCE"}}
             local_answer = hybrid.get("answer_structure") or hybrid.get("answer") or {}
-            local_stable = str(local_answer.get("status") or "") == "STABLE"
+            local_stable = str(local_answer.get("status") or "") in {"STABLE", "STABLE_SINGLE", "STABLE_SET"}
             if not local_stable:
                 scope_trace = {
                     **base_scope_trace,
@@ -1662,7 +1695,11 @@ class GraphDialogueService:
         hybrid_status = str(answer.get("status") or "INSUFFICIENT_EVIDENCE")
         public_status = {
             "STABLE": "RESOLVED",
+            "STABLE_SINGLE": "RESOLVED",
+            "STABLE_SET": "RESOLVED",
+            "ENUMERATION_EXHAUSTED": "RESOLVED",
             "AMBIGUOUS_RESULT": "AMBIGUOUS",
+            "AMBIGUOUS_SELECTION": "AMBIGUOUS",
             "CONFLICTING_EVIDENCE": "CONFLICTED",
             "UNRESOLVED_CONTEXT": "UNRESOLVED",
         }.get(hybrid_status, "UNRESOLVED")
@@ -1676,11 +1713,11 @@ class GraphDialogueService:
             for item in hybrid.get("candidates") or ()
             if isinstance(item, Mapping)
         }
-        candidates_by_gap = {
-            str(item.get("gap_id") or ""): item
-            for candidate_id in leader.get("candidate_ids") or ()
-            if isinstance((item := candidates_by_id.get(str(candidate_id))), Mapping)
-        }
+        candidates_by_gap: dict[str, list[Mapping[str, Any]]] = {}
+        for candidate_id in leader.get("candidate_ids") or ():
+            item = candidates_by_id.get(str(candidate_id))
+            if isinstance(item, Mapping):
+                candidates_by_gap.setdefault(str(item.get("gap_id") or ""), []).append(item)
         target_gaps = (
             ((result.get("query_graph") or {}).get("event_pattern") or {}).get("target_gaps")
             or []
@@ -1691,30 +1728,43 @@ class GraphDialogueService:
                 if not isinstance(gap, Mapping):
                     continue
                 gap_id = str(gap.get("node_id") or "")
-                candidate = candidates_by_gap.get(gap_id)
-                if candidate is None:
+                candidates = candidates_by_gap.get(gap_id) or []
+                if not candidates:
                     continue
-                selected_bindings.append({
-                    "binding_id": stable_id("hybrid-binding", str(result.get("message_id") or hive_id), gap_id, str(candidate.get("element_id") or "")),
-                    "query_graph_id": str((result.get("query_graph") or {}).get("query_graph_id") or ""),
-                    "event_id": str(candidate.get("event_id") or (supporting_events[0] if supporting_events else "")),
-                    "gap_node_id": gap_id,
-                    "resolved_node_id": str(candidate.get("element_id") or ""),
-                    "resolved_concept_id": str(candidate.get("element_id") or ""),
-                    "resolved_lemma": str(candidate.get("lemma") or candidate.get("surface") or ""),
-                    "resolved_surface": str(candidate.get("surface") or candidate.get("lemma") or ""),
-                    "resolved_features": {},
-                    "scores": {"structural": float(candidate.get("event_fit") or 0.0), "signature": float(candidate.get("gap_fit") or 0.0), "evidence": float(candidate.get("provenance_score") or 0.0), "total": float(candidate.get("score") or 0.0)},
-                    "status": "SELECTED",
-                    "failed_constraint": None,
-                    "evidence": list(candidate.get("graph_evidence_ids") or []),
-                })
+                delivered_ids = {str(item.get("candidate_id") or "") for item in answer.get("delivered_members") or () if isinstance(item, Mapping)}
+                for candidate in candidates:
+                    selected_bindings.append({
+                        "binding_id": stable_id("hybrid-binding", str(result.get("message_id") or hive_id), gap_id, str(candidate.get("element_id") or "")),
+                        "query_graph_id": str((result.get("query_graph") or {}).get("query_graph_id") or ""),
+                        "event_id": str(candidate.get("event_id") or (supporting_events[0] if supporting_events else "")),
+                        "gap_node_id": gap_id,
+                        "resolved_node_id": str(candidate.get("element_id") or ""),
+                        "resolved_concept_id": str(candidate.get("element_id") or ""),
+                        "resolved_lemma": str(candidate.get("lemma") or candidate.get("surface") or ""),
+                        "resolved_surface": str(candidate.get("surface") or candidate.get("lemma") or ""),
+                        "resolved_features": dict(candidate.get("structural_signature") or {}),
+                        "scores": {"structural": float(candidate.get("event_fit") or 0.0), "signature": float(candidate.get("gap_fit") or 0.0), "evidence": float(candidate.get("provenance_score") or 0.0), "total": float(candidate.get("score") or 0.0)},
+                        "status": "SELECTED",
+                        "delivery_status": "DELIVERED" if str(candidate.get("candidate_id") or "") in delivered_ids else "REMAINING",
+                        "failed_constraint": None,
+                        "evidence": list(candidate.get("graph_evidence_ids") or []),
+                    })
         binding_configuration = None
-        if selected_bindings and len(selected_bindings) == len(target_gaps):
+        if selected_bindings and all(any(item.get("gap_node_id") == str(gap.get("node_id") or "") for item in selected_bindings) for gap in target_gaps if isinstance(gap, Mapping)):
             binding_configuration = {
                 "configuration_id": stable_id("hybrid-configuration", str((result.get("query_graph") or {}).get("query_graph_id") or ""), selected_bindings[0]["event_id"]),
                 "event_id": selected_bindings[0]["event_id"],
-                "bindings_by_gap": {item["gap_node_id"]: item for item in selected_bindings},
+                "bindings_by_gap": {
+                    gap_id: items[0] if len(items) == 1 else items
+                    for gap_id in {item["gap_node_id"] for item in selected_bindings}
+                    for items in [[item for item in selected_bindings if item["gap_node_id"] == gap_id]]
+                },
+                "binding_sets": {
+                    gap_id: items
+                    for gap_id in {item["gap_node_id"] for item in selected_bindings}
+                    for items in [[item for item in selected_bindings if item["gap_node_id"] == gap_id]]
+                    if len(items) > 1
+                },
                 "all_required_gaps_bound": True,
                 "distinct_node_count": len({item["resolved_node_id"] for item in selected_bindings}),
                 "configuration_score": sum(float(item["scores"]["total"]) for item in selected_bindings) / len(selected_bindings),

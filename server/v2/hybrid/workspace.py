@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .contracts import BoundedAssociativeWorkspace, Conflict, GraphEvidence, QueryFrame, RetrievalHit, SpatialSupport, WorkspaceBudget, WorkspaceElement, _id
+from .contracts import BoundedAssociativeWorkspace, Conflict, EnumerationPolicy, EnumerationState, GraphEvidence, QueryFrame, RetrievalHit, SpatialSupport, WorkspaceBudget, WorkspaceElement, _id
 
 
 def query_reference_id(value: object) -> str:
@@ -52,6 +52,24 @@ def build_workspace(
         workspace_budget = budget
     else:
         workspace_budget = WorkspaceBudget(**dict(budget or {}))
+    raw_text = str(query_frame.raw_text or "").casefold()
+    if any(marker in raw_text for marker in ("перечисли", "все", "всё", "назови всё", "полный список", "какие объекты")):
+        enumeration_policy = EnumerationPolicy.RETURN_ALL.value
+    elif any(token.isdigit() for token in raw_text.split()):
+        enumeration_policy = EnumerationPolicy.TOP_K.value
+    elif query_frame.query_type in {"continuation_question", "continuation_relation_question"}:
+        enumeration_policy = EnumerationPolicy.FIRST_THEN_CONTINUE.value
+    else:
+        enumeration_policy = EnumerationPolicy.FIRST_THEN_CONTINUE.value
+    inherited_enumeration = (session_context or {}).get("enumeration_state")
+    enumeration_state = None
+    if isinstance(inherited_enumeration, EnumerationState):
+        enumeration_state = inherited_enumeration
+    elif isinstance(inherited_enumeration, Mapping) and inherited_enumeration.get("enumeration_id"):
+        try:
+            enumeration_state = EnumerationState(**dict(inherited_enumeration))
+        except TypeError:
+            enumeration_state = None
     workspace = BoundedAssociativeWorkspace(
         workspace_id=_id("workspace", query_frame.query_id, query_frame.session_id),
         query_id=query_frame.query_id,
@@ -66,6 +84,8 @@ def build_workspace(
         predicate_hypotheses=list(query_frame.predicate_hypotheses),
         field_region=dict((field_projection or {}).get("field_region") or {}),
         local_gradients=list((field_projection or {}).get("positive_gradients") or ()),
+        enumeration_policy=enumeration_policy,
+        enumeration_state=enumeration_state,
     )
     spatial_by_hit: dict[str, SpatialSupport] = {}
     active = dict(getattr(activation_result, "activations", {}) or {})

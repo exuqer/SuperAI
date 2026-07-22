@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
@@ -17,6 +18,8 @@ def clamp(value: float) -> float:
 
 
 def plain(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
     if hasattr(value, "as_dict"):
         return value.as_dict()
     if isinstance(value, Mapping):
@@ -37,6 +40,7 @@ class Gap:
     constraints: Sequence[Mapping[str, Any]] = ()
     exclusions: Sequence[str] = ()
     status: str = "OPEN"
+    expected_signature: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -49,7 +53,103 @@ class Gap:
             "constraints": plain(self.constraints),
             "exclusions": list(self.exclusions),
             "status": self.status,
+            "expected_signature": plain(self.expected_signature),
         }
+
+
+class CandidateRelation(str, Enum):
+    DUPLICATE = "DUPLICATE"
+    COMPATIBLE_SET_MEMBER = "COMPATIBLE_SET_MEMBER"
+    ALTERNATIVE = "ALTERNATIVE"
+    CONTRADICTORY = "CONTRADICTORY"
+    UNRELATED = "UNRELATED"
+    UNKNOWN = "UNKNOWN"
+
+
+class AnswerCardinality(str, Enum):
+    NONE = "NONE"
+    SINGLE = "SINGLE"
+    MULTIPLE = "MULTIPLE"
+    ALTERNATIVES = "ALTERNATIVES"
+    CONFLICTING = "CONFLICTING"
+
+
+class AnswerStatus(str, Enum):
+    STABLE_SINGLE = "STABLE_SINGLE"
+    STABLE_SET = "STABLE_SET"
+    AMBIGUOUS_SELECTION = "AMBIGUOUS_SELECTION"
+    CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    ENUMERATION_EXHAUSTED = "ENUMERATION_EXHAUSTED"
+
+
+class HypothesisType(str, Enum):
+    SINGLE_FILL = "SINGLE_FILL"
+    SET_FILL = "SET_FILL"
+    ALTERNATIVE_FILL = "ALTERNATIVE_FILL"
+    JOINT_MULTI_GAP_FILL = "JOINT_MULTI_GAP_FILL"
+
+
+class EnumerationPolicy(str, Enum):
+    FIRST_THEN_CONTINUE = "FIRST_THEN_CONTINUE"
+    RETURN_ALL = "RETURN_ALL"
+    TOP_K = "TOP_K"
+    SINGLE_BEST = "SINGLE_BEST"
+
+
+class EnumerationStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    EXHAUSTED = "EXHAUSTED"
+    INVALIDATED = "INVALIDATED"
+    SUPERSEDED = "SUPERSEDED"
+
+
+@dataclass(frozen=True)
+class CandidateCompatibility:
+    left_candidate_id: str
+    right_candidate_id: str
+    relation: CandidateRelation
+    reason: str = ""
+    confidence: float = 0.0
+    structural_match: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {key: plain(value) for key, value in self.__dict__.items()}
+
+
+@dataclass(frozen=True)
+class GapFillSet:
+    gap_id: str
+    cardinality: AnswerCardinality
+    members: Sequence[Mapping[str, Any]] = ()
+    independent_source_count: int = 0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {key: plain(value) for key, value in self.__dict__.items()}
+
+
+@dataclass(frozen=True)
+class EnumerationState:
+    enumeration_id: str
+    source_query_id: str
+    source_gap_id: str
+    query_signature: Mapping[str, Any] = field(default_factory=dict)
+    all_candidate_ids: Sequence[str] = ()
+    delivered_candidate_ids: Sequence[str] = ()
+    remaining_candidate_ids: Sequence[str] = ()
+    excluded_candidate_ids: Sequence[str] = ()
+    ordering: Sequence[str] = ()
+    policy: str = EnumerationPolicy.FIRST_THEN_CONTINUE.value
+    exhausted: bool = False
+    field_revision: Optional[int] = None
+    graph_revision: Optional[int] = None
+    all_element_ids: Sequence[str] = ()
+    delivered_element_ids: Sequence[str] = ()
+    remaining_element_ids: Sequence[str] = ()
+    status: str = EnumerationStatus.ACTIVE.value
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {key: plain(value) for key, value in self.__dict__.items()}
 
 
 @dataclass(frozen=True)
@@ -319,6 +419,9 @@ class Candidate:
     lemma: Optional[str] = None
     configuration_id: Optional[str] = None
     origin: Mapping[str, Any] = field(default_factory=dict)
+    structural_signature: Mapping[str, Any] = field(default_factory=dict)
+    polarity: str = "POSITIVE"
+    temporal_scope: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -327,7 +430,8 @@ class Candidate:
 @dataclass
 class Hypothesis:
     hypothesis_id: str
-    fills: Dict[str, str] = field(default_factory=dict)
+    fills: Dict[str, Sequence[str]] = field(default_factory=dict)
+    gap_fill_sets: Dict[str, GapFillSet] = field(default_factory=dict)
     candidate_ids: List[str] = field(default_factory=list)
     supporting_events: List[str] = field(default_factory=list)
     supporting_scenes: List[str] = field(default_factory=list)
@@ -344,6 +448,7 @@ class Hypothesis:
     evidential_score: float = 0.0
     spatial_score: float = 0.0
     joint_score: float = 0.0
+    hypothesis_type: str = HypothesisType.SINGLE_FILL.value
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -427,6 +532,10 @@ class BoundedAssociativeWorkspace:
     snapshots: List[Mapping[str, Any]] = field(default_factory=list)
     status: str = "BUILDING"
     evictions: List[Mapping[str, Any]] = field(default_factory=list)
+    candidate_relations: List[CandidateCompatibility] = field(default_factory=list)
+    candidate_groups: List[Mapping[str, Any]] = field(default_factory=list)
+    enumeration_policy: str = EnumerationPolicy.FIRST_THEN_CONTINUE.value
+    enumeration_state: Optional[EnumerationState] = None
 
     def _section(self, element_type: str) -> List[WorkspaceElement]:
         return {
@@ -547,6 +656,10 @@ class BoundedAssociativeWorkspace:
             "conflicts": [item.as_dict() for item in self.conflicts],
             "evidence": [item.as_dict() for item in self.evidence],
             "resonance_state": plain(self.resonance_state), "snapshots": plain(self.snapshots),
+            "candidate_relations": [item.as_dict() for item in self.candidate_relations],
+            "candidate_groups": plain(self.candidate_groups),
+            "enumeration_policy": self.enumeration_policy,
+            "enumeration_state": self.enumeration_state.as_dict() if self.enumeration_state else None,
             "budget": self.budget.as_dict(), "evictions": plain(self.evictions), "status": self.status,
         }
 
@@ -598,7 +711,7 @@ class BeeResult:
 class AnswerStructure:
     answer_type: str
     status: str
-    filled_gaps: Mapping[str, str] = field(default_factory=dict)
+    filled_gaps: Mapping[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     evidence_ids: Sequence[str] = ()
     rejected_candidates: Sequence[Mapping[str, Any]] = ()
@@ -611,6 +724,14 @@ class AnswerStructure:
     graph_evidence: Sequence[str] = ()
     spatial_support: Sequence[str] = ()
     independent_source_count: int = 0
+    answer_cardinality: str = AnswerCardinality.NONE.value
+    set_members: Sequence[Mapping[str, Any]] = ()
+    delivered_members: Sequence[Mapping[str, Any]] = ()
+    remaining_members: Sequence[Mapping[str, Any]] = ()
+    alternative_fills: Mapping[str, Any] = field(default_factory=dict)
+    ambiguity_reason: Optional[str] = None
+    conflict_reason: Optional[str] = None
+    enumeration_state: Optional[EnumerationState] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}

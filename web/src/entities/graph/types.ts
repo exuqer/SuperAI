@@ -240,6 +240,25 @@ export interface HybridCandidate {
   field_fit: number;
   evidential_score?: number;
   constraint_violations?: string[];
+  structural_signature?: Record<string, unknown>;
+}
+
+export type AnswerCardinality = 'NONE' | 'SINGLE' | 'MULTIPLE' | 'ALTERNATIVES' | 'CONFLICTING';
+
+export type AnswerStatus = 'STABLE_SINGLE' | 'STABLE_SET' | 'AMBIGUOUS_SELECTION' | 'CONFLICTING_EVIDENCE' | 'INSUFFICIENT_EVIDENCE' | 'ENUMERATION_EXHAUSTED' | string;
+
+export interface EnumerationState {
+  enumeration_id: string;
+  source_query_id: string;
+  source_gap_id: string;
+  all_candidate_ids: string[];
+  delivered_candidate_ids: string[];
+  remaining_candidate_ids: string[];
+  exhausted: boolean;
+  policy: string;
+  all_element_ids?: string[];
+  delivered_element_ids?: string[];
+  remaining_element_ids?: string[];
 }
 
 export interface HybridWorkspace {
@@ -259,9 +278,10 @@ export interface HybridWorkspace {
   candidates: HybridCandidate[];
   hypotheses: Array<{
     hypothesis_id: string;
-    fills: Record<string, string>;
+    fills: Record<string, string[]>;
+    hypothesis_type?: string;
     score: number;
-    status: string;
+    status: AnswerStatus;
   }>;
   conflicts: Array<{ conflict_id: string; reason: string; severity: number }>;
   evidence: Array<{ evidence_id: string; source_id: string; strength: number }>;
@@ -315,7 +335,15 @@ export interface HybridPipelineResult {
   resonance: { status: string; iterations: number; stable: boolean };
   bees: { decision: { dispatch: boolean; reasons: string[]; task_types: string[]; bee_count: number }; tasks: Array<Record<string, unknown>>; results: Array<Record<string, unknown>> };
   answer_structure: {
-    status: string;
+    status: AnswerStatus;
+    answer_cardinality: AnswerCardinality;
+    set_members: Array<Record<string, unknown>>;
+    delivered_members: Array<Record<string, unknown>>;
+    remaining_members: Array<Record<string, unknown>>;
+    alternative_fills?: Record<string, unknown>;
+    ambiguity_reason?: string | null;
+    conflict_reason?: string | null;
+    enumeration_state?: EnumerationState | null;
     confidence: number;
     filled_gaps: Record<string, string>;
     uncertainties: string[];

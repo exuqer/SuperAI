@@ -7,13 +7,19 @@ from typing import Any, Mapping
 
 from .contracts import (
     AnswerStructure,
+    AnswerCardinality,
     BoundedAssociativeWorkspace,
     Candidate,
+    EnumerationPolicy,
+    EnumerationState,
     EventCandidateConfiguration,
+    GapFillSet,
     Hypothesis,
+    HypothesisType,
     _id,
     clamp,
 )
+from .candidate_compatibility import analyze_candidate_compatibility, classify_candidate_relation
 
 DEFAULT_WEIGHTS = {
     "query": 0.20, "activation": 0.12, "event": 0.17, "context": 0.12,
@@ -159,6 +165,17 @@ def _attachment_option(participant: Mapping[str, Any]) -> dict[str, Any]:
     option["attachment_type_hypotheses"] = [
         {"type": "PREPOSITIONAL_ATTACHMENT", "confidence": 0.82}
     ] if preposition else [{"type": "EVENT_PARTICIPANT", "confidence": 0.55}]
+    option["structural_signature"] = {
+        "source_kind": "EVENT_PARTICIPANT",
+        "attachment_form": "PREPOSITIONAL" if preposition else "BARE",
+        "preposition": preposition,
+        "position_relative_to_predicate": str(participant.get("position_relative_to_predicate") or "").upper(),
+        "relation_to_known_member": str(participant.get("relation_to_known_member") or "EVENT_CO_MEMBER"),
+        "has_components": bool(participant.get("components")),
+        "surface_projection_kind": "PHRASE" if preposition else "WORD",
+        "morphology": dict(participant.get("features") or {}),
+        "construction_features": dict(participant.get("construction_features") or {}),
+    }
     return option
 
 
@@ -374,6 +391,12 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                         "configuration_id": configuration.configuration_id,
                         "source_element_id": candidate_element_id,
                     },
+                    structural_signature=dict(option.get("structural_signature") or {
+                        "source_kind": "EVENT_PREDICATE" if gap.expected_type == "predicate" else "EVENT_PARTICIPANT",
+                        "surface_projection_kind": "PHRASE" if " " in surface else "WORD",
+                    }),
+                    polarity=str(payload.get("polarity") or payload.get("negation") or "POSITIVE"),
+                    temporal_scope=dict(configuration.temporal_match or workspace.temporal_scope or {}),
                 )
                 candidate.score = _initial_score(candidate)
                 workspace.add_candidate(candidate)
@@ -381,42 +404,75 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
 
 
 def build_hypotheses(workspace: BoundedAssociativeWorkspace) -> BoundedAssociativeWorkspace:
-    by_gap: dict[str, list[Candidate]] = {}
-    for candidate in workspace.candidates:
-        by_gap.setdefault(candidate.gap_id, []).append(candidate)
+    workspace.hypotheses.clear()
     gaps = [gap.gap_id for gap in workspace.gaps]
     if not gaps:
         return workspace
-    combinations = product(*(sorted(
-        (item for item in by_gap.get(gap_id, [])
-         if item.constraint_fit >= (1.0 if len(gaps) > 1 else 0.0)
-         and (item.evidence_ids or item.spatial_support_ids) and item.provenance),
-        key=lambda item: (-item.score, item.candidate_id),
-    )[:workspace.budget.max_candidates_per_gap] for gap_id in gaps))
-    for combination in combinations:
+    _, groups = analyze_candidate_compatibility(workspace)
+    candidate_by_id = {item.candidate_id: item for item in workspace.candidates}
+    gap_options: dict[str, list[tuple[list[Candidate], str]]] = {}
+    for gap_id in gaps:
+        gap_groups = [group for group in groups if group and group[0].gap_id == gap_id]
+        options: list[tuple[list[Candidate], str]] = []
+        for group in gap_groups:
+            eligible = [
+                item for item in group
+                if item.constraint_fit >= (1.0 if len(gaps) > 1 else 0.0)
+                and (item.evidence_ids or item.spatial_support_ids)
+                and item.provenance
+            ]
+            if not eligible:
+                continue
+            relation_to_seed = [
+                classify_candidate_relation(eligible[0], item, workspace)
+                for item in eligible[1:]
+            ]
+            if len(eligible) > 1 and all(relation.value == "COMPATIBLE_SET_MEMBER" for relation in relation_to_seed):
+                options.append((sorted(eligible, key=_candidate_order), HypothesisType.SET_FILL.value))
+            else:
+                for item in eligible:
+                    relation = classify_candidate_relation(eligible[0], item, workspace) if item is not eligible[0] else None
+                    options.append(([item], HypothesisType.ALTERNATIVE_FILL.value if relation and relation.value == "ALTERNATIVE" else HypothesisType.SINGLE_FILL.value))
+        gap_options[gap_id] = options[:workspace.budget.max_candidates_per_gap]
+
+    def add_hypothesis(combination: Sequence[Candidate], hypothesis_type: str) -> None:
         if not combination:
-            continue
-        if len({item.candidate_id for item in combination}) != len(combination):
-            continue
-        if len({item.element_id for item in combination}) != len(combination):
-            continue
+            return
         event_sets = [set(item.supporting_event_ids or ([item.event_id] if item.event_id else ())) for item in combination]
         shared_events = set.intersection(*event_sets) if event_sets else set()
         configuration_ids = {item.configuration_id for item in combination if item.configuration_id}
         if len(gaps) > 1 and (not shared_events or len(configuration_ids) != 1):
-            continue
-        fills = {item.gap_id: item.element_id for item in combination}
+            return
+        fills: dict[str, tuple[str, ...]] = {}
+        fill_sets: dict[str, GapFillSet] = {}
+        for item in combination:
+            values = tuple(candidate.element_id for candidate in combination if candidate.gap_id == item.gap_id)
+            if item.gap_id not in fills:
+                members = tuple(
+                    {"candidate_id": candidate.candidate_id, "element_id": candidate.element_id}
+                    for candidate in combination if candidate.gap_id == item.gap_id
+                )
+                fills[item.gap_id] = values
+                fill_sets[item.gap_id] = GapFillSet(
+                    gap_id=item.gap_id,
+                    cardinality=AnswerCardinality.MULTIPLE if len(values) > 1 else AnswerCardinality.SINGLE,
+                    members=members,
+                    independent_source_count=len({key for candidate in combination if candidate.gap_id == item.gap_id for key in candidate.independent_source_keys}),
+                )
         evidence = list(dict.fromkeys(evidence_id for item in combination for evidence_id in item.evidence_ids))
         spatial_support = list(dict.fromkeys(support_id for item in combination for support_id in item.spatial_support_ids))
-        provenance = []
+        provenance: list[Mapping[str, Any]] = []
         for item in combination:
             for value in item.provenance:
                 if value not in provenance:
                     provenance.append(value)
+        candidate_ids = [item.candidate_id for item in combination]
         hypothesis = Hypothesis(
-            hypothesis_id=_id("hypothesis", workspace.query_id, "|".join(f"{key}:{value}" for key, value in sorted(fills.items()))),
-            fills=fills, supporting_events=sorted(shared_events) if len(gaps) > 1 else sorted(event_sets[0]),
-            candidate_ids=[item.candidate_id for item in combination],
+            hypothesis_id=_id("hypothesis", workspace.query_id, hypothesis_type, *candidate_ids),
+            fills=fills,
+            gap_fill_sets=fill_sets,
+            supporting_events=sorted(shared_events) if len(gaps) > 1 else sorted(set.union(*event_sets) if event_sets else set()),
+            candidate_ids=candidate_ids,
             supporting_scenes=sorted({str(item.get("scene_id")) for item in provenance if item.get("scene_id")} ),
             evidence_ids=evidence[:workspace.budget.max_evidence_per_hypothesis], provenance=provenance,
             score=sum(item.score for item in combination) / len(combination),
@@ -428,10 +484,24 @@ def build_hypotheses(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
             evidential_score=clamp(sum(item.provenance_score for item in combination) / len(combination)),
             spatial_score=clamp(sum(item.field_fit for item in combination) / len(combination)),
             joint_score=clamp(sum(item.score for item in combination) / len(combination)),
+            hypothesis_type=(HypothesisType.JOINT_MULTI_GAP_FILL.value if len(gaps) > 1 else hypothesis_type),
         )
-        if not any(item.hypothesis_id == hypothesis.hypothesis_id for item in workspace.hypotheses):
-            workspace.hypotheses.append(hypothesis)
-    workspace.hypotheses.sort(key=lambda item: (-item.score, item.hypothesis_id))
+        workspace.hypotheses.append(hypothesis)
+
+    if len(gaps) == 1:
+        for candidates, hypothesis_type in gap_options.get(gaps[0], []):
+            add_hypothesis(candidates, hypothesis_type)
+    elif all(gap_options.get(gap_id) for gap_id in gaps):
+        for combination in product(*(gap_options[gap_id] for gap_id in gaps)):
+            candidates = [candidate for option, _ in combination for candidate in option]
+            add_hypothesis(candidates, HypothesisType.JOINT_MULTI_GAP_FILL.value)
+    type_priority = {
+        HypothesisType.SET_FILL.value: 0,
+        HypothesisType.JOINT_MULTI_GAP_FILL.value: 0,
+        HypothesisType.SINGLE_FILL.value: 1,
+        HypothesisType.ALTERNATIVE_FILL.value: 2,
+    }
+    workspace.hypotheses.sort(key=lambda item: (-item.score, type_priority.get(item.hypothesis_type, 9), item.hypothesis_id))
     workspace.hypotheses = workspace.hypotheses[:workspace.budget.max_hypotheses]
     return workspace
 
@@ -459,7 +529,7 @@ def run_resonance(workspace: BoundedAssociativeWorkspace, config: Mapping[str, A
         workspace.resonance_state.update({"iteration": 0, "stability": 0.0, "leader_id": None, "stop_reason": "NO_HYPOTHESES"})
         workspace.status = "INSUFFICIENT_EVIDENCE"
         return {"status": workspace.status, "leader": None, "iterations": 0, "snapshots": [], "stable": False, "stop_reason": "NO_HYPOTHESES"}
-    cfg = {"min_iterations": 1, "max_iterations": 5, "stable_iterations_required": 2, "answer_threshold": 0.68, "leader_margin": 0.05, "critical_conflict_threshold": 0.60, "weights": DEFAULT_WEIGHTS}
+    cfg = {"min_iterations": 1, "max_iterations": 3, "stable_iterations_required": 1, "answer_threshold": 0.68, "leader_margin": 0.05, "critical_conflict_threshold": 0.60, "weights": DEFAULT_WEIGHTS}
     cfg.update(dict(config or {}))
     if workspace.query_type == "associative_question":
         cfg["answer_threshold"] = min(float(cfg["answer_threshold"]), 0.55)
@@ -469,6 +539,7 @@ def run_resonance(workspace: BoundedAssociativeWorkspace, config: Mapping[str, A
     weights = {**DEFAULT_WEIGHTS, **dict(cfg.get("weights") or {})}
     snapshots: list[dict[str, Any]] = []
     prior_leader = None
+    prior_scores: tuple[tuple[str, float], ...] = ()
     stable_count = 0
     leader = None
     for iteration in range(1, int(cfg["max_iterations"]) + 1):
@@ -505,11 +576,24 @@ def run_resonance(workspace: BoundedAssociativeWorkspace, config: Mapping[str, A
         prior_leader = current_id
         snapshot = {"stage": f"RESONANCE_{iteration}", "iteration": iteration, "leader_id": current_id, "leader_score": leader.score if leader else 0.0, "candidate_scores": {item.candidate_id: item.score for item in workspace.candidates}}
         snapshots.append(snapshot)
+        current_scores = tuple((item.hypothesis_id, round(item.score, 10)) for item in workspace.hypotheses)
+        score_unchanged = bool(prior_scores and prior_scores == current_scores)
+        prior_scores = current_scores
         if iteration >= int(cfg["min_iterations"]) and leader and stable_count >= int(cfg["stable_iterations_required"]):
             ranked = active_hypotheses
             margin = leader.score - (ranked[1].score if len(ranked) > 1 else 0.0)
-            if leader.score >= float(cfg["answer_threshold"]) and margin >= float(cfg["leader_margin"]):
+            if leader.hypothesis_type == HypothesisType.SET_FILL.value and leader.score >= float(cfg["answer_threshold"]):
+                workspace.resonance_state["stop_reason"] = "STABLE_COMPATIBLE_SET"
                 break
+            if leader.score >= float(cfg["answer_threshold"]) and margin >= float(cfg["leader_margin"]):
+                workspace.resonance_state["stop_reason"] = "STABLE_ALTERNATIVE_LEADER" if leader.hypothesis_type == HypothesisType.ALTERNATIVE_FILL.value else "STABLE_SINGLE"
+                break
+            if score_unchanged and len(ranked) > 1 and margin < float(cfg["leader_margin"]):
+                workspace.resonance_state["stop_reason"] = "STABLE_TIE"
+                break
+        if score_unchanged and iteration >= int(cfg["min_iterations"]):
+            workspace.resonance_state["stop_reason"] = "NO_SCORE_CHANGE"
+            break
     workspace.snapshots.extend(snapshots)
     workspace.resonance_state.update({"iteration": len(snapshots), "stability": clamp(stable_count / max(1, int(cfg["stable_iterations_required"]))), "leader_id": leader.hypothesis_id if leader else None})
     critical_conflict = any(item.severity >= float(cfg["critical_conflict_threshold"]) for item in workspace.conflicts)
@@ -521,13 +605,18 @@ def run_resonance(workspace: BoundedAssociativeWorkspace, config: Mapping[str, A
     else:
         nearest = active_hypotheses[1].score if len(active_hypotheses) > 1 else 0.0
         margin = leader.score - nearest if leader else 0.0
-        if leader and leader.score >= float(cfg["answer_threshold"]) and margin >= float(cfg["leader_margin"]) and stable_count >= int(cfg["stable_iterations_required"]):
-            workspace.status = "STABLE"
+        if leader and leader.hypothesis_type == HypothesisType.SET_FILL.value and leader.score >= float(cfg["answer_threshold"]):
+            workspace.status = "STABLE_SET"
+            workspace.resonance_state["stop_reason"] = workspace.resonance_state.get("stop_reason") or "STABLE_COMPATIBLE_SET"
+        elif leader and leader.score >= float(cfg["answer_threshold"]) and margin >= float(cfg["leader_margin"]) and stable_count >= int(cfg["stable_iterations_required"]):
+            workspace.status = "STABLE_SINGLE"
+            workspace.resonance_state["stop_reason"] = workspace.resonance_state.get("stop_reason") or "STABLE_SINGLE"
         elif leader and leader.score >= float(cfg["answer_threshold"]) and margin < float(cfg["leader_margin"]):
-            workspace.status = "AMBIGUOUS_RESULT"
+            workspace.status = "AMBIGUOUS_SELECTION"
+            workspace.resonance_state["stop_reason"] = workspace.resonance_state.get("stop_reason") or "STABLE_TIE"
         else:
             workspace.status = "INSUFFICIENT_EVIDENCE"
-    return {"status": workspace.status, "leader": leader.as_dict() if leader else None, "iterations": len(snapshots), "snapshots": snapshots, "stable": workspace.status == "STABLE"}
+    return {"status": workspace.status, "leader": leader.as_dict() if leader else None, "iterations": len(snapshots), "snapshots": snapshots, "stable": workspace.status in {"STABLE_SINGLE", "STABLE_SET"}, "stop_reason": workspace.resonance_state.get("stop_reason")}
 
 
 def should_dispatch_bees(workspace: BoundedAssociativeWorkspace, resonance_result: Mapping[str, Any]) -> dict[str, Any]:
@@ -542,8 +631,10 @@ def should_dispatch_bees(workspace: BoundedAssociativeWorkspace, resonance_resul
         reasons.append(workspace.status)
     if score < 0.68:
         reasons.append("LOW_CONFIDENCE")
-    if workspace.status == "AMBIGUOUS_RESULT":
+    if workspace.status == "AMBIGUOUS_SELECTION":
         reasons.append("CLOSE_COMPETITORS")
+    if workspace.status == "STABLE_SET":
+        return {"dispatch": False, "reasons": [], "task_types": [], "bee_count": 0}
     if workspace.status == "CONFLICTING_EVIDENCE":
         task_type = "FIND_CONTRADICTING_EVIDENCE"
     elif not workspace.candidates or workspace.status in {"NO_CANDIDATES", "PARTIAL_GAP_COMPLETION"}:
@@ -554,23 +645,59 @@ def should_dispatch_bees(workspace: BoundedAssociativeWorkspace, resonance_resul
 
 
 def compile_answer_structure(workspace: BoundedAssociativeWorkspace) -> AnswerStructure:
+    if workspace.enumeration_state and workspace.enumeration_state.exhausted:
+        return AnswerStructure(
+            answer_type="entity",
+            status="ENUMERATION_EXHAUSTED",
+            filled_gaps={},
+            confidence=1.0,
+            uncertainties=("ENUMERATION_EXHAUSTED",),
+            generation_constraints={"language": "ru", "do_not_invent": True, "state_uncertainty": False},
+            epistemic_mode="OBSERVED",
+            answer_cardinality=AnswerCardinality.NONE.value,
+            enumeration_state=workspace.enumeration_state,
+        )
     leader = next((item for item in workspace.hypotheses if item.hypothesis_id == workspace.resonance_state.get("leader_id") and item.status == "ACTIVE"), None)
-    if workspace.status == "STABLE" and leader:
-        status = "STABLE"
+    if workspace.status in {"STABLE_SINGLE", "STABLE_SET"} and leader:
+        status = workspace.status
         confidence = clamp(leader.score)
-        fills = dict(leader.fills)
-    elif workspace.status in {"AMBIGUOUS_RESULT", "UNRESOLVED_CONTEXT", "CONFLICTING_EVIDENCE", "NO_CANDIDATES", "NO_HYPOTHESES", "PARTIAL_GAP_COMPLETION"}:
+        fills: dict[str, Any] = {}
+    elif workspace.status in {"AMBIGUOUS_SELECTION", "UNRESOLVED_CONTEXT", "CONFLICTING_EVIDENCE", "NO_CANDIDATES", "NO_HYPOTHESES", "PARTIAL_GAP_COMPLETION"}:
         status, confidence, fills = workspace.status, clamp(leader.score if leader else 0.0), {}
     else:
         status, confidence, fills = "INSUFFICIENT_EVIDENCE", 0.0, {}
+    if status == "STABLE_SINGLE" and workspace.enumeration_state and workspace.query_type in {"continuation_question", "continuation_relation_question"}:
+        status = "STABLE_SET"
     rejected = tuple({"gap_id": item.gap_id, "candidate": item.element_id, "reason": item.status} for item in workspace.candidates if item.status != "ACTIVE")
     evidence = tuple(leader.evidence_ids if leader else ())
     candidate_by_id = {item.candidate_id: item for item in workspace.candidates}
+    ordered = sorted(
+        [candidate_by_id[item_id] for item_id in (leader.candidate_ids if leader else ()) if item_id in candidate_by_id],
+        key=_candidate_order,
+    )
+    is_enumeration = bool(leader and (leader.hypothesis_type == HypothesisType.SET_FILL.value or workspace.enumeration_state))
+    if is_enumeration:
+        if workspace.enumeration_policy == EnumerationPolicy.RETURN_ALL.value:
+            delivered = ordered
+        else:
+            delivered = ordered[:1]
+    else:
+        delivered = ordered
+    if workspace.enumeration_state and workspace.enumeration_state.remaining_element_ids:
+        remaining_allowed = set(workspace.enumeration_state.remaining_element_ids)
+        ordered = [item for item in ordered if item.element_id in remaining_allowed]
+        delivered = ordered if workspace.enumeration_policy == EnumerationPolicy.RETURN_ALL.value else ordered[:1]
+    remaining = [item for item in ordered if item not in delivered]
+    member_dict = lambda item: {"candidate_id": item.candidate_id, "element_id": item.element_id, "surface": item.surface or item.lemma or item.element_id}
+    set_members = [member_dict(item) for item in ordered] if is_enumeration else []
+    delivered_members = [member_dict(item) for item in delivered]
+    remaining_members = [member_dict(item) for item in remaining]
+    if leader and status in {"STABLE_SINGLE", "STABLE_SET"}:
+        for gap_id in leader.fills:
+            fills[gap_id] = [member_dict(item) for item in delivered if item.gap_id == gap_id]
     surfaces = {
-        candidate_by_id[candidate_id].gap_id: candidate_by_id[candidate_id].surface or candidate_by_id[candidate_id].element_id
-        for candidate_id in leader.candidate_ids
-        if candidate_id in candidate_by_id
-    } if leader and status == "STABLE" else {}
+        item.gap_id: item.surface or item.lemma or item.element_id for item in delivered
+    } if leader and status in {"STABLE_SINGLE", "STABLE_SET"} else {}
     provenance = {"query_id": workspace.query_id, "workspace_id": workspace.workspace_id, "hypothesis_id": leader.hypothesis_id if leader else None, "evidence_ids": list(evidence), "resonance_iteration": workspace.resonance_state.get("iteration", 0), "surface_forms": surfaces}
     if leader and len(leader.supporting_events) == 1:
         event_id = leader.supporting_events[0]
@@ -594,21 +721,99 @@ def compile_answer_structure(workspace: BoundedAssociativeWorkspace) -> AnswerSt
         if item.get("independent_source_key")
     }
     independent_source_count = len(independent_source_keys)
-    epistemic_mode = "OBSERVED" if status == "STABLE" and graph_evidence and independent_source_count >= 1 and not (leader.conflict_ids if leader else ()) else ("UNKNOWN" if status != "STABLE" else "INFERRED")
-    if status == "STABLE" and workspace.query_type == "associative_question":
+    epistemic_mode = "OBSERVED" if status in {"STABLE_SINGLE", "STABLE_SET"} and graph_evidence and independent_source_count >= 1 and not (leader.conflict_ids if leader else ()) else ("UNKNOWN" if status not in {"STABLE_SINGLE", "STABLE_SET"} else "INFERRED")
+    if status in {"STABLE_SINGLE", "STABLE_SET"} and workspace.query_type == "associative_question":
         epistemic_mode = "ASSOCIATIVE"
-    if status == "STABLE" and not graph_evidence:
+    if status in {"STABLE_SINGLE", "STABLE_SET"} and not graph_evidence:
         epistemic_mode = "ASSOCIATIVE" if workspace.query_type == "associative_question" else "PREDICTED"
-    return AnswerStructure(answer_type, status, fills, confidence, evidence, rejected, tuple([] if status == "STABLE" else [status]), {"language": "ru", "do_not_invent": True, "state_uncertainty": status != "STABLE"}, provenance, epistemic_mode, graph_support, field_support, graph_evidence, spatial_support, independent_source_count)
+    enumeration = None
+    if is_enumeration:
+        all_ids = tuple(item.candidate_id for item in ordered)
+        delivered_ids = tuple(item.candidate_id for item in delivered)
+        remaining_ids = tuple(item.candidate_id for item in remaining)
+        source_state = workspace.enumeration_state
+        if source_state:
+            all_ids = tuple(dict.fromkeys([*source_state.all_candidate_ids, *all_ids]))
+            delivered_ids = tuple(dict.fromkeys([*source_state.delivered_candidate_ids, *delivered_ids]))
+        enumeration = EnumerationState(
+            enumeration_id=_id("enumeration", workspace.session_id, workspace.query_id, leader.hypothesis_id),
+            source_query_id=source_state.source_query_id if source_state else workspace.query_id,
+            source_gap_id=source_state.source_gap_id if source_state else next(iter(leader.fills), ""),
+            query_signature=(source_state.query_signature if source_state else {
+                "query_type": workspace.query_type,
+                "surface_focus": next((gap.surface_projection for gap in workspace.gaps if gap.gap_id in leader.fills), ""),
+                "predicate": workspace.explicit_predicate,
+                "temporal_scope": workspace.temporal_scope,
+            }),
+            all_candidate_ids=all_ids,
+            delivered_candidate_ids=delivered_ids,
+            remaining_candidate_ids=remaining_ids,
+            excluded_candidate_ids=tuple(item.candidate_id for item in delivered),
+            ordering=all_ids,
+            policy=workspace.enumeration_policy,
+            exhausted=not remaining_ids,
+            all_element_ids=tuple(dict.fromkeys([*(source_state.all_element_ids if source_state else ()), *(item.element_id for item in ordered)])),
+            delivered_element_ids=tuple(dict.fromkeys([*(source_state.delivered_element_ids if source_state else ()), *(item.element_id for item in delivered)])),
+            remaining_element_ids=tuple(item.element_id for item in remaining),
+            status="EXHAUSTED" if not remaining_ids else "ACTIVE",
+        )
+    answer_cardinality = (
+        AnswerCardinality.MULTIPLE.value if is_enumeration
+        else AnswerCardinality.SINGLE.value if status == "STABLE_SINGLE"
+        else AnswerCardinality.ALTERNATIVES.value if status == "AMBIGUOUS_SELECTION"
+        else AnswerCardinality.CONFLICTING.value if status == "CONFLICTING_EVIDENCE"
+        else AnswerCardinality.NONE.value
+    )
+    alternative_fills = {}
+    if status == "AMBIGUOUS_SELECTION":
+        alternative_fills = {gap.gap_id: [item.element_id for item in workspace.candidates if item.gap_id == gap.gap_id and item.status == "ACTIVE"] for gap in workspace.gaps}
+    return AnswerStructure(
+        answer_type, status, fills, confidence, evidence, rejected,
+        tuple([] if status in {"STABLE_SINGLE", "STABLE_SET"} else [status]),
+        {"language": "ru", "do_not_invent": True, "state_uncertainty": status not in {"STABLE_SINGLE", "STABLE_SET"}},
+        provenance, epistemic_mode, graph_support, field_support, graph_evidence, spatial_support, independent_source_count,
+        answer_cardinality=answer_cardinality,
+        set_members=set_members,
+        delivered_members=delivered_members,
+        remaining_members=remaining_members,
+        alternative_fills=alternative_fills,
+        ambiguity_reason="MULTIPLE_INCOMPATIBLE_INTERPRETATIONS" if status == "AMBIGUOUS_SELECTION" else None,
+        conflict_reason="CONTRADICTORY_EVIDENCE" if status == "CONFLICTING_EVIDENCE" else None,
+        enumeration_state=enumeration,
+    )
 
 
 def render_answer(answer_structure: AnswerStructure, language_config: Mapping[str, Any] | None = None) -> str:
-    if answer_structure.status != "STABLE":
-        return answer_structure.status
+    if answer_structure.status == "AMBIGUOUS_SELECTION":
+        values = [str(value) for items in answer_structure.alternative_fills.values() for value in items]
+        return "Есть несколько возможных интерпретаций: " + ", ".join(values) if values else "Есть несколько возможных интерпретаций."
+    if answer_structure.status == "CONFLICTING_EVIDENCE":
+        return "В источниках обнаружены противоречащие данные."
+    if answer_structure.status not in {"STABLE_SINGLE", "STABLE_SET"}:
+        return "Других подтверждённых объектов не найдено." if answer_structure.status == "ENUMERATION_EXHAUSTED" else answer_structure.status
     surfaces = answer_structure.provenance.get("surface_forms") if isinstance(answer_structure.provenance, Mapping) else {}
-    values = [str((surfaces or {}).get(gap_id) or value) for gap_id, value in answer_structure.filled_gaps.items()]
-    if answer_structure.answer_type == "multi_gap":
-        event_surface = str(answer_structure.provenance.get("event_surface") or "")
-        if event_surface:
-            return event_surface
-    return ", ".join(values) if values else "INSUFFICIENT_EVIDENCE"
+    values = []
+    seen_values: set[str] = set()
+    for value in answer_structure.filled_gaps.values():
+        for item in (value if isinstance(value, list) else [{"surface": value}]):
+            rendered = str(item.get("surface") or item.get("element_id") or item.get("candidate_id"))
+            if rendered not in seen_values:
+                seen_values.add(rendered)
+                values.append(rendered)
+    return " и ".join(values) if answer_structure.answer_cardinality == AnswerCardinality.MULTIPLE.value and len(values) > 1 else ", ".join(values) if values else "INSUFFICIENT_EVIDENCE"
+
+
+def _candidate_order(candidate: Candidate) -> tuple[Any, ...]:
+    origin = candidate.origin or {}
+    provenance = candidate.provenance[0] if candidate.provenance and isinstance(candidate.provenance[0], Mapping) else {}
+    signature = candidate.structural_signature or {}
+    morphology = signature.get("morphology") if isinstance(signature.get("morphology"), Mapping) else {}
+    def number(*keys: str) -> int:
+        for key in keys:
+            value = origin.get(key, provenance.get(key, morphology.get(key)))
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return 10**9
+    return (number("event_order", "ordinal"), number("sentence_index"), number("token_position", "token_start"), -candidate.provenance_score, -candidate.score, str(candidate.event_id or ""), candidate.candidate_id)

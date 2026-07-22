@@ -99,6 +99,12 @@ def _reference_lemma(value: Any) -> str:
     return _normalise(value)
 
 
+def _exclusion_value(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(value.get("lemma") or value.get("surface") or value.get("resolved_lemma") or value.get("resolved_surface") or value.get("resolved_node_id") or "")
+    return str(value or "")
+
+
 def _predicate_hypotheses_from_analysis(
     predicate_data: Mapping[str, Any],
     language_analysis: Mapping[str, Any],
@@ -234,7 +240,8 @@ def from_query_graph(
             known_elements=tuple(nodes),
             surface_projection=str(gap_data.get("surface") or (focuses[index] if index < len(focuses) else "")),
             constraints=constraints,
-            exclusions=tuple(graph.get("exclusions") or ()),
+            exclusions=tuple(_exclusion_value(item) for item in (graph.get("exclusions") or ()) if _exclusion_value(item)),
+            expected_signature=(gap_data.get("expected_signature") or gap_data.get("structural_signature") or {}) if isinstance(gap_data, Mapping) else {},
         ))
     continuation_of = str(graph.get("continuation_of") or "") or None
     return QueryFrame(
@@ -247,7 +254,7 @@ def from_query_graph(
         surface_focus=focuses[0] if focuses else None,
         known_elements=tuple(nodes),
         gaps=tuple(gaps),
-        exclusions=tuple(graph.get("exclusions") or ()),
+        exclusions=tuple(_exclusion_value(item) for item in (graph.get("exclusions") or ()) if _exclusion_value(item)),
         continuation_of=continuation_of,
         confidence=0.92 if gaps else 0.35,
         context_inheritance={"mode": "ALLOW" if continuation_of else "BLOCK", "source_query_id": continuation_of, "inherited_elements": []},
@@ -422,6 +429,7 @@ def build_query_frame(
                 + (() if unknown_predicate else (_graph_gap_constraints(analysis, index) or _surface_gap_constraints(focus)))
             ),
             exclusions=tuple(excluded_values),
+            expected_signature={},
         ))
     if not gaps and ("?" in raw_text or not predicate):
         gaps.append(Gap(
@@ -516,10 +524,21 @@ def inherit_context(
     if isinstance(previous_answer, Mapping):
         previous_values.extend(str(previous_answer.get(key)) for key in ("resolved_value", "surface_answer") if previous_answer.get(key))
         previous_values.extend(str(item) for item in previous_answer.get("resolved_values") or ())
-        previous_values.extend(str(item) for item in (previous_answer.get("filled_gaps") or {}).values())
+        for value in (previous_answer.get("filled_gaps") or {}).values():
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                for item in value:
+                    if isinstance(item, Mapping):
+                        previous_values.extend(str(item.get(key)) for key in ("element_id", "lemma", "surface") if item.get(key))
+                    elif item:
+                        previous_values.append(str(item))
+            elif value:
+                previous_values.append(str(value))
         provenance = previous_answer.get("provenance") or {}
         if isinstance(provenance, Mapping):
             previous_values.extend(str(item) for item in (provenance.get("surface_forms") or {}).values())
+        enumeration = previous_answer.get("enumeration_state")
+        if isinstance(enumeration, Mapping):
+            previous_values.extend(str(item) for item in enumeration.get("delivered_element_ids") or ())
     inherited_exclusions = list(query_frame.exclusions)
     if set(_tokens(query_frame.raw_text)) & {"ещё", "еще", "кроме", "другой", "другая", "другое", "другие"}:
         for value in previous_values:

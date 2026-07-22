@@ -513,12 +513,16 @@ function hybridElementLabel(element: { element_id: string; payload?: Record<stri
 function hybridStatusLabel(value: string): string {
   return {
     STABLE: 'Стабильно',
+    STABLE_SINGLE: 'Один подтверждённый ответ',
+    STABLE_SET: 'Подтверждённое множество',
     AMBIGUOUS_RESULT: 'Неоднозначно',
+    AMBIGUOUS_SELECTION: 'Неоднозначный выбор',
     INSUFFICIENT_EVIDENCE: 'Недостаточно evidence',
     UNRESOLVED_CONTEXT: 'Нет контекста',
     CONFLICTING_EVIDENCE: 'Конфликт evidence',
     NO_CANDIDATES: 'Нет кандидатов',
     PARTIAL_GAP_COMPLETION: 'Неполный GAP',
+    ENUMERATION_EXHAUSTED: 'Перечень исчерпан',
   }[value] || value;
 }
 

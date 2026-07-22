@@ -11,6 +11,7 @@ from .bees import dispatch_bees
 from .contracts import BeeTask, GraphEvidence, SpatialSupport, WorkspaceBudget, WorkspaceElement, _id
 from .query_frame import build_query_frame, inherit_context
 from .reasoning import build_candidates, build_configurations, build_hypotheses, compile_answer_structure, run_resonance, should_dispatch_bees
+from .candidate_compatibility import analyze_candidate_compatibility
 from .retrieval import field_to_graph_hits, retrieve_direct
 from .workspace import build_workspace, spatial_support_identity
 
@@ -44,6 +45,12 @@ class HybridDialoguePipeline:
 
         frame = stage("QUERY_FRAME_BUILD", lambda: build_query_frame(text, context, session_id=str(context.get("session_id") or ""), analysis=analysis))
         frame = stage("CONTEXT_INHERITANCE", lambda: inherit_context(frame, context))
+        if not context.get("enumeration_state"):
+            last_answer = context.get("last_answer") or {}
+            if isinstance(last_answer, Mapping):
+                nested = last_answer.get("hybrid_answer_structure") if isinstance(last_answer.get("hybrid_answer_structure"), Mapping) else last_answer
+                if isinstance(nested, Mapping) and nested.get("enumeration_state"):
+                    context["enumeration_state"] = nested.get("enumeration_state")
         field_projection = stage("QUERY_FIELD_PROJECTION", lambda: self.field_service.project_query(frame) if self.field_service is not None else {"anchor_clouds": [], "field_region": {}, "positive_gradients": []})
         field_hits = stage("FIELD_NEIGHBOURHOOD_RETRIEVAL", lambda: self.field_service.neighbourhood(field_projection, limit=int(self.config.get("field_retrieval_limit", 32))) if self.field_service is not None and not frame.unresolved_context else [])
         direct_graph_hits = stage("GRAPH_EVIDENCE_RETRIEVAL", lambda: [] if frame.unresolved_context else retrieve_direct(frame, indexes, limit=int(self.config.get("retrieval_limit", 128))))
@@ -64,6 +71,7 @@ class HybridDialoguePipeline:
             workspace.status = "UNRESOLVED_CONTEXT"
         stage("EVENT_CONFIGURATIONS", lambda: build_configurations(workspace).configurations)
         stage("CANDIDATE_BUILD", lambda: build_candidates(workspace).candidates)
+        stage("CANDIDATE_COMPATIBILITY_ANALYSIS", lambda: analyze_candidate_compatibility(workspace)[0])
         stage("HYPOTHESIS_BUILD", lambda: build_hypotheses(workspace).hypotheses)
         resonance = stage("RESONANCE", lambda: run_resonance(workspace, self.config.get("resonance")))
         if frame.unresolved_context:
@@ -87,7 +95,7 @@ class HybridDialoguePipeline:
                     str(item.get("element_id") or item.get("entity_id") or item.get("lemma") or item.get("surface") or "")
                     if isinstance(item, Mapping) else str(item)
                     for item in (*workspace.exclusions, *gap.exclusions)
-                ) + tuple(candidate.element_id for candidate in workspace.candidates if candidate.gap_id == gap.gap_id and candidate.score >= 0.68)
+                )
                 bee_tasks.append(BeeTask(
                     bee_task_id=f"bee_task_{frame.query_id[-8:]}_{index}", task_type=task_type,
                     gap_id=gap.gap_id, anchors=tuple(gap.known_elements), excluded_elements=excluded,
@@ -161,6 +169,7 @@ class HybridDialoguePipeline:
                     element.evidence_ids.append(evidence.evidence_id)
             stage("EVENT_CONFIGURATIONS_AFTER_BEES", lambda: build_configurations(workspace).configurations)
             stage("CANDIDATE_BUILD_AFTER_BEES", lambda: build_candidates(workspace).candidates)
+            stage("CANDIDATE_COMPATIBILITY_ANALYSIS_AFTER_BEES", lambda: analyze_candidate_compatibility(workspace)[0])
             stage("HYPOTHESIS_BUILD_AFTER_BEES", lambda: build_hypotheses(workspace).hypotheses)
             resonance = stage("RESONANCE_AFTER_BEES", lambda: run_resonance(workspace, self.config.get("resonance")))
         answer = stage("ANSWER_STRUCTURE", lambda: compile_answer_structure(workspace))
@@ -169,7 +178,7 @@ class HybridDialoguePipeline:
                 answer,
                 epistemic_mode=(
                     "UNVERIFIED_ASSOCIATION"
-                    if answer.status == "STABLE"
+                    if answer.status in {"STABLE_SINGLE", "STABLE_SET"}
                     else "UNKNOWN"
                 ),
                 confidence=min(answer.confidence, 0.35),
@@ -192,6 +201,7 @@ class HybridDialoguePipeline:
                 "graph_hit_count": len(graph_hits),
                 "scope_trace": dict(indexes.get("scope_trace") or {}) if isinstance(indexes, Mapping) else {},
             },
+            "retrieval_hits": [item.as_dict() for item in graph_hits],
             "activation": activation.as_dict(), "workspace": workspace.as_dict(),
             "configurations": [item.as_dict() for item in workspace.configurations],
             "candidates": [item.as_dict() for item in workspace.candidates],
@@ -199,6 +209,10 @@ class HybridDialoguePipeline:
             "resonance": resonance,
             "bees": {"decision": decision, "tasks": [item.as_dict() for item in bee_tasks], "results": [item.as_dict() for item in bee_results]},
             "answer_structure": answer.as_dict(),
+            "answer": {
+                **answer.as_dict(),
+                "status": "STABLE" if answer.status in {"STABLE_SINGLE", "STABLE_SET"} else answer.status,
+            },
             "answer_text": __import__("server.v2.hybrid.reasoning", fromlist=["render_answer"]).render_answer(answer),
             "errors": [],
             "metrics": {"stages": stages, "bee_count": len(bee_results)},
