@@ -173,6 +173,78 @@ export interface SwarmTrace {
   gap_swarms?: GapSwarmRun[];
 }
 
+export interface HybridWorkspaceElement {
+  element_id: string;
+  element_type: string;
+  payload?: Record<string, unknown>;
+  activation: number;
+  workspace_functions?: string[];
+  evidence_ids?: string[];
+  conflict_ids?: string[];
+}
+
+export interface HybridCandidate {
+  candidate_id: string;
+  gap_id: string;
+  element_id: string;
+  surface?: string | null;
+  lemma?: string | null;
+  activation: number;
+  score: number;
+  status: string;
+  evidence_ids?: string[];
+  constraint_violations?: string[];
+}
+
+export interface HybridWorkspace {
+  workspace_id: string;
+  status: string;
+  anchors: HybridWorkspaceElement[];
+  active_context: HybridWorkspaceElement[];
+  entities: HybridWorkspaceElement[];
+  events: HybridWorkspaceElement[];
+  scenes: HybridWorkspaceElement[];
+  gaps: Array<{ gap_id: string; surface_projection: string; status: string }>;
+  candidates: HybridCandidate[];
+  hypotheses: Array<{
+    hypothesis_id: string;
+    fills: Record<string, string>;
+    score: number;
+    status: string;
+  }>;
+  conflicts: Array<{ conflict_id: string; reason: string; severity: number }>;
+  evidence: Array<{ evidence_id: string; source_id: string; strength: number }>;
+  resonance_state: { iteration: number; stability: number; leader_id: string | null };
+  budget: Record<string, number>;
+  evictions: Array<Record<string, unknown>>;
+}
+
+export interface HybridPipelineResult {
+  query_frame: {
+    query_id: string;
+    query_type: string;
+    known_elements: string[];
+    gaps: HybridWorkspace['gaps'];
+    exclusions: string[];
+    unresolved_context: boolean;
+  };
+  retrieval_hits: Array<{ hit_id: string; element_id: string; element_type: string; match_score: number }>;
+  activation: { activations: Record<string, number>; visited: number; steps: number };
+  workspace: HybridWorkspace;
+  resonance: { status: string; iterations: number; stable: boolean };
+  bee_decision: { dispatch: boolean; reasons: string[]; task_types: string[]; bee_count: number };
+  bee_tasks: Array<Record<string, unknown>>;
+  bee_results: Array<Record<string, unknown>>;
+  answer: {
+    status: string;
+    confidence: number;
+    filled_gaps: Record<string, string>;
+    uncertainties: string[];
+  };
+  answer_text: string;
+  trace: { stages: Array<{ stage: string; duration_ms: number; result: string; count?: number }> };
+}
+
 export interface BindingConfiguration {
   configuration_id: string;
   event_id: string;
@@ -201,6 +273,7 @@ export interface HiveState {
   rejected_events: Array<Record<string, unknown>>;
   answer: GraphAnswer | null;
   trace: Record<string, unknown>;
+  hybrid?: HybridPipelineResult;
   turn_index: number;
 }
 

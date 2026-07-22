@@ -193,6 +193,96 @@
             </div>
           </section>
 
+          <section v-if="hybrid" class="hybrid-workspace">
+            <div class="subhead">
+              <div>
+                <h3>Гибридное оперативное пространство</h3>
+                <span>Детерминированный retrieval и локальный резонанс</span>
+              </div>
+              <b class="hybrid-status" :class="hybrid.answer.status.toLowerCase()">
+                {{ hybridStatusLabel(hybrid.answer.status) }}
+              </b>
+            </div>
+
+            <div class="hybrid-flow" aria-label="Этапы гибридного поиска">
+              <article class="hybrid-stage frame-stage">
+                <small>QUERY FRAME</small>
+                <b>{{ hybrid.query_frame.query_type }}</b>
+                <span>{{ hybrid.query_frame.known_elements.length }} якорей · {{ hybrid.query_frame.gaps.length }} GAP</span>
+              </article>
+              <i>→</i>
+              <article class="hybrid-stage retrieval-stage">
+                <small>RETRIEVAL</small>
+                <b>{{ hybrid.retrieval_hits.length }} hits</b>
+                <span>{{ hybrid.activation.visited }} активировано</span>
+              </article>
+              <i>→</i>
+              <article class="hybrid-stage workspace-stage">
+                <small>WORKSPACE</small>
+                <b>{{ hybridElementCount }} элементов</b>
+                <span>{{ hybrid.workspace.evidence.length }} свидетельств</span>
+              </article>
+              <i>→</i>
+              <article class="hybrid-stage resonance-stage">
+                <small>RESONANCE</small>
+                <b>{{ hybrid.resonance.iterations }} итераций</b>
+                <span>{{ percent(hybrid.answer.confidence) }} уверенность</span>
+              </article>
+            </div>
+
+            <div class="hybrid-workspace-grid">
+              <article class="hybrid-cell">
+                <small>ЯКОРЯ И КОНТЕКСТ</small>
+                <div class="hybrid-tags">
+                  <span v-for="element in hybridAnchors" :key="`${element.element_type}:${element.element_id}`">
+                    {{ hybridElementLabel(element) }}
+                  </span>
+                  <em v-if="!hybridAnchors.length">нет</em>
+                </div>
+              </article>
+              <article class="hybrid-cell">
+                <small>GAP</small>
+                <div class="hybrid-tags">
+                  <span v-for="gap in hybrid.workspace.gaps" :key="gap.gap_id">{{ gap.surface_projection || gap.gap_id }}</span>
+                  <em v-if="!hybrid.workspace.gaps.length">нет</em>
+                </div>
+              </article>
+              <article class="hybrid-cell">
+                <small>ПЧЁЛЫ</small>
+                <b>{{ hybrid.bee_decision.dispatch ? 'запущены' : 'не нужны' }}</b>
+                <span v-if="hybrid.bee_decision.reasons.length">{{ hybrid.bee_decision.reasons.join(' · ') }}</span>
+                <span v-else>прямого evidence достаточно</span>
+              </article>
+            </div>
+
+            <section class="hybrid-candidates">
+              <div class="subhead">
+                <h3>Кандидаты GAP</h3>
+                <span>{{ hybrid.workspace.candidates.length }} всего</span>
+              </div>
+              <div v-if="hybridCandidates.length" class="hybrid-candidate-list">
+                <article v-for="candidate in hybridCandidates" :key="candidate.candidate_id" :class="candidate.status.toLowerCase()">
+                  <div>
+                    <b>{{ candidate.surface || candidate.lemma || candidate.element_id }}</b>
+                    <span>{{ candidate.status }}</span>
+                  </div>
+                  <i><em :style="{ width: `${candidate.score * 100}%` }" /></i>
+                  <small>{{ percent(candidate.score) }} · evidence {{ candidate.evidence_ids?.length || 0 }}</small>
+                </article>
+              </div>
+              <p v-else class="hybrid-empty">Кандидатов с проверяемым evidence нет.</p>
+            </section>
+
+            <details class="hybrid-trace">
+              <summary>Трасса стадий <b>{{ hybrid.trace.stages.length }}</b></summary>
+              <div v-for="stage in hybrid.trace.stages" :key="stage.stage" class="hybrid-trace-row">
+                <span>{{ stage.stage }}</span>
+                <b>{{ stage.result }}</b>
+                <small>{{ stage.duration_ms }} ms<span v-if="stage.count !== undefined"> · {{ stage.count }}</span></small>
+              </div>
+            </details>
+          </section>
+
           <section v-if="targetGaps.length > 1" class="multi-gap-panel">
             <div class="subhead">
               <h3>Совместное заполнение GAP</h3>
@@ -355,6 +445,7 @@ const {
   bindingConfiguration,
   swarm,
   trace,
+  hybrid,
 } = storeToRefs(store);
 
 const question = ref('');
@@ -373,6 +464,22 @@ const swarmRuns = computed(() => swarm.value?.gap_swarms || []);
 const retrievalMode = computed(() => swarm.value?.retrieval_mode || swarmRuns.value[0]?.retrieval_mode || 'DIRECT_EVENT_LOOKUP');
 const swarmFallbackReason = computed(() => swarm.value?.fallback_reason || swarmRuns.value[0]?.fallback_reason || '');
 const retrievalModeClass = computed(() => retrievalMode.value.toLowerCase().replace(/_/g, '-'));
+const hybridAnchors = computed(() => [
+  ...(hybrid.value?.workspace.anchors || []),
+  ...(hybrid.value?.workspace.active_context || []),
+]);
+const hybridCandidates = computed(() => [...(hybrid.value?.workspace.candidates || [])]
+  .sort((left, right) => right.score - left.score || left.candidate_id.localeCompare(right.candidate_id))
+  .slice(0, 8));
+const hybridElementCount = computed(() => {
+  const workspace = hybrid.value?.workspace;
+  if (!workspace) return 0;
+  return workspace.anchors.length
+    + workspace.active_context.length
+    + workspace.entities.length
+    + workspace.events.length
+    + workspace.scenes.length;
+});
 
 function compactId(value: string): string {
   if (!value) return '—';
@@ -381,6 +488,24 @@ function compactId(value: string): string {
 
 function percent(value: number): string {
   return `${Math.round((Number(value) || 0) * 100)}%`;
+}
+
+function hybridElementLabel(element: { element_id: string; payload?: Record<string, unknown> }): string {
+  const payload = element.payload || {};
+  const value = payload.surface || payload.head_surface || payload.value || payload.lemma || payload.head_lemma;
+  return typeof value === 'string' && value ? value : compactId(element.element_id);
+}
+
+function hybridStatusLabel(value: string): string {
+  return {
+    STABLE: 'Стабильно',
+    AMBIGUOUS_RESULT: 'Неоднозначно',
+    INSUFFICIENT_EVIDENCE: 'Недостаточно evidence',
+    UNRESOLVED_CONTEXT: 'Нет контекста',
+    CONFLICTING_EVIDENCE: 'Конфликт evidence',
+    NO_CANDIDATES: 'Нет кандидатов',
+    PARTIAL_GAP_COMPLETION: 'Неполный GAP',
+  }[value] || value;
 }
 
 function pretty(value: unknown): string {
@@ -638,6 +763,140 @@ nav {
   border: 1px solid rgba(115, 181, 255, .18);
   border-radius: 11px;
   background: rgba(19, 43, 72, .45);
+}
+
+.hybrid-workspace {
+  margin: 0 19px 19px;
+  padding: 15px;
+  border: 1px solid rgba(118, 232, 204, .24);
+  border-radius: 12px;
+  background:
+    linear-gradient(rgba(118, 232, 204, .035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(118, 232, 204, .035) 1px, transparent 1px),
+    rgba(11, 42, 52, .28);
+  background-size: 20px 20px, 20px 20px, auto;
+}
+
+.hybrid-workspace .subhead > div { display: grid; gap: 3px; }
+.hybrid-workspace .subhead > div span { color: #718ba0; font-size: 9px; }
+
+.hybrid-status {
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: #80ebd3;
+  background: rgba(118, 232, 204, .11);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.hybrid-status.ambiguous_result,
+.hybrid-status.insufficient_evidence,
+.hybrid-status.no_candidates,
+.hybrid-status.partial_gap_completion,
+.hybrid-status.unresolved_context { color: #ffd17b; background: rgba(255, 201, 97, .1); }
+.hybrid-status.conflicting_evidence { color: #ff97a6; background: rgba(232, 101, 122, .12); }
+
+.hybrid-flow {
+  display: grid;
+  grid-template-columns: minmax(88px, 1fr) 14px minmax(78px, .9fr) 14px minmax(86px, 1fr) 14px minmax(82px, .9fr);
+  align-items: center;
+  gap: 4px;
+  margin: 13px 0;
+}
+
+.hybrid-flow > i { color: #6ca6e8; font-style: normal; text-align: center; }
+
+.hybrid-stage {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid rgba(126, 174, 232, .16);
+  border-radius: 8px;
+  background: rgba(5, 18, 30, .58);
+
+  small { color: #79a9df; font-size: 8px; letter-spacing: .08em; }
+  b { overflow: hidden; color: #e7f7f3; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  span { overflow: hidden; color: #7e96ae; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+.hybrid-stage.retrieval-stage { border-color: rgba(111, 164, 255, .3); }
+.hybrid-stage.workspace-stage { border-color: rgba(118, 232, 204, .3); }
+.hybrid-stage.resonance-stage { border-color: rgba(208, 165, 255, .3); }
+
+.hybrid-workspace-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr 1.15fr;
+  gap: 7px;
+}
+
+.hybrid-cell {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border-radius: 8px;
+  background: rgba(4, 16, 28, .42);
+
+  > small { color: #7997b6; font-size: 8px; letter-spacing: .07em; }
+  > b { color: #b9eee2; font-size: 10px; }
+  > span { color: #8299b1; font-size: 9px; line-height: 1.35; }
+}
+
+.hybrid-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.hybrid-tags span {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: #b7cce7;
+  background: rgba(105, 157, 219, .13);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hybrid-tags em { color: #637b96; font-size: 9px; font-style: normal; }
+
+.hybrid-candidates { margin-top: 13px; }
+.hybrid-candidate-list { display: grid; gap: 5px; }
+.hybrid-candidate-list article {
+  display: grid;
+  gap: 5px;
+  padding: 7px 8px;
+  border-left: 2px solid #76e8cc;
+  border-radius: 0 6px 6px 0;
+  background: rgba(5, 17, 29, .46);
+
+  > div { display: flex; justify-content: space-between; gap: 8px; }
+  b { min-width: 0; overflow: hidden; color: #eaf7f5; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  span { color: #81a5c4; font-size: 8px; }
+  > i { height: 3px; overflow: hidden; border-radius: 3px; background: rgba(139, 170, 211, .16); }
+  > i em { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #6e9fff, #76e8cc); }
+  small { color: #7990a7; font-size: 8px; }
+}
+.hybrid-candidate-list article.rejected_constraint,
+.hybrid-candidate-list article.suppressed_exclusion,
+.hybrid-candidate-list article.conflicting { border-left-color: #e68191; opacity: .72; }
+.hybrid-empty { margin: 0; color: #7188a2; font-size: 10px; }
+
+.hybrid-trace {
+  margin-top: 12px;
+  border-top: 1px solid rgba(137, 175, 213, .12);
+  color: #91a8c2;
+  font-size: 9px;
+}
+.hybrid-trace summary { padding: 9px 0 2px; cursor: pointer; }
+.hybrid-trace summary b { float: right; color: #78dbc8; }
+.hybrid-trace-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 7px;
+  padding: 5px 0;
+  border-top: 1px solid rgba(137, 175, 213, .07);
+
+  span { color: #aec3d8; }
+  b { color: #78dbc8; font-size: 8px; }
+  small { color: #7189a3; }
 }
 
 .gap-map,
@@ -1315,5 +1574,9 @@ nav {
   .chat-panel { min-height: 650px; }
   .graph-panel { min-height: 680px; }
   .inspector-panel { min-height: 500px; }
+  .hybrid-workspace { margin-inline: 10px; padding: 11px; }
+  .hybrid-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hybrid-flow > i { display: none; }
+  .hybrid-workspace-grid { grid-template-columns: 1fr; }
 }
 </style>

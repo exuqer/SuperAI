@@ -172,3 +172,4 @@ def init_db() -> None:
     with get_connection() as conn:
         ensure_graph_schema(conn)
         conn.commit()
+    close_current_connection()

@@ -230,6 +230,8 @@ def ensure_graph_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS graph_event_predicate_idx
             ON graph_events(predicate_concept_id, confidence DESC);
+        CREATE INDEX IF NOT EXISTS graph_event_predicate_lemma_idx
+            ON graph_events(predicate_lemma, created_at, id);
         CREATE INDEX IF NOT EXISTS graph_event_source_idx
             ON graph_events(source_id);
         CREATE INDEX IF NOT EXISTS graph_event_construction_idx

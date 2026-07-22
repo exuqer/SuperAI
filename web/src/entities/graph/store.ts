@@ -8,6 +8,7 @@ import type {
   ChatMessage,
   HiveQueryResponse,
   HiveState,
+  HybridPipelineResult,
   QueryMode,
   RetrievalScope,
   SwarmTrace,
@@ -45,6 +46,7 @@ export const useGraphStore = defineStore('graph-v27', () => {
     state.value?.swarm || state.value?.trace?.swarm as SwarmTrace | null
   ));
   const trace = computed(() => state.value?.trace || {});
+  const hybrid = computed<HybridPipelineResult | null>(() => state.value?.hybrid || null);
 
   function applyState(next: HiveState): void {
     state.value = next;
@@ -152,15 +154,27 @@ export const useGraphStore = defineStore('graph-v27', () => {
     persistMessages();
     loading.value = true;
     error.value = '';
+    const executeQuery = () => api.post<HiveQueryResponse>(
+      `/api/v2/hives/${hive.value!.id}/query`,
+      {
+        text: normalized,
+        resolved_mode: mode,
+        retrieval_scope: retrievalScope,
+      },
+    );
     try {
-      const result = await api.post<HiveQueryResponse>(
-        `/api/v2/hives/${hive.value.id}/query`,
-        {
-          text: normalized,
-          resolved_mode: mode,
-          retrieval_scope: retrievalScope,
-        },
-      );
+      let result: HiveQueryResponse;
+      try {
+        result = await executeQuery();
+      } catch (cause) {
+        const apiError = cause as Partial<ApiError>;
+        if (apiError.status !== 404) throw cause;
+        clearLocalState();
+        await createHive();
+        messages.value.push(userMessage);
+        persistMessages();
+        result = await executeQuery();
+      }
       applyState({
         ...result,
         turn_index: (state.value?.turn_index || 0) + 1,
@@ -218,6 +232,7 @@ export const useGraphStore = defineStore('graph-v27', () => {
     bindingConfiguration,
     swarm,
     trace,
+    hybrid,
     createHive,
     restoreHive,
     resetHive,

@@ -64,6 +64,8 @@ from .dialogue_context import (
     DialogueContextManager,
 )
 from .query_execution import QueryExecutionContext, diagnostic_owner_valid
+from .hybrid import HybridDialoguePipeline
+from .hybrid.retrieval import graph_rows_from_connection
 
 
 class GraphTrainingService:
@@ -379,6 +381,8 @@ class GraphDialogueService:
         self.constructions = ConstructionLearner()
         self.query_operators = self.builder.query_operators
         self.gap_release_selector = GapReleaseSelector()
+        self.hybrid = HybridDialoguePipeline()
+        self.workspace_mode = str(getattr(settings, "workspace_mode", "hybrid_shadow") or "hybrid_shadow")
 
     def create(
         self,
@@ -1359,6 +1363,7 @@ class GraphDialogueService:
             result = self._query(
                 hive_id, text, resolved_mode=resolved_mode
             )
+            result = self._attach_hybrid_result(result, hive_id, text)
             sql_after, executes_after = database.metrics_snapshot()
             serialization_after = serialization_snapshot()
             elapsed_ms = (perf_counter() - started) * 1000.0
@@ -1380,6 +1385,112 @@ class GraphDialogueService:
             })
             result["trace"] = trace
             return result
+
+    def _attach_hybrid_result(
+        self,
+        result: Dict[str, Any],
+        hive_id: str,
+        text: str,
+    ) -> Dict[str, Any]:
+        """Run the bounded workspace in compatibility, shadow, or primary mode."""
+        mode = self.workspace_mode
+        if mode not in {"legacy_bee", "hybrid_shadow", "hybrid_primary", "hybrid_only"}:
+            mode = "hybrid_shadow"
+        if mode == "legacy_bee":
+            return result
+        hive = result.get("hive") or {}
+        conversation_id = str(hive.get("conversation_id") or "")
+        indexes: list[dict[str, Any]] = []
+        previous_context: dict[str, Any] = {}
+        with self.repository.transaction() as conn:
+            try:
+                indexes = graph_rows_from_connection(
+                    conn,
+                    session_id=conversation_id,
+                    query_graph=result.get("query_graph") or {},
+                )
+            except Exception:
+                indexes = []
+            turns = conn.execute(
+                """SELECT query_graph_id,selected_bindings_json,answer_json
+                   FROM dialogue_turns WHERE hive_id=?
+                   ORDER BY turn_index DESC LIMIT 2""",
+                (hive_id,),
+            ).fetchall()
+            if len(turns) > 1:
+                previous_turn = turns[1]
+                previous_answer = decode(previous_turn["answer_json"], {})
+                previous_bindings = decode(previous_turn["selected_bindings_json"], [])
+                resolved_values = [
+                    str(item.get("resolved_lemma") or item.get("resolved_surface") or "")
+                    for item in previous_bindings
+                    if isinstance(item, Mapping)
+                ]
+                previous_context = {
+                    "last_query_id": str(previous_turn["query_graph_id"] or ""),
+                    "last_answer": {
+                        **(previous_answer if isinstance(previous_answer, Mapping) else {}),
+                        "resolved_values": [item for item in resolved_values if item],
+                    },
+                }
+        # Preserve a useful shadow trace even before a confirmed event index exists.
+        if not indexes:
+            indexes = [
+                {
+                    "element_id": item.get("resolved_node_id") or item.get("binding_id"),
+                    "element_type": "entity",
+                    "surface": item.get("resolved_surface"),
+                    "lemma": item.get("resolved_lemma"),
+                    "event_id": item.get("event_id"),
+                    "source_id": item.get("event_id"),
+                    "provenance": item.get("evidence") or (),
+                }
+                for item in result.get("candidate_bindings") or ()
+            ]
+        context = {
+            "session_id": conversation_id,
+            **previous_context,
+            "last_query_id": previous_context.get("last_query_id") or (result.get("query_graph") or {}).get("continuation_of"),
+        }
+        hybrid = self.hybrid.run(
+            text,
+            session_context=context,
+            indexes=indexes,
+            analysis={"query_graph": result.get("query_graph") or {}},
+        )
+        result["hybrid"] = hybrid
+        result.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
+        result["trace"]["workspace_mode"] = mode
+        if mode in {"hybrid_primary", "hybrid_only"}:
+            answer = hybrid.get("answer") or {}
+            if answer.get("status") == "STABLE":
+                answer_text = str(hybrid.get("answer_text") or "").strip()
+                if answer_text and answer_text[-1:] not in {".", "!", "?"}:
+                    answer_text += "."
+                result["hybrid_answer"] = answer
+                primary_answer = result.setdefault("answer", {})
+                primary_answer.update({
+                    "status": "RESOLVED",
+                    "surface": answer_text,
+                    "short_answer": answer_text,
+                    "full_answer": answer_text,
+                    "chat_text": answer_text,
+                    "hybrid_primary": True,
+                    "hybrid_answer_structure": answer,
+                })
+            else:
+                result["trace"]["hybrid_fallback"] = "legacy_answer"
+        try:
+            with self.repository.transaction() as conn:
+                row = conn.execute("SELECT state_json FROM hives WHERE id=?", (hive_id,)).fetchone()
+                if row:
+                    state = decode(row["state_json"], {})
+                    state.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
+                    state["hybrid"] = hybrid
+                    conn.execute("UPDATE hives SET state_json=?,updated_at=? WHERE id=?", (encode(state), utcnow(), hive_id))
+        except Exception:
+            result["trace"]["hybrid_persistence"] = "FAILED"
+        return result
 
     def _query(
         self,
