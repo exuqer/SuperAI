@@ -28,6 +28,7 @@ def build_workspace(
         gaps=list(query_frame.gaps),
         constraints=list(query_frame.constraints),
         exclusions=list(query_frame.exclusions),
+        temporal_scope=query_frame.temporal_scope,
     )
     active = dict(getattr(activation_result, "activations", {}) or {})
     for index, value in enumerate(query_frame.known_elements[:workspace_budget.max_anchors]):

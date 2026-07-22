@@ -5,7 +5,15 @@ from __future__ import annotations
 from itertools import product
 from typing import Any, Mapping
 
-from .contracts import AnswerStructure, BoundedAssociativeWorkspace, Candidate, Hypothesis, _id, clamp
+from .contracts import (
+    AnswerStructure,
+    BoundedAssociativeWorkspace,
+    Candidate,
+    EventCandidateConfiguration,
+    Hypothesis,
+    _id,
+    clamp,
+)
 
 DEFAULT_WEIGHTS = {
     "query": 0.20, "activation": 0.12, "event": 0.17, "context": 0.12,
@@ -54,30 +62,143 @@ def _features(option: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _constraint_fit(gap: Any, option: Mapping[str, Any], payload: Mapping[str, Any]) -> tuple[float, list[str]]:
     violations: list[str] = []
+    hard_violation = False
+    alternatives: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
     features = _features(option)
     for constraint in gap.constraints:
-        if not isinstance(constraint, Mapping) or constraint.get("type") != "grammatical_feature":
+        if not isinstance(constraint, Mapping) or str(constraint.get("type") or "").upper() != "GRAMMATICAL_FEATURE":
             continue
         feature = str(constraint.get("feature") or "")
         expected = _norm(constraint.get("value"))
+        alternatives.setdefault(feature, []).append((expected, constraint))
         observed_values = {_norm(features.get(feature))}
         for alternative in features.get("morphology_alternatives") or ():
             if isinstance(alternative, Mapping):
                 observed_values.add(_norm(alternative.get(feature)))
-        if expected and expected not in observed_values:
-            violations.append(f"GRAMMATICAL_FEATURE:{feature}:{expected}")
-    relation = _norm(gap.expected_relation)
-    if relation and relation != "predicate_attachment":
-        observed_relations = {
-            _norm(option.get("preposition")),
-            _norm(option.get("relation")),
-            _norm(payload.get("relation")),
-            _norm(payload.get("predicate_relation")),
-            _norm(payload.get("preposition")),
-        }
-        if relation not in observed_relations:
-            violations.append(f"RELATION:{relation}")
-    return (1.0 if not violations else 0.0), violations
+    for feature, values in alternatives.items():
+        observed_values = {_norm(features.get(feature))}
+        for alternative in features.get("morphology_alternatives") or ():
+            if isinstance(alternative, Mapping):
+                observed_values.add(_norm(alternative.get(feature)))
+        expected_values = {expected for expected, _ in values if expected}
+        if expected_values and not expected_values & observed_values:
+            violations.append(f"GRAMMATICAL_FEATURE:{feature}:{'|'.join(sorted(expected_values))}")
+            hard_violation = hard_violation or any(str(item.get("hardness") or "SOFT").upper() == "HARD" for _, item in values)
+    return (0.0 if hard_violation else (1.0 if not violations else 0.82)), violations
+
+
+def _record_values(record: Mapping[str, Any]) -> set[str]:
+    return _option_values(record)
+
+
+def _matches_known(known: str, participant: Mapping[str, Any]) -> bool:
+    return any(_same_value(_norm(known), value) for value in _record_values(participant))
+
+
+def _relation_values(record: Mapping[str, Any], payload: Mapping[str, Any]) -> set[str]:
+    values = {
+        _norm(record.get(key))
+        for key in ("preposition", "relation", "relation_value", "predicate_relation")
+        if record.get(key)
+    }
+    values |= {
+        _norm(payload.get(key))
+        for key in ("preposition", "relation", "relation_value", "predicate_relation")
+        if payload.get(key)
+    }
+    return values
+
+
+def _relation_satisfied(expected: str, participant: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    expected = _norm(expected)
+    if not expected or expected == "predicate_attachment":
+        return True
+    observed = _relation_values(participant, payload)
+    aliases = {
+        "в": {"в", "внутри"}, "внутри": {"в", "внутри"},
+        "на": {"на"}, "у": {"у", "около", "рядом"},
+        "около": {"у", "около", "рядом"}, "рядом": {"у", "около", "рядом"},
+    }
+    return bool(observed & aliases.get(expected, {expected}))
+
+
+def build_configurations(workspace: BoundedAssociativeWorkspace) -> BoundedAssociativeWorkspace:
+    """Turn retrieved events into the only admissible evidence structures."""
+    workspace.configurations.clear()
+    known = tuple(workspace.gaps[0].known_elements if workspace.gaps else ())
+    for event in workspace.events:
+        payload = event.payload
+        participants = [item for item in payload.get("participants") or () if isinstance(item, Mapping)]
+        if not participants:
+            continue
+        bindings: list[Mapping[str, Any]] = []
+        used: set[str] = set()
+        reasons: list[str] = []
+        for value in known:
+            participant = next((item for item in participants if _matches_known(value, item)), None)
+            if participant is None:
+                reasons.append("KNOWN_ELEMENT_NOT_FOUND")
+                continue
+            participant_id = str(participant.get("entity_id") or participant.get("element_id") or participant.get("id") or "")
+            if participant_id in used:
+                reasons.append("KNOWN_MEMBER_BINDING_CONFLICT")
+                continue
+            used.add(participant_id)
+            relation = next((gap.expected_relation for gap in workspace.gaps if value in gap.known_elements and gap.expected_relation), None)
+            relation_ok = _relation_satisfied(str(relation or ""), participant, payload)
+            evaluation = {
+                "type": "RELATION", "scope": "KNOWN_MEMBER", "target_reference": participant_id,
+                "expected": relation, "status": "SATISFIED" if relation_ok else "HARD_CONFLICT",
+                "matched_element_id": participant_id,
+            }
+            if relation:
+                bindings.append({"known": value, "participant_id": participant_id})
+                if relation_ok:
+                    pass
+                else:
+                    reasons.append("RELATION_NOT_MATCHED")
+        event_id = str(payload.get("event_id") or event.element_id)
+        polarity = _norm(payload.get("polarity") or payload.get("negation") or "positive")
+        query_is_negative = any(
+            str(item.get("type") or "").upper() == "NEGATION"
+            for item in workspace.constraints if isinstance(item, Mapping)
+        )
+        if polarity in {"negative", "negated", "false"} and not query_is_negative:
+            reasons.append("NEGATION_CONFLICT")
+        if query_is_negative and polarity not in {"negative", "negated", "false"}:
+            reasons.append("NEGATION_CONFLICT")
+        temporal_match: Mapping[str, Any] | None = None
+        if workspace.temporal_scope:
+            requested = str(workspace.temporal_scope.get("kind") or "CURRENT").upper()
+            actuality = str(payload.get("actuality") or payload.get("state_status") or "ACTUAL").upper()
+            superseded = bool(payload.get("superseded") or payload.get("is_superseded") or actuality in {"SUPERSEDED", "ENDED", "RETRACTED"})
+            compatible = not (requested == "CURRENT" and superseded)
+            temporal_match = {"scope": requested, "actuality": actuality, "status": "SATISFIED" if compatible else "HARD_CONFLICT"}
+            if not compatible:
+                reasons.append("TEMPORAL_CONFLICT")
+        configuration_id = _id("configuration", workspace.query_id, event_id, "|".join(sorted(used)))
+        predicate = payload.get("predicate_lemma") or payload.get("predicate") or payload.get("action")
+        configuration = EventCandidateConfiguration(
+            configuration_id=configuration_id,
+            query_id=workspace.query_id,
+            event_id=event_id,
+            known_member_bindings=list(bindings),
+            predicate_binding={"value": predicate, "status": "SATISFIED"} if predicate else None,
+            relation_matches=[item for item in bindings if item.get("known")],
+            temporal_match=temporal_match,
+            constraint_evaluations=[
+                {"status": "SATISFIED" if not reasons else "HARD_CONFLICT", "reason": reason}
+                for reason in reasons
+            ],
+            evidence_ids=list(event.evidence_ids),
+            conflict_ids=list(event.conflict_ids),
+            score=clamp(event.activation * (1.0 if not reasons else 0.0)),
+            status="REJECTED" if reasons else "ACTIVE",
+            rejection_reasons=list(dict.fromkeys(reasons)),
+        )
+        workspace.configurations.append(configuration)
+    workspace.configurations.sort(key=lambda item: (-item.score, item.configuration_id))
+    return workspace
 
 
 def _initial_score(candidate: Candidate) -> float:
@@ -85,19 +206,31 @@ def _initial_score(candidate: Candidate) -> float:
 
 
 def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociativeWorkspace:
+    if not workspace.configurations:
+        build_configurations(workspace)
     for gap in workspace.gaps:
-        for element in list(workspace.events) + list(workspace.entities):
-            if not element.evidence_ids or not element.provenance:
+        for configuration in workspace.configurations:
+            if configuration.status != "ACTIVE":
+                continue
+            element = next((item for item in workspace.events if item.element_id == configuration.event_id), None)
+            if element is None or not element.evidence_ids or not element.provenance:
                 continue
             payload = element.payload
             if "bee_result" in element.workspace_functions and not any(payload.get(key) for key in ("surface", "lemma", "value")):
                 continue
-            participants = _participant_values(payload) if element.element_type == "event" else []
-            if element.element_type == "event" and not participants:
-                continue
-            options = participants or [payload]
+            participants = _participant_values(payload)
+            predicate_option = {
+                "element_id": f"predicate:{payload.get('predicate_lemma') or payload.get('predicate') or payload.get('action') or element.element_id}",
+                "surface": payload.get("predicate_surface") or payload.get("predicate") or payload.get("action"),
+                "lemma": payload.get("predicate_lemma") or payload.get("predicate") or payload.get("action"),
+                "features": payload.get("predicate_features") or {},
+            }
+            options = [predicate_option] if gap.expected_type == "predicate" else participants
+            known_ids = {str(item.get("participant_id") or "") for item in configuration.known_member_bindings}
             for ordinal, option in enumerate(options):
                 candidate_element_id = str(option.get("entity_id") or option.get("element_id") or option.get("id") or option.get("lemma") or option.get("surface") or element.element_id)
+                if candidate_element_id in known_ids:
+                    continue
                 option_values = _option_values(option)
                 excluded_values = {_norm(item) for item in (*gap.exclusions, *workspace.exclusions)}
                 known_values = {_norm(item) for item in gap.known_elements}
@@ -110,11 +243,12 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                 terms = _option_values(option)
                 event_id = str(payload.get("event_id") or element.element_id)
                 query_match = min(1.0, 0.30 + 0.35 * element.activation + 0.20 * bool(payload.get("predicate_lemma") or payload.get("predicate")) + 0.15 * bool(element.element_type == "event"))
+                query_match = max(query_match, 0.65 + 0.10 * bool(configuration.known_member_bindings))
                 surface = str(option.get("surface") or option.get("head_surface") or option.get("value") or option.get("lemma") or candidate_element_id)
                 lemma = str(option.get("lemma") or option.get("head_lemma") or surface)
                 is_quantity = surface.replace(".", "", 1).isdigit()
-                type_fit = 1.0 if gap.expected_type in {"unknown", "entity"} else (1.0 if gap.expected_type == "quantity" and is_quantity else 0.0)
-                event_fit = 0.9 if element.element_type == "event" else 0.42
+                type_fit = 1.0 if gap.expected_type in {"unknown", "entity", "predicate"} else (1.0 if gap.expected_type == "quantity" and is_quantity else 0.0)
+                event_fit = 1.0 if element.element_type == "event" else 0.42
                 context_fit = 0.85 if element.element_type == "context" else 0.4
                 constraint_fit, constraint_violations = _constraint_fit(gap, option, payload)
                 gap_fit = constraint_fit
@@ -130,6 +264,12 @@ def build_candidates(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
                     constraint_fit=constraint_fit, constraint_violations=constraint_violations,
                     evidence_ids=list(element.evidence_ids), provenance=list(element.provenance),
                     event_id=event_id, supporting_event_ids=[event_id], surface=surface, lemma=lemma,
+                    configuration_id=configuration.configuration_id,
+                    origin={
+                        "type": "EVENT_PREDICATE" if gap.expected_type == "predicate" else "EVENT_PARTICIPANT", "event_id": event_id,
+                        "configuration_id": configuration.configuration_id,
+                        "source_element_id": candidate_element_id,
+                    },
                 )
                 candidate.score = _initial_score(candidate)
                 workspace.add_candidate(candidate)
@@ -144,7 +284,9 @@ def build_hypotheses(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
     if not gaps:
         return workspace
     combinations = product(*(sorted(
-        (item for item in by_gap.get(gap_id, []) if item.constraint_fit >= 1.0 and item.evidence_ids and item.provenance),
+        (item for item in by_gap.get(gap_id, [])
+         if item.constraint_fit >= (1.0 if len(gaps) > 1 else 0.0)
+         and item.evidence_ids and item.provenance),
         key=lambda item: (-item.score, item.candidate_id),
     )[:workspace.budget.max_candidates_per_gap] for gap_id in gaps))
     for combination in combinations:
@@ -152,9 +294,12 @@ def build_hypotheses(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
             continue
         if len({item.candidate_id for item in combination}) != len(combination):
             continue
+        if len({item.element_id for item in combination}) != len(combination):
+            continue
         event_sets = [set(item.supporting_event_ids or ([item.event_id] if item.event_id else ())) for item in combination]
         shared_events = set.intersection(*event_sets) if event_sets else set()
-        if len(gaps) > 1 and not shared_events:
+        configuration_ids = {item.configuration_id for item in combination if item.configuration_id}
+        if len(gaps) > 1 and (not shared_events or len(configuration_ids) != 1):
             continue
         fills = {item.gap_id: item.element_id for item in combination}
         evidence = list(dict.fromkeys(evidence_id for item in combination for evidence_id in item.evidence_ids))
@@ -170,6 +315,7 @@ def build_hypotheses(workspace: BoundedAssociativeWorkspace) -> BoundedAssociati
             supporting_scenes=sorted({str(item.get("scene_id")) for item in provenance if item.get("scene_id")} ),
             evidence_ids=evidence[:workspace.budget.max_evidence_per_hypothesis], provenance=provenance,
             score=sum(item.score for item in combination) / len(combination),
+            configuration_ids=sorted(configuration_ids),
         )
         if not any(item.hypothesis_id == hypothesis.hypothesis_id for item in workspace.hypotheses):
             workspace.hypotheses.append(hypothesis)
@@ -196,6 +342,10 @@ def _candidate_score(candidate: Candidate, weights: Mapping[str, float]) -> floa
 
 
 def run_resonance(workspace: BoundedAssociativeWorkspace, config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    if not workspace.hypotheses:
+        workspace.resonance_state.update({"iteration": 0, "stability": 0.0, "leader_id": None, "stop_reason": "NO_HYPOTHESES"})
+        workspace.status = "INSUFFICIENT_EVIDENCE"
+        return {"status": workspace.status, "leader": None, "iterations": 0, "snapshots": [], "stable": False, "stop_reason": "NO_HYPOTHESES"}
     cfg = {"min_iterations": 1, "max_iterations": 5, "stable_iterations_required": 2, "answer_threshold": 0.68, "leader_margin": 0.12, "critical_conflict_threshold": 0.60, "weights": DEFAULT_WEIGHTS}
     cfg.update(dict(config or {}))
     weights = {**DEFAULT_WEIGHTS, **dict(cfg.get("weights") or {})}
@@ -212,7 +362,7 @@ def run_resonance(workspace: BoundedAssociativeWorkspace, config: Mapping[str, A
             candidate.score = _candidate_score(candidate, weights)
             if candidate.exclusion_score >= 0.5:
                 candidate.status = "SUPPRESSED_EXCLUSION"
-            elif candidate.constraint_fit < 1.0:
+            elif candidate.constraint_fit <= 0.0:
                 candidate.status = "REJECTED_CONSTRAINT"
             elif candidate.conflict_score >= float(cfg["critical_conflict_threshold"]):
                 candidate.status = "CONFLICTING"
@@ -259,12 +409,14 @@ def run_resonance(workspace: BoundedAssociativeWorkspace, config: Mapping[str, A
 
 
 def should_dispatch_bees(workspace: BoundedAssociativeWorkspace, resonance_result: Mapping[str, Any]) -> dict[str, Any]:
+    if not workspace.hypotheses or resonance_result.get("stop_reason") == "INTERNAL_PIPELINE_ERROR":
+        return {"dispatch": False, "reasons": ["NO_HYPOTHESES"], "task_types": [], "bee_count": 0}
     leader = resonance_result.get("leader") or {}
     score = float(leader.get("score") or 0.0)
     reasons = []
     if not workspace.candidates or workspace.status == "NO_CANDIDATES":
         reasons.append("GAP_WITHOUT_CANDIDATES")
-    if workspace.status in {"INSUFFICIENT_EVIDENCE", "PARTIAL_GAP_COMPLETION", "CONFLICTING_EVIDENCE", "UNRESOLVED_CONTEXT"}:
+    if workspace.status in {"INSUFFICIENT_EVIDENCE", "PARTIAL_GAP_COMPLETION", "CONFLICTING_EVIDENCE", "UNRESOLVED_CONTEXT", "NO_HYPOTHESES"}:
         reasons.append(workspace.status)
     if score < 0.68:
         reasons.append("LOW_CONFIDENCE")
@@ -285,7 +437,7 @@ def compile_answer_structure(workspace: BoundedAssociativeWorkspace) -> AnswerSt
         status = "STABLE"
         confidence = clamp(leader.score)
         fills = dict(leader.fills)
-    elif workspace.status in {"AMBIGUOUS_RESULT", "UNRESOLVED_CONTEXT", "CONFLICTING_EVIDENCE", "NO_CANDIDATES", "PARTIAL_GAP_COMPLETION"}:
+    elif workspace.status in {"AMBIGUOUS_RESULT", "UNRESOLVED_CONTEXT", "CONFLICTING_EVIDENCE", "NO_CANDIDATES", "NO_HYPOTHESES", "PARTIAL_GAP_COMPLETION"}:
         status, confidence, fills = workspace.status, clamp(leader.score if leader else 0.0), {}
     else:
         status, confidence, fills = "INSUFFICIENT_EVIDENCE", 0.0, {}
@@ -298,7 +450,12 @@ def compile_answer_structure(workspace: BoundedAssociativeWorkspace) -> AnswerSt
         if candidate_id in candidate_by_id
     } if leader and status == "STABLE" else {}
     provenance = {"query_id": workspace.query_id, "workspace_id": workspace.workspace_id, "hypothesis_id": leader.hypothesis_id if leader else None, "evidence_ids": list(evidence), "resonance_iteration": workspace.resonance_state.get("iteration", 0), "surface_forms": surfaces}
-    return AnswerStructure("multi_gap" if len(fills) > 1 else "entity", status, fills, confidence, evidence, rejected, tuple([] if status == "STABLE" else [status]), {"language": "ru", "do_not_invent": True, "state_uncertainty": status != "STABLE"}, provenance)
+    answer_type = "multi_gap" if len(fills) > 1 else "entity"
+    if leader:
+        candidate_by_id = {item.candidate_id: item for item in workspace.candidates}
+        if any((candidate_by_id.get(item_id) is not None and candidate_by_id[item_id].origin.get("type") == "EVENT_PREDICATE") for item_id in leader.candidate_ids):
+            answer_type = "predicate"
+    return AnswerStructure(answer_type, status, fills, confidence, evidence, rejected, tuple([] if status == "STABLE" else [status]), {"language": "ru", "do_not_invent": True, "state_uncertainty": status != "STABLE"}, provenance)
 
 
 def render_answer(answer_structure: AnswerStructure, language_config: Mapping[str, Any] | None = None) -> str:

@@ -72,6 +72,14 @@ class QueryFrame:
     inherited_elements: Sequence[Mapping[str, Any]] = ()
     reconstructed_query: Optional[str] = None
     unresolved_context: bool = False
+    context_inheritance: Mapping[str, Any] = field(default_factory=lambda: {
+        "mode": "BLOCK",
+        "source_query_id": None,
+        "inherited_elements": [],
+    })
+    predicate_hypotheses: Sequence[Mapping[str, Any]] = ()
+    constraint_groups: Sequence[Mapping[str, Any]] = ()
+    trace: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -93,6 +101,10 @@ class QueryFrame:
             "inherited_elements": plain(self.inherited_elements),
             "reconstructed_query": self.reconstructed_query,
             "unresolved_context": self.unresolved_context,
+            "context_inheritance": plain(self.context_inheritance),
+            "predicate_hypotheses": plain(self.predicate_hypotheses),
+            "constraint_groups": plain(self.constraint_groups),
+            "trace": plain(self.trace),
         }
 
 
@@ -254,6 +266,8 @@ class Candidate:
     supporting_event_ids: List[str] = field(default_factory=list)
     surface: Optional[str] = None
     lemma: Optional[str] = None
+    configuration_id: Optional[str] = None
+    origin: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -271,6 +285,7 @@ class Hypothesis:
     score: float = 0.0
     status: str = "ACTIVE"
     provenance: List[Mapping[str, Any]] = field(default_factory=list)
+    configuration_ids: List[str] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
         return {key: plain(value) for key, value in self.__dict__.items()}
@@ -290,6 +305,28 @@ class Conflict:
 
 
 @dataclass
+class EventCandidateConfiguration:
+    configuration_id: str
+    query_id: str
+    event_id: str
+    gap_bindings: Dict[str, str] = field(default_factory=dict)
+    known_member_bindings: List[Mapping[str, Any]] = field(default_factory=list)
+    predicate_binding: Optional[Mapping[str, Any]] = None
+    relation_matches: List[Mapping[str, Any]] = field(default_factory=list)
+    component_matches: List[Mapping[str, Any]] = field(default_factory=list)
+    temporal_match: Optional[Mapping[str, Any]] = None
+    constraint_evaluations: List[Mapping[str, Any]] = field(default_factory=list)
+    evidence_ids: List[str] = field(default_factory=list)
+    conflict_ids: List[str] = field(default_factory=list)
+    score: float = 0.0
+    status: str = "ACTIVE"
+    rejection_reasons: List[str] = field(default_factory=list)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {key: plain(value) for key, value in self.__dict__.items()}
+
+
+@dataclass
 class BoundedAssociativeWorkspace:
     workspace_id: str
     query_id: str
@@ -303,7 +340,9 @@ class BoundedAssociativeWorkspace:
     gaps: List[Gap] = field(default_factory=list)
     constraints: List[Mapping[str, Any]] = field(default_factory=list)
     exclusions: List[str] = field(default_factory=list)
+    temporal_scope: Optional[Mapping[str, Any]] = None
     candidates: List[Candidate] = field(default_factory=list)
+    configurations: List[EventCandidateConfiguration] = field(default_factory=list)
     hypotheses: List[Hypothesis] = field(default_factory=list)
     conflicts: List[Conflict] = field(default_factory=list)
     evidence: List[Evidence] = field(default_factory=list)
@@ -342,6 +381,9 @@ class BoundedAssociativeWorkspace:
         else:
             existing.evidence_ids = list(dict.fromkeys(existing.evidence_ids + candidate.evidence_ids))
             existing.supporting_event_ids = list(dict.fromkeys(existing.supporting_event_ids + candidate.supporting_event_ids))
+            if candidate.configuration_id and not existing.configuration_id:
+                existing.configuration_id = candidate.configuration_id
+            existing.origin = {**candidate.origin, **existing.origin}
             for value in candidate.provenance:
                 if value not in existing.provenance:
                     existing.provenance.append(value)
@@ -403,7 +445,9 @@ class BoundedAssociativeWorkspace:
             "scenes": [item.as_dict() for item in self.scenes],
             "gaps": [item.as_dict() for item in self.gaps],
             "constraints": plain(self.constraints), "exclusions": list(self.exclusions),
+            "temporal_scope": plain(self.temporal_scope),
             "candidates": [item.as_dict() for item in self.candidates],
+            "configurations": [item.as_dict() for item in self.configurations],
             "hypotheses": [item.as_dict() for item in self.hypotheses],
             "conflicts": [item.as_dict() for item in self.conflicts],
             "evidence": [item.as_dict() for item in self.evidence],

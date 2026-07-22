@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     load_demo_knowledge: bool = False
     load_domain_pack: str | None = None
     allow_manual_seeds: bool = False
-    workspace_mode: str = "hybrid_shadow"
+    reasoning_mode: str = "hybrid"
+    trace_level: str = "production"
     retrieval_weights: dict[str, float] = Field(default_factory=lambda: {
         "predicate_compatibility": 0.24,
         "known_node_compatibility": 0.22,

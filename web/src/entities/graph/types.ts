@@ -217,6 +217,8 @@ export interface HybridWorkspace {
   resonance_state: { iteration: number; stability: number; leader_id: string | null };
   budget: Record<string, number>;
   evictions: Array<Record<string, unknown>>;
+  configurations?: Array<Record<string, unknown>>;
+  temporal_scope?: Record<string, unknown> | null;
 }
 
 export interface HybridPipelineResult {
@@ -231,8 +233,12 @@ export interface HybridPipelineResult {
   retrieval_hits: Array<{ hit_id: string; element_id: string; element_type: string; match_score: number }>;
   activation: { activations: Record<string, number>; visited: number; steps: number };
   workspace: HybridWorkspace;
+  configurations?: Array<Record<string, unknown>>;
+  candidates?: HybridCandidate[];
+  hypotheses?: Array<Record<string, unknown>>;
   resonance: { status: string; iterations: number; stable: boolean };
   bee_decision: { dispatch: boolean; reasons: string[]; task_types: string[]; bee_count: number };
+  bee_dispatch?: HybridPipelineResult['bee_decision'];
   bee_tasks: Array<Record<string, unknown>>;
   bee_results: Array<Record<string, unknown>>;
   answer: {
@@ -242,6 +248,8 @@ export interface HybridPipelineResult {
     uncertainties: string[];
   };
   answer_text: string;
+  answer_structure?: HybridPipelineResult['answer'];
+  debug_payload_version?: string;
   trace: { stages: Array<{ stage: string; duration_ms: number; result: string; count?: number }> };
 }
 

@@ -9,7 +9,7 @@ from .activation import spread_activation
 from .bees import dispatch_bees
 from .contracts import BeeTask, Evidence, WorkspaceBudget, WorkspaceElement, _id
 from .query_frame import build_query_frame, inherit_context
-from .reasoning import build_candidates, build_hypotheses, compile_answer_structure, run_resonance, should_dispatch_bees
+from .reasoning import build_candidates, build_configurations, build_hypotheses, compile_answer_structure, run_resonance, should_dispatch_bees
 from .retrieval import retrieve_direct
 from .workspace import build_workspace
 
@@ -47,6 +47,7 @@ class HybridDialoguePipeline:
         workspace = stage("BOUNDED_WORKSPACE", lambda: build_workspace(frame, activation, context, self.budget, hits))
         if frame.unresolved_context:
             workspace.status = "UNRESOLVED_CONTEXT"
+        stage("EVENT_CONFIGURATIONS", lambda: build_configurations(workspace).configurations)
         stage("CANDIDATE_BUILD", lambda: build_candidates(workspace).candidates)
         stage("HYPOTHESIS_BUILD", lambda: build_hypotheses(workspace).hypotheses)
         resonance = stage("RESONANCE", lambda: run_resonance(workspace, self.config.get("resonance")))
@@ -88,6 +89,7 @@ class HybridDialoguePipeline:
                 workspace.add_evidence(evidence)
                 if evidence.evidence_id not in element.evidence_ids:
                     element.evidence_ids.append(evidence.evidence_id)
+            stage("EVENT_CONFIGURATIONS_AFTER_BEES", lambda: build_configurations(workspace).configurations)
             stage("CANDIDATE_BUILD_AFTER_BEES", lambda: build_candidates(workspace).candidates)
             stage("HYPOTHESIS_BUILD_AFTER_BEES", lambda: build_hypotheses(workspace).hypotheses)
             resonance = stage("RESONANCE_AFTER_BEES", lambda: run_resonance(workspace, self.config.get("resonance")))
@@ -95,8 +97,15 @@ class HybridDialoguePipeline:
         return {
             "query_frame": frame.as_dict(), "retrieval_hits": [item.as_dict() for item in hits],
             "activation": activation.as_dict(), "workspace": workspace.as_dict(),
+            "retrieval": {"hits": [item.as_dict() for item in hits]},
+            "configurations": [item.as_dict() for item in workspace.configurations],
+            "candidates": [item.as_dict() for item in workspace.candidates],
+            "hypotheses": [item.as_dict() for item in workspace.hypotheses],
+            "bee_dispatch": decision,
             "resonance": resonance, "bee_decision": decision,
             "bee_tasks": [item.as_dict() for item in bee_tasks], "bee_results": [item.as_dict() for item in bee_results],
-            "answer": answer.as_dict(), "answer_text": __import__("server.v2.hybrid.reasoning", fromlist=["render_answer"]).render_answer(answer),
+            "answer": answer.as_dict(), "answer_structure": answer.as_dict(),
+            "answer_text": __import__("server.v2.hybrid.reasoning", fromlist=["render_answer"]).render_answer(answer),
+            "debug_payload_version": "3.0.0",
             "trace": {"query_id": frame.query_id, "stages": stages, "bee_count": len(bee_results), "status": answer.status},
         }

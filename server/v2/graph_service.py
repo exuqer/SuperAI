@@ -382,7 +382,7 @@ class GraphDialogueService:
         self.query_operators = self.builder.query_operators
         self.gap_release_selector = GapReleaseSelector()
         self.hybrid = HybridDialoguePipeline()
-        self.workspace_mode = str(getattr(settings, "workspace_mode", "hybrid_shadow") or "hybrid_shadow")
+        self.reasoning_mode = "hybrid"
 
     def create(
         self,
@@ -1360,7 +1360,7 @@ class GraphDialogueService:
             started = perf_counter()
             sql_before, executes_before = database.metrics_snapshot()
             serialization_before = serialization_snapshot()
-            result = self._query(
+            result = self._build_hybrid_source(
                 hive_id, text, resolved_mode=resolved_mode
             )
             result = self._attach_hybrid_result(result, hive_id, text)
@@ -1386,22 +1386,70 @@ class GraphDialogueService:
             result["trace"] = trace
             return result
 
+    def _build_hybrid_source(
+        self,
+        hive_id: str,
+        text: str,
+        *,
+        resolved_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_text = str(text or "").strip()
+        if not normalized_text:
+            raise ValueError("text must not be empty")
+        if resolved_mode not in {None, "NEW_QUERY", "FOLLOW_UP", "CORRECTION"}:
+            raise ValueError("unsupported resolved_mode")
+        with self.repository.transaction() as conn:
+            row, state = self._load_row(conn, hive_id)
+        previous_graph, previous_bindings = self._previous(state)
+        if resolved_mode == "NEW_QUERY":
+            previous_graph, previous_bindings = None, ()
+        next_turn = int(state.get("turn_index") or 0) + 1
+        graph, analysis = self.builder.build(
+            normalized_text,
+            previous_graph=previous_graph,
+            previous_bindings=previous_bindings,
+            identity_context=f"{hive_id}:{next_turn}",
+            conversation_id=str(row["conversation_id"]),
+            turn_index=next_turn,
+        )
+        previous_hybrid = state.get("hybrid") or {}
+        return {
+            "message_id": stable_id("dialogue-turn", hive_id, next_turn),
+            "query_graph": graph.as_dict(),
+            "language_analysis": analysis,
+            "candidate_bindings": [],
+            "rejected_events": [],
+            "selected_bindings": [],
+            "binding_configuration": None,
+            "binding_configurations": [],
+            "selection_scope": "HYBRID",
+            "answer": None,
+            "trace": {"reasoning_mode": "hybrid", "hybrid_source": True},
+            "hive": {
+                "id": hive_id,
+                "conversation_id": str(row["conversation_id"]),
+                "max_cells": int(row["max_cells"]),
+                "status": "READY",
+            },
+            "_hybrid_context": {
+                "session_id": str(row["conversation_id"]),
+                "last_query_id": str((previous_hybrid.get("query_frame") or {}).get("query_id") or ""),
+                "last_query_frame": previous_hybrid.get("query_frame") or {},
+                "last_answer": previous_hybrid.get("answer_structure") or previous_hybrid.get("answer") or {},
+            },
+        }
+
     def _attach_hybrid_result(
         self,
         result: Dict[str, Any],
         hive_id: str,
         text: str,
     ) -> Dict[str, Any]:
-        """Run the bounded workspace in compatibility, shadow, or primary mode."""
-        mode = self.workspace_mode
-        if mode not in {"legacy_bee", "hybrid_shadow", "hybrid_primary", "hybrid_only"}:
-            mode = "hybrid_shadow"
-        if mode == "legacy_bee":
-            return result
+        """Attach the single authoritative hybrid result."""
         hive = result.get("hive") or {}
         conversation_id = str(hive.get("conversation_id") or "")
         indexes: list[dict[str, Any]] = []
-        previous_context: dict[str, Any] = {}
+        previous_context: dict[str, Any] = dict(result.get("_hybrid_context") or {})
         with self.repository.transaction() as conn:
             try:
                 indexes = graph_rows_from_connection(
@@ -1460,26 +1508,41 @@ class GraphDialogueService:
         )
         result["hybrid"] = hybrid
         result.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
-        result["trace"]["workspace_mode"] = mode
-        if mode in {"hybrid_primary", "hybrid_only"}:
-            answer = hybrid.get("answer") or {}
-            if answer.get("status") == "STABLE":
-                answer_text = str(hybrid.get("answer_text") or "").strip()
-                if answer_text and answer_text[-1:] not in {".", "!", "?"}:
-                    answer_text += "."
-                result["hybrid_answer"] = answer
-                primary_answer = result.setdefault("answer", {})
-                primary_answer.update({
-                    "status": "RESOLVED",
-                    "surface": answer_text,
-                    "short_answer": answer_text,
-                    "full_answer": answer_text,
-                    "chat_text": answer_text,
-                    "hybrid_primary": True,
-                    "hybrid_answer_structure": answer,
-                })
-            else:
-                result["trace"]["hybrid_fallback"] = "legacy_answer"
+        result["trace"]["reasoning_mode"] = self.reasoning_mode
+        answer = hybrid.get("answer_structure") or hybrid.get("answer") or {}
+        hybrid_status = str(answer.get("status") or "INSUFFICIENT_EVIDENCE")
+        public_status = {
+            "STABLE": "RESOLVED",
+            "AMBIGUOUS_RESULT": "AMBIGUOUS",
+            "CONFLICTING_EVIDENCE": "CONFLICTED",
+            "UNRESOLVED_CONTEXT": "UNRESOLVED",
+        }.get(hybrid_status, "UNRESOLVED")
+        answer_text = str(hybrid.get("answer_text") or "").strip() if public_status == "RESOLVED" else ""
+        if answer_text and answer_text[-1:] not in {".", "!", "?"}:
+            answer_text += "."
+        leader = (hybrid.get("resonance") or {}).get("leader") or {}
+        workspace = hybrid.get("workspace") or {}
+        supporting_events = leader.get("supporting_events") or []
+        result["hybrid_answer"] = answer
+        result["answer"] = {
+            "status": public_status,
+            "surface": answer_text or None,
+            "short_answer": answer_text or None,
+            "full_answer": answer_text or None,
+            "chat_text": answer_text or None,
+            "resolution_class": "HYBRID_RESOLVED" if public_status == "RESOLVED" else hybrid_status,
+            "validation": {
+                "valid": public_status == "RESOLVED",
+                "reason": None if public_status == "RESOLVED" else hybrid_status,
+            },
+            "provenance": {
+                "source_event_ids": list(supporting_events),
+                "evidence_ids": list(answer.get("evidence_ids") or []),
+                "independent_source_count": len(set(answer.get("evidence_ids") or [])),
+            },
+            "hybrid_answer_structure": answer,
+            "authoritative": True,
+        }
         try:
             with self.repository.transaction() as conn:
                 row = conn.execute("SELECT state_json FROM hives WHERE id=?", (hive_id,)).fetchone()
@@ -1487,9 +1550,17 @@ class GraphDialogueService:
                     state = decode(row["state_json"], {})
                     state.setdefault("trace", {})["hybrid"] = hybrid.get("trace")
                     state["hybrid"] = hybrid
+                    state["query_graph"] = result.get("query_graph")
+                    state["answer"] = result.get("answer")
+                    state["candidate_bindings"] = []
+                    state["selected_bindings"] = []
+                    state["binding_configuration"] = None
+                    state["turn_index"] = int(state.get("turn_index") or 0) + 1
                     conn.execute("UPDATE hives SET state_json=?,updated_at=? WHERE id=?", (encode(state), utcnow(), hive_id))
         except Exception:
             result["trace"]["hybrid_persistence"] = "FAILED"
+        result.pop("_hybrid_context", None)
+        result.pop("language_analysis", None)
         return result
 
     def _query(
@@ -1944,7 +2015,7 @@ class GraphDialogueService:
                 else "UNRESOLVED"
             )
         elif retrieval_mode == "INDEX_FALLBACK":
-            resolution_class = "FALLBACK_RESOLVED"
+            resolution_class = "INDEX_RESOLVED"
         elif retrieval_mode in {"SWARM_DIMENSIONAL", "SWARM_MIXED"}:
             resolution_class = (
                 "ROBUST_RESOLVED"

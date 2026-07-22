@@ -34,6 +34,8 @@ STOPWORDS = {
 NEGATION_WORDS = {"не", "ни", "никто", "ничего", "никогда", "нет"}
 CONTINUATION_WORDS = {"ещё", "еще", "другой", "другая", "другое", "другие", "кроме", "потом", "тогда"}
 RELATION_WORDS = {"внутри", "снаружи", "около", "рядом", "между", "после", "до", "под", "над", "в", "на"}
+CURRENT_WORDS = {"сейчас", "теперь", "ныне"}
+HISTORICAL_WORDS = {"сначала", "раньше", "ранее", "прежде"}
 
 
 def _normalise(text: str) -> str:
@@ -67,6 +69,8 @@ def _graph_known_elements(analysis: Any) -> list[str]:
         if not isinstance(node, Mapping):
             continue
         head = node.get("head") if isinstance(node.get("head"), Mapping) else {}
+        if _normalise(node.get("preposition")) in {"после", "до"}:
+            continue
         value = head.get("lemma") or node.get("lemma") or node.get("surface")
         if value and str(value) not in values:
             values.append(str(value))
@@ -76,6 +80,14 @@ def _graph_known_elements(analysis: Any) -> list[str]:
 def _graph_predicate(analysis: Any) -> Optional[str]:
     pattern = _analysis_query_graph(analysis)
     predicate = pattern.get("predicate") if isinstance(pattern.get("predicate"), Mapping) else {}
+    root_graph = analysis.get("query_graph") if isinstance(analysis, Mapping) and isinstance(analysis.get("query_graph"), Mapping) else analysis
+    operators = pattern.get("question_operators") or (root_graph.get("question_operators") if isinstance(root_graph, Mapping) else ()) or ()
+    if operators and isinstance(operators[0], Mapping):
+        surface = _normalise(operators[0].get("surface") or operators[0].get("question_lemma"))
+        token_index = int(operators[0].get("token_indices", [0])[0] or 0)
+        predicate_index = int(predicate.get("token_index") or 0)
+        if surface == "что" and predicate_index == token_index + 1:
+            return None
     value = predicate.get("lemma") or predicate.get("surface")
     return str(value) if value else None
 
@@ -101,21 +113,43 @@ def _graph_gap_constraints(analysis: Any, index: int) -> tuple[Mapping[str, Any]
         except (TypeError, ValueError):
             continue
         if score >= 0.5:
-            constraints.append({"type": "grammatical_feature", "feature": namespace, "value": value, "confidence": score})
+            constraints.append({"type": "GRAMMATICAL_FEATURE", "feature": namespace, "value": value,
+                                "scope": "CANDIDATE", "hardness": "SOFT", "confidence": score})
     return tuple(constraints)
 
 
 def _surface_gap_constraints(focus: str) -> tuple[Mapping[str, Any], ...]:
     return tuple(
-        {"type": "grammatical_feature", "feature": feature, "value": value, "confidence": 0.75}
+        {"type": "GRAMMATICAL_FEATURE", "feature": feature, "value": value,
+         "scope": "CANDIDATE", "hardness": "SOFT", "confidence": 0.75}
         for feature, value in QUESTION_FEATURE_CONSTRAINTS.get(focus, ())
     )
+
+
+def _constraint_groups(focuses: Sequence[str]) -> tuple[Mapping[str, Any], ...]:
+    constraints = []
+    for focus in focuses:
+        alternatives = QUESTION_FEATURE_CONSTRAINTS.get(focus, ())
+        if alternatives:
+            constraints.append({
+                "group_id": f"case_{focus}",
+                "mode": "ANY",
+                "constraints": [
+                    {"type": "GRAMMATICAL_FEATURE", "feature": feature,
+                     "value": value, "scope": "CANDIDATE", "hardness": "SOFT",
+                     "confidence": 0.75}
+                    for feature, value in alternatives
+                ],
+            })
+    return tuple(constraints)
 
 
 def _predicate(tokens: Sequence[str], analysis: Any = None) -> Optional[str]:
     graph_predicate = _graph_predicate(analysis)
     if graph_predicate:
         return graph_predicate
+    if _unknown_predicate_query(analysis) or (tokens and tokens[0] == "что" and len(tokens) > 1 and tokens[1] not in STOPWORDS):
+        return None
     for item in _analysis_tokens(analysis):
         pos = str(item.get("pos") or item.get("part_of_speech") or "").upper()
         lemma = str(item.get("lemma") or item.get("normalized") or "")
@@ -130,10 +164,26 @@ def _predicate(tokens: Sequence[str], analysis: Any = None) -> Optional[str]:
     return None
 
 
+def _unknown_predicate_query(analysis: Any) -> bool:
+    if not isinstance(analysis, Mapping):
+        return False
+    graph = analysis.get("query_graph") if isinstance(analysis.get("query_graph"), Mapping) else analysis
+    pattern = graph.get("event_pattern") if isinstance(graph, Mapping) and isinstance(graph.get("event_pattern"), Mapping) else {}
+    predicate = pattern.get("predicate") if isinstance(pattern.get("predicate"), Mapping) else {}
+    operators = graph.get("question_operators") if isinstance(graph, Mapping) else ()
+    if not operators or not isinstance(operators[0], Mapping):
+        return False
+    surface = _normalise(operators[0].get("surface") or operators[0].get("question_lemma"))
+    question_index = int((operators[0].get("token_indices") or [0])[0] or 0)
+    return surface == "что" and int(predicate.get("token_index") or 0) == question_index + 1
+
+
 def _known_elements(tokens: Sequence[str], question_tokens: Sequence[str], predicate: Optional[str]) -> list[str]:
     result: list[str] = []
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if token in question_tokens or token in STOPWORDS or token == predicate or len(token) < 2:
+            continue
+        if index and tokens[index - 1] in {"после", "до"}:
             continue
         if token not in result:
             result.append(token)
@@ -141,6 +191,8 @@ def _known_elements(tokens: Sequence[str], question_tokens: Sequence[str], predi
 
 
 def _query_type(focuses: Sequence[str], tokens: Sequence[str], predicate: Optional[str]) -> str:
+    if focuses and focuses[0] == "что" and predicate is None and len(tokens) > 1 and tokens[1] not in STOPWORDS:
+        return "event_predicate_question"
     if len(focuses) > 1:
         return "multi_gap_question"
     if not focuses:
@@ -172,6 +224,7 @@ def build_query_frame(
     question_tokens = [token for token in tokens if token in QUESTION_WORDS]
     focuses = [QUESTION_WORDS[token] for token in question_tokens]
     predicate = _predicate(tokens, analysis)
+    unknown_predicate = bool(focuses and focuses[0] == "что" and len(tokens) > 1 and tokens[1] not in STOPWORDS) or _unknown_predicate_query(analysis)
     graph_known = _graph_known_elements(analysis)
     known = graph_known or _known_elements(tokens, question_tokens, predicate)
     negations = [token for token in tokens if token in NEGATION_WORDS]
@@ -180,18 +233,19 @@ def build_query_frame(
         excluded_values += tokens[tokens.index("без") + 1:]
     gaps = []
     for index, focus in enumerate(focuses):
-        relation = next((token for token in tokens if token in RELATION_WORDS), None)
+        relation = next((token for token in tokens if token in RELATION_WORDS and token not in {"после", "до"}), None)
         gap_id = f"gap_{index + 1}_{query_id[-8:]}"
         gaps.append(Gap(
             gap_id=gap_id,
             source_query_id=query_id,
-            expected_type="quantity" if focus == "сколько" else "entity",
+            expected_type=("predicate" if unknown_predicate and focus == "что" else "quantity" if focus == "сколько" else "entity"),
             expected_relation=relation or ("predicate_attachment" if predicate else None),
             known_elements=tuple(known),
             surface_projection=focus,
             constraints=(
-                tuple({"type": "negation", "value": item} for item in negations)
-                + (_graph_gap_constraints(analysis, index) or _surface_gap_constraints(focus))
+                tuple({"type": "NEGATION", "value": item, "scope": "EVENT", "hardness": "HARD"} for item in negations)
+                + (({"type": "RELATION", "value": relation, "scope": "KNOWN_MEMBER", "hardness": "HARD", "confidence": 0.93},) if relation else ())
+                + (() if unknown_predicate else (_graph_gap_constraints(analysis, index) or _surface_gap_constraints(focus)))
             ),
             exclusions=tuple(excluded_values),
         ))
@@ -202,6 +256,18 @@ def build_query_frame(
             surface_projection="",
         ))
     continuation = bool(set(tokens) & CONTINUATION_WORDS)
+    temporal_scope = context.get("temporal_scope")
+    if not temporal_scope:
+        if set(tokens) & HISTORICAL_WORDS:
+            temporal_scope = {"kind": "HISTORICAL", "anchors": sorted(set(tokens) & HISTORICAL_WORDS)}
+        elif "после" in tokens or "до" in tokens:
+            temporal_scope = {
+                "kind": "RELATIVE",
+                "relation": "после" if "после" in tokens else "до",
+                "anchors": [tokens[index + 1] for index, value in enumerate(tokens[:-1]) if value in {"после", "до"}],
+            }
+        elif set(tokens) & CURRENT_WORDS or focuses:
+            temporal_scope = {"kind": "CURRENT", "anchors": sorted(set(tokens) & CURRENT_WORDS)}
     return QueryFrame(
         query_id=query_id,
         session_id=session_id or str(context.get("session_id") or ""),
@@ -212,10 +278,10 @@ def build_query_frame(
         surface_focus=focuses[0] if focuses else None,
         known_elements=tuple(known),
         gaps=tuple(gaps),
-        constraints=tuple({"type": "negation", "value": item} for item in negations),
+            constraints=tuple({"type": "NEGATION", "value": item, "scope": "EVENT", "hardness": "HARD"} for item in negations),
         negations=tuple(negations),
         exclusions=tuple(dict.fromkeys(excluded_values)),
-        temporal_scope=context.get("temporal_scope"),
+        temporal_scope=temporal_scope,
         continuation_of=(
             (
                 (str((analysis or {}).get("query_graph", {}).get("continuation_of") or "") if isinstance(analysis, Mapping) else "")
@@ -224,6 +290,23 @@ def build_query_frame(
             or None
         ) if continuation or _graph_known_elements(analysis) else None,
         confidence=clamp(0.92 if focuses else 0.35),
+        context_inheritance={
+            "mode": "ALLOW" if continuation else "BLOCK",
+            "source_query_id": None,
+            "inherited_elements": [],
+        },
+        predicate_hypotheses=tuple(
+            [{"type": "unknown_predicate_question", "confidence": 0.81}]
+            if unknown_predicate else ([{"type": "literal_predicate", "predicate": predicate, "confidence": 0.92}]
+            if predicate else [{"type": "unknown_predicate_question", "confidence": 0.81}])
+        ),
+        constraint_groups=_constraint_groups(focuses),
+        trace={
+            "query_type_reason": "question_focus_and_relation_anchors",
+            "known_elements": list(known),
+            "gap_count": len(gaps),
+            "predicate": predicate,
+        },
     )
 
 
@@ -261,16 +344,23 @@ def inherit_context(
         previous_values.extend(str(previous_answer.get(key)) for key in ("resolved_value", "surface_answer") if previous_answer.get(key))
         previous_values.extend(str(item) for item in previous_answer.get("resolved_values") or ())
         previous_values.extend(str(item) for item in (previous_answer.get("filled_gaps") or {}).values())
+        provenance = previous_answer.get("provenance") or {}
+        if isinstance(provenance, Mapping):
+            previous_values.extend(str(item) for item in (provenance.get("surface_forms") or {}).values())
     inherited_exclusions = list(query_frame.exclusions)
     if set(_tokens(query_frame.raw_text)) & {"ещё", "еще", "кроме", "другой", "другая", "другое", "другие"}:
         for value in previous_values:
             if value and value not in query_frame.exclusions:
                 inherited_exclusions.append(value)
+            normalized_value = _normalise(value) if value else ""
+            if normalized_value and normalized_value not in query_frame.exclusions:
+                inherited_exclusions.append(normalized_value)
     for item in previous_known:
         if item and item not in inherited:
             inherited.append(str(item))
     predicate = query_frame.explicit_predicate or (str(previous.get("explicit_predicate") or "") or None)
     unresolved = bool(continuation and not inherited and not predicate)
+    inheritance_mode = "UNRESOLVED" if unresolved else ("ALLOW" if continuation else "BLOCK")
     gaps = tuple(
         Gap(
             **{**gap.as_dict(), "known_elements": tuple(inherited), "exclusions": tuple(dict.fromkeys(list(gap.exclusions) + inherited_exclusions + list(previous.get("exclusions") or ())))}
@@ -285,5 +375,16 @@ def inherit_context(
         **{**query_frame.as_dict(), "explicit_predicate": predicate, "known_elements": tuple(inherited), "gaps": gaps,
            "continuation_of": query_frame.continuation_of or str(previous.get("query_id") or context.get("last_query_id") or "") or None,
            "exclusions": tuple(dict.fromkeys(inherited_exclusions)), "inherited_elements": inherited_records, "reconstructed_query": reconstructed,
-           "unresolved_context": unresolved, "confidence": clamp(query_frame.confidence * (0.92 if inherited else 0.4))}
+           "unresolved_context": unresolved, "confidence": clamp(query_frame.confidence * (0.92 if inherited else 0.4)),
+           "context_inheritance": {
+               "mode": inheritance_mode,
+               "source_query_id": str(previous.get("query_id") or context.get("last_query_id") or "") or None,
+               "inherited_elements": inherited_records,
+           },
+           "trace": {
+               **dict(query_frame.trace),
+               "context_inheritance": inheritance_mode,
+               "inherited_count": len(inherited_records),
+               "unresolved": unresolved,
+           }}
     )

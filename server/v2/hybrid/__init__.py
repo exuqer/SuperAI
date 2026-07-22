@@ -6,6 +6,7 @@ from .contracts import (
     BoundedAssociativeWorkspace,
     Candidate,
     Conflict,
+    EventCandidateConfiguration,
     Evidence,
     Gap,
     Hypothesis,
@@ -31,7 +32,7 @@ from .bees import BeeDispatcher, dispatch_bees
 __all__ = [
     "ActivationResult", "AnswerStructure", "BeeResult", "BeeTask",
     "BoundedAssociativeWorkspace", "Candidate", "Conflict", "Evidence",
-    "Gap", "Hypothesis", "QueryFrame", "RetrievalHit", "WorkspaceBudget",
+    "Gap", "Hypothesis", "EventCandidateConfiguration", "QueryFrame", "RetrievalHit", "WorkspaceBudget",
     "HybridDialoguePipeline", "build_query_frame", "inherit_context",
     "retrieve_direct", "spread_activation", "build_workspace",
     "DirectRetriever", "DirectRetrievalService",

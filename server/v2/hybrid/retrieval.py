@@ -140,6 +140,13 @@ def graph_rows_from_connection(
     pattern = query_graph.get("event_pattern") if isinstance(query_graph, Mapping) and isinstance(query_graph.get("event_pattern"), Mapping) else (query_graph or {})
     predicate = pattern.get("predicate") if isinstance(pattern, Mapping) and isinstance(pattern.get("predicate"), Mapping) else {}
     predicate_lemma = _norm(predicate.get("lemma") or predicate.get("surface"))
+    operators = query_graph.get("question_operators") if isinstance(query_graph, Mapping) else ()
+    if operators and isinstance(operators[0], Mapping):
+        surface = _norm(operators[0].get("surface") or operators[0].get("question_lemma"))
+        question_index = int((operators[0].get("token_indices") or [0])[0] or 0)
+        predicate_index = int(predicate.get("token_index") or 0)
+        if surface == "что" and predicate_index == question_index + 1:
+            predicate_lemma = ""
     known_nodes = pattern.get("known_nodes") if isinstance(pattern, Mapping) else ()
     known_constraints: list[tuple[str, str]] = []
     for node in known_nodes or ():

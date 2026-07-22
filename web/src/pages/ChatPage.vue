@@ -223,6 +223,12 @@
                 <span>{{ hybrid.workspace.evidence.length }} свидетельств</span>
               </article>
               <i>→</i>
+              <article class="hybrid-stage configuration-stage">
+                <small>CONFIGURATIONS</small>
+                <b>{{ hybrid.configurations?.length || hybrid.workspace.configurations?.length || 0 }}</b>
+                <span>{{ hybrid.hypotheses?.length || hybrid.workspace.hypotheses.length }} гипотез</span>
+              </article>
+              <i>→</i>
               <article class="hybrid-stage resonance-stage">
                 <small>RESONANCE</small>
                 <b>{{ hybrid.resonance.iterations }} итераций</b>
@@ -248,10 +254,10 @@
                 </div>
               </article>
               <article class="hybrid-cell">
-                <small>ПЧЁЛЫ</small>
-                <b>{{ hybrid.bee_decision.dispatch ? 'запущены' : 'не нужны' }}</b>
+                <small>ПОИСКОВЫЕ ПЧЁЛЫ</small>
+                <b>{{ hybrid.bee_dispatch?.dispatch || hybrid.bee_decision.dispatch ? 'запущены' : 'не нужны' }}</b>
                 <span v-if="hybrid.bee_decision.reasons.length">{{ hybrid.bee_decision.reasons.join(' · ') }}</span>
-                <span v-else>прямого evidence достаточно</span>
+                <span v-else>внутреннего evidence достаточно</span>
               </article>
             </div>
 
@@ -336,7 +342,6 @@
               <span>Поиск роем</span>
               <b :class="retrievalModeClass">{{ retrievalModeLabel(retrievalMode) }}</b>
             </div>
-            <p v-if="swarmFallbackReason" class="swarm-note">{{ fallbackLabel(swarmFallbackReason) }}</p>
             <div class="swarm-runs">
               <article v-for="(run, index) in swarmRuns" :key="run.id" class="swarm-run">
                 <span class="swarm-index">GAP {{ index + 1 }}</span>
@@ -462,7 +467,6 @@ const targetGaps = computed<GapNode[]>(() => {
 });
 const swarmRuns = computed(() => swarm.value?.gap_swarms || []);
 const retrievalMode = computed(() => swarm.value?.retrieval_mode || swarmRuns.value[0]?.retrieval_mode || 'DIRECT_EVENT_LOOKUP');
-const swarmFallbackReason = computed(() => swarm.value?.fallback_reason || swarmRuns.value[0]?.fallback_reason || '');
 const retrievalModeClass = computed(() => retrievalMode.value.toLowerCase().replace(/_/g, '-'));
 const hybridAnchors = computed(() => [
   ...(hybrid.value?.workspace.anchors || []),
@@ -542,16 +546,8 @@ function retrievalModeLabel(mode: string): string {
   return {
     SWARM_DIMENSIONAL: 'Размерный рой',
     SWARM_MIXED: 'Смешанный рой',
-    INDEX_FALLBACK: 'Индексный fallback',
     DIRECT_EVENT_LOOKUP: 'Прямой поиск',
   }[mode] || mode;
-}
-
-function fallbackLabel(reason: string): string {
-  return {
-    NO_ACTIVE_DIMENSIONS: 'Нет активных измерений — используется индекс событий.',
-    NO_EVENT_DIMENSION_PROJECTION: 'Измерения не проецируются в события — используется индекс событий.',
-  }[reason] || reason;
 }
 
 async function exportChatSpace(): Promise<void> {
